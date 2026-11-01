@@ -51,6 +51,10 @@ _Avoid_: 分盘任务、子任务
 从 DMM（图片、原始日文元数据）与 JavDB（演员、番号信息）取字段，再按需 AI 翻译成中文标题。
 _Avoid_: 爬取、抓取
 
+**加工** (Processing)：
+下载完成之后、入库之前的那段处理：刮削、生成 NFO、硬链接。失败统称加工失败，刮削失败只是其中一个 phase。
+_Avoid_: 处理、刮削（那只是加工的一个阶段）
+
 **入库** (Filed)：
 版本完成硬链接、NFO 与图片落盘的那一刻。任务级 tag 到此刻才从 `mdc:in-progress` 换成 `mdc:finished`。
 _Avoid_: 完成、处理完、scraped
