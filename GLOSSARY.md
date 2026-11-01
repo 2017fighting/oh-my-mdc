@@ -59,6 +59,10 @@ _Avoid_: 完成、处理完、scraped
 任务的元数据已存在时，新版本不联网、只做落盘。中文/破解版本「省去刮削」就是这条，判据是元数据存在与否，不是名称分类。
 _Avoid_: skip scrape、缓存命中
 
+**收编** (Adopt)：
+加种时发现同 infohash 种子已在 qBittorrent 里但没有项目 tag，于是补 tag 与 category、把它当作本项目的版本继续走流程的动作。savepath 不动，当作不是抢来的。
+_Avoid_: 抢占、合并、认领（那指 Claim）
+
 **旁路副作用** (Side effect)：
 入库之外的三件事：删清单项、刷新 Jellyfin、发 Telegram。各自带 pending 标记独立重试，失败不阻塞入库。
 _Avoid_: 后置任务、通知阶段
