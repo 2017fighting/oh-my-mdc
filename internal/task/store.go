@@ -74,10 +74,11 @@ func (s *Store) SaveCandidate(ctx context.Context, candidate Candidate) (bool, e
 		return false, nil
 	}
 
+	// 事件的 reason 说的是「这条版本从哪来」：定源走了哪条路，物证在这条时间线上。
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO task_event (movie_id, infohash, kind, to_state, phase, reason)
-		 VALUES ($1, $2, 'state_change', 'downloading', 'downloading', '发现磁力候选')`,
-		candidate.MovieID, candidate.Infohash,
+		 VALUES ($1, $2, 'state_change', 'downloading', 'downloading', $3)`,
+		candidate.MovieID, candidate.Infohash, discoveredReason(candidate.Source),
 	); err != nil {
 		return false, fmt.Errorf("task: 记版本创建事件: %w", err)
 	}
@@ -450,6 +451,14 @@ func scanVersion(row scanner) (Version, error) {
 		return Version{}, err
 	}
 	return version, nil
+}
+
+// discoveredReason 是版本创建事件的措辞：两条定源路径分开说，时间线才读得懂。
+func discoveredReason(source Source) string {
+	if source == SourceMTeamTorrent {
+		return "发现 M-Team 种子"
+	}
+	return "发现磁力候选"
 }
 
 func validateCandidate(candidate Candidate) error {

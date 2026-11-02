@@ -1,4 +1,4 @@
-// Package poll 是清单轮询循环：JavDB 想看清单 → 磁力定源 → 先落库 → 加种 → 置待删。
+// Package poll 是清单轮询循环：JavDB 想看清单 → 定源（M-Team 优先）→ 先落库 → 加种 → 置待删。
 //
 // 它是第一条真实流水线切片（规格 §6.1 的「建任务/版本」「定源」「加下载」「去重」
 // 「置待删」五行与 §6.2 的 poll 通道）：
@@ -6,6 +6,8 @@
 //   - 单飞：一轮 poll 先抢一把 pg_advisory_lock（专用连接），抢不到就跳过；
 //   - 门禁：三件套不齐或已暂停时零动作（面板那边整站只剩向导）；
 //   - 去重：任务已有版本就不再查源；同 infohash 已有版本行就零写入；
+//   - 定源：JavDB 有磁力才查 M-Team（限速意识）；M-Team 命中就取私有种子，
+//     取不到（未配置/禁用/搜索无果/取种失败）就**同轮降级** JavDB 磁力；
 //   - 顺序：版本行先以 add_pending=true 落库，qBittorrent 成功才清（ADR-0004）。
 //
 // 真正删清单项、刷 Jellyfin、发 Telegram 由旁路引擎执行（#26）：本包只入箱。
@@ -24,6 +26,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/pin"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -39,9 +42,6 @@ const DefaultInterval = 15 * time.Minute
 
 // GateCheckInterval 是「门禁还没开」时的探路节奏：配完向导不必等满一个 15 分钟周期。
 const GateCheckInterval = 30 * time.Second
-
-// 项目侧的标签词（规格 §7.2 的词表在 v1 只有「中文/破解」；磁力只能判中文）。
-const labelChinese = "中文"
 
 // Settings 是本循环对设置域的全部要求。
 type Settings interface {
@@ -62,6 +62,14 @@ type Adder interface {
 	Ensure(ctx context.Context, cfg qbittorrent.Config, torrent qbittorrent.Torrent) (qbittorrent.Outcome, error)
 }
 
+// Torrents 是 M-Team 取种接缝（真实实现是 mteam.Integration）。
+//
+// 只暴露「番号 → 一份私有种子」这一件事：搜索、选种、换链接、下载、算 infohash
+// 都是 M-Team 自己的事，poll 只决定**什么时候**问它（JavDB 有磁力且任务还没有版本）。
+type Torrents interface {
+	Resolve(ctx context.Context, apiKey, number string) (mteam.Torrent, error)
+}
+
 // Options 装配一个 poll 循环。
 type Options struct {
 	Store    *task.Store
@@ -69,6 +77,10 @@ type Options struct {
 	Settings Settings
 	Source   Source
 	Adder    Adder
+	// Torrents 是可选来源（M-Team）；nil 时定源只走 JavDB 磁力。
+	Torrents Torrents
+	// TorrentsDir 是 .torrent 备份目录；空则用 os.TempDir()/oh-my-mdc/torrents。
+	TorrentsDir string
 	// Pool 只用于 advisory lock 的专用连接；nil 时不做单飞（测试或单进程场景）。
 	Pool *pgxpool.Pool
 	// Loops 记循环健康位；nil 时只跑不记。
@@ -83,16 +95,18 @@ type Options struct {
 
 // Runner 是 poll 循环。
 type Runner struct {
-	store    *task.Store
-	outbox   *sidefx.Outbox
-	settings Settings
-	source   Source
-	adder    Adder
-	pool     *pgxpool.Pool
-	loops    *loops.Registry
-	logger   *slog.Logger
-	owner    string
-	now      func() time.Time
+	store       *task.Store
+	outbox      *sidefx.Outbox
+	settings    Settings
+	source      Source
+	adder       Adder
+	torrents    Torrents
+	torrentsDir string
+	pool        *pgxpool.Pool
+	loops       *loops.Registry
+	logger      *slog.Logger
+	owner       string
+	now         func() time.Time
 }
 
 // New 构造循环。
@@ -110,17 +124,24 @@ func New(opts Options) *Runner {
 		now = time.Now
 	}
 
+	torrentsDir := strings.TrimSpace(opts.TorrentsDir)
+	if torrentsDir == "" {
+		torrentsDir = defaultTorrentsDir()
+	}
+
 	return &Runner{
-		store:    opts.Store,
-		outbox:   opts.Outbox,
-		settings: opts.Settings,
-		source:   opts.Source,
-		adder:    opts.Adder,
-		pool:     opts.Pool,
-		loops:    opts.Loops,
-		logger:   logger,
-		owner:    owner,
-		now:      now,
+		store:       opts.Store,
+		outbox:      opts.Outbox,
+		settings:    opts.Settings,
+		source:      opts.Source,
+		adder:       opts.Adder,
+		torrents:    opts.Torrents,
+		torrentsDir: torrentsDir,
+		pool:        opts.Pool,
+		loops:       opts.Loops,
+		logger:      logger,
+		owner:       owner,
+		now:         now,
 	}
 }
 
@@ -138,6 +159,10 @@ type Result struct {
 	// Candidates 是新建的版本行数；Duplicates 是已存在（零写入）的候选数。
 	Candidates int
 	Duplicates int
+	// Torrents 是本轮 M-Team 取种成功（落成 mteam_torrent 版本）的条数。
+	Torrents int
+	// Fallbacks 是本轮「M-Team 启用但取不到」而降级磁力的次数（禁用不算，那根本没有尝试）。
+	Fallbacks int
 	// Added 是这一轮加种成功（含收编/已存在）的版本数。
 	Added int
 }
@@ -201,7 +226,8 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 		}
 		r.logger.Debug("poll 循环结束",
 			"scanned", result.Scanned, "queried", result.Queried,
-			"candidates", result.Candidates, "added", result.Added, "err", err)
+			"candidates", result.Candidates, "torrents", result.Torrents,
+			"fallbacks", result.Fallbacks, "added", result.Added, "err", err)
 	}
 	return result, err
 }
@@ -234,6 +260,7 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	}
 	token := javdbInput.Text("token")
 	qbtConfig := qbittorrent.ConfigFrom(qbtInput)
+	access := r.newMTeamAccess(ctx, snapshot)
 
 	var result Result
 	var errs []error
@@ -271,9 +298,11 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 		best, ok := pin.Select(magnets)
 		if !ok {
 			// P7-3：磁力为空 → 零行落库，下轮重查。
+			// 顺带一提，M-Team 也是到这里才考虑查的（限速意识：JavDB 没有就不问 M-Team）。
 			continue
 		}
 
+		// 先摆好磁力兜底的形状（规格 §6.1 定源行）：M-Team 任何一步失败都落它。
 		candidate := task.Candidate{
 			MovieID:  item.MovieID,
 			Number:   item.Number,
@@ -284,6 +313,29 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 			Label:    labelFor(best),
 			Payload:  appapi.MagnetLink(best.Hash, item.Number),
 		}
+		size := best.SizeMiB
+
+		var fallbackReason string
+		if access.enabled {
+			// M-Team 优先（P5-2）：命中就只走种子这一条，不再落磁力版本。
+			torrent, sourceErr := access.prepare(ctx, item.Number)
+			if sourceErr != nil {
+				// 降级（P5-3）：同轮落磁力版本。
+				result.Fallbacks++
+				if mteam.IsNotFound(sourceErr) {
+					// M-Team 上没有这部片是答案，不是故障：降级但不留告警红字。
+					r.logger.Debug("M-Team 没有这部片，走磁力", "movie_id", item.MovieID, "number", item.Number)
+				} else {
+					fallbackReason = sourceErr.Error()
+					r.logger.Warn("M-Team 取种失败，降级 JavDB 磁力",
+						"movie_id", item.MovieID, "number", item.Number, "err", sourceErr)
+				}
+			} else {
+				candidate = candidateFromTorrent(item, list.ListID, torrent)
+				size = bytesToMiB(torrent.torrent.SizeBytes)
+			}
+		}
+
 		inserted, err := r.store.SaveCandidate(ctx, candidate)
 		if err != nil {
 			errs = append(errs, err)
@@ -296,7 +348,14 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 		}
 
 		result.Candidates++
-		sizes[best.Hash] = best.SizeMiB
+		sizes[candidate.Infohash] = size
+		if candidate.Delivery == task.DeliveryTorrent {
+			result.Torrents++
+			continue
+		}
+		if fallbackReason != "" {
+			r.recordMTeamFallback(ctx, candidate, fallbackReason)
+		}
 	}
 
 	// 先落库再加种：到这里本轮所有候选都已落库，接下来统一加种（含上轮遗留的 pending）。
@@ -348,18 +407,18 @@ func (r *Runner) addOne(ctx context.Context, version task.Version, cfg qbittorre
 	unlock := r.store.Lock(version.Infohash)
 	defer unlock()
 
-	outcome, err := r.adder.Ensure(ctx, cfg, qbittorrent.Torrent{
-		Hash:     version.Infohash,
-		Magnet:   version.Payload,
-		Number:   version.Number,
-		SavePath: cfg.DownloadRoot, // 显式 savepath（P7-2）；不设 autoTMM
-	})
+	delivery, err := deliveryFor(version, cfg)
+	if err != nil {
+		// 交付形态的材料没了（私种的备份路径读不到）：保留 pending、下轮再试，
+		// 并把原因写进时间线——静默重试会让面板上只剩一个永远不动的「下载中」。
+		r.abandonAdd(ctx, version, err.Error())
+		return false, fmt.Errorf("poll: 准备加种材料 %s: %w", version.Infohash, err)
+	}
+
+	outcome, err := r.adder.Ensure(ctx, cfg, delivery)
 	if err != nil {
 		// 加种失败：保留 add_pending，放掉租约，记一条告警，下轮重试。
-		if releaseErr := r.store.Release(ctx, version.Infohash, r.owner); releaseErr != nil {
-			r.logger.Error("poll: 释放失败版本的租约失败", "infohash", version.Infohash, "err", releaseErr)
-		}
-		r.recordAlert(ctx, version, fmt.Sprintf("加种失败：%v", err))
+		r.abandonAdd(ctx, version, fmt.Sprintf("加种失败：%v", err))
 		return false, fmt.Errorf("poll: 加种 %s: %w", version.Infohash, err)
 	}
 
@@ -403,6 +462,14 @@ func (r *Runner) addOne(ctx context.Context, version task.Version, cfg qbittorre
 	return true, nil
 }
 
+// abandonAdd 放弃这一次加种：放回租约、记一条告警，保留 add_pending 等下轮重试。
+func (r *Runner) abandonAdd(ctx context.Context, version task.Version, reason string) {
+	if err := r.store.Release(ctx, version.Infohash, r.owner); err != nil {
+		r.logger.Error("poll: 释放失败版本的租约失败", "infohash", version.Infohash, "err", err)
+	}
+	r.recordAlert(ctx, version, reason)
+}
+
 // recordAlert 记一条失败事件（时间线 + 后续告警判据都靠它）。
 func (r *Runner) recordAlert(ctx context.Context, version task.Version, reason string) {
 	if err := r.store.AppendEvent(ctx, task.Event{
@@ -413,6 +480,88 @@ func (r *Runner) recordAlert(ctx context.Context, version task.Version, reason s
 		Reason:   reason,
 	}); err != nil {
 		r.logger.Error("poll: 记加种失败事件失败", "infohash", version.Infohash, "err", err)
+	}
+}
+
+// stashedTorrent 是取种 + 落盘之后的产物：字节已经有一份在盘上，payload 存它的路径。
+type stashedTorrent struct {
+	torrent mteam.Torrent
+	path    string
+}
+
+// mteamAccess 是「这一轮要不要问 M-Team」的惰性判据。
+//
+// 门禁用设置快照判定（P5-1：未配置/禁用 → 零调用），api key 只在真的要用时才读：
+// 大多数轮里清单项都已有版本，没必要每轮把凭据从设置域读出来。
+type mteamAccess struct {
+	runner  *Runner
+	ctx     context.Context
+	enabled bool
+
+	loaded bool
+	key    string
+	err    error
+}
+
+// newMTeamAccess 按设置快照构造这一轮的 M-Team 判据。
+func (r *Runner) newMTeamAccess(ctx context.Context, snapshot settings.Snapshot) *mteamAccess {
+	section, ok := snapshot.Sections["mteam"]
+	enabled := r.torrents != nil && ok && section.Configured && section.Enabled != nil && *section.Enabled
+	return &mteamAccess{runner: r, ctx: ctx, enabled: enabled}
+}
+
+// prepare 取一条种子并把它落到备份路径（规格 §5.2）。
+//
+// 配置读不出来（已启用却没 key 或设置域出问题）与取种失败同样处理：都降级磁力，
+// 但原因会写进任务时间线 —— 否则「为什么这部片走的是磁力」在面板上无从追溯。
+func (a *mteamAccess) prepare(ctx context.Context, number string) (stashedTorrent, error) {
+	key, err := a.apiKey()
+	if err != nil {
+		return stashedTorrent{}, err
+	}
+	torrent, err := a.runner.torrents.Resolve(ctx, key, number)
+	if err != nil {
+		return stashedTorrent{}, err
+	}
+	path, err := stashTorrent(a.runner.torrentsDir, torrent.Infohash, torrent.Bytes)
+	if err != nil {
+		return stashedTorrent{}, err
+	}
+	return stashedTorrent{torrent: torrent, path: path}, nil
+}
+
+// apiKey 读一次 api key，并把这一轮的结果缓存下来。
+func (a *mteamAccess) apiKey() (string, error) {
+	if a.loaded {
+		return a.key, a.err
+	}
+	a.loaded = true
+
+	input, err := a.runner.settings.Input(a.ctx, "mteam")
+	if err != nil {
+		a.err = fmt.Errorf("读 M-Team 设置失败: %w", err)
+		return a.key, a.err
+	}
+	a.key = strings.TrimSpace(input.Text("api_key"))
+	if a.key == "" {
+		a.err = errors.New("M-Team 已启用但 api_key 为空")
+	}
+	return a.key, a.err
+}
+
+// recordMTeamFallback 把 M-Team 的失败记成一条告警事件（面板时间线看得到）。
+//
+// 它不把一轮 poll 判成失败：降级是设计好的路径，M-Team 挂了不该让循环健康位变红。
+// 但它必须留下痕迹——否则「为什么这部片走的是磁力」在面板上无从追溯。
+func (r *Runner) recordMTeamFallback(ctx context.Context, candidate task.Candidate, reason string) {
+	if err := r.store.AppendEvent(ctx, task.Event{
+		MovieID:  candidate.MovieID,
+		Infohash: candidate.Infohash,
+		Kind:     task.EventAlert,
+		Phase:    string(task.PhaseDownloading),
+		Reason:   "M-Team 定源失败，已降级 JavDB 磁力：" + reason,
+	}); err != nil {
+		r.logger.Error("poll: 记 M-Team 降级事件失败", "movie_id", candidate.MovieID, "err", err)
 	}
 }
 
@@ -443,9 +592,11 @@ func wantWatchList(snapshot settings.Snapshot) (settings.ListEntry, bool) {
 }
 
 // labelFor 是版本 label 的 best-effort 取值：磁力只带 cnsub，判得出「中文」。
+//
+// 词表只有一份定义（mteam.LabelChinese）：两条定源路径的 label 必须落在同一个词上。
 func labelFor(magnet appapi.Magnet) string {
 	if magnet.Cnsub {
-		return labelChinese
+		return mteam.LabelChinese
 	}
 	return ""
 }

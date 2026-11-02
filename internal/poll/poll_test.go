@@ -11,6 +11,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
+	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -85,6 +86,22 @@ func (f *fakeAdder) Ensure(_ context.Context, cfg qbittorrent.Config, torrent qb
 	return f.outcome, nil
 }
 
+type fakeTorrents struct {
+	calls   []string
+	keys    []string
+	torrent mteam.Torrent
+	err     error
+}
+
+func (f *fakeTorrents) Resolve(_ context.Context, apiKey, number string) (mteam.Torrent, error) {
+	f.calls = append(f.calls, number)
+	f.keys = append(f.keys, apiKey)
+	if f.err != nil {
+		return mteam.Torrent{}, f.err
+	}
+	return f.torrent, nil
+}
+
 // ------------------------------------------------------------------ fixture
 
 type fixture struct {
@@ -92,8 +109,11 @@ type fixture struct {
 	store    *task.Store
 	source   *fakeSource
 	adder    *fakeAdder
+	torrents *fakeTorrents
 	settings *fakeSettings
 	runner   *poll.Runner
+	// torrentsDir 是 .torrent 备份目录（每个 fixture 一个临时目录）。
+	torrentsDir string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -108,26 +128,32 @@ func newFixture(t *testing.T) *fixture {
 
 	source := &fakeSource{magnets: map[string][]appapi.Magnet{}}
 	adder := &fakeAdder{}
+	torrents := &fakeTorrents{}
 	settingsFake := readySettings()
 
+	torrentsDir := t.TempDir()
 	store := task.NewStore(database.Pool())
 	runner := poll.New(poll.Options{
-		Store:    store,
-		Outbox:   sidefx.New(database.Pool()),
-		Settings: settingsFake,
-		Source:   source,
-		Adder:    adder,
-		Pool:     database.Pool(),
-		Owner:    "test-owner",
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:       store,
+		Outbox:      sidefx.New(database.Pool()),
+		Settings:    settingsFake,
+		Source:      source,
+		Adder:       adder,
+		Torrents:    torrents,
+		TorrentsDir: torrentsDir,
+		Pool:        database.Pool(),
+		Owner:       "test-owner",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return &fixture{
-		database: database,
-		store:    store,
-		source:   source,
-		adder:    adder,
-		settings: settingsFake,
-		runner:   runner,
+		database:    database,
+		store:       store,
+		source:      source,
+		adder:       adder,
+		torrents:    torrents,
+		settings:    settingsFake,
+		runner:      runner,
+		torrentsDir: torrentsDir,
 	}
 }
 

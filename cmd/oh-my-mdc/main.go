@@ -20,6 +20,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
@@ -64,6 +65,7 @@ func run(logger *slog.Logger) error {
 	var pinger server.Pinger
 	var settingsStore *settings.Store
 	var javdbIntegration *javdb.Integration
+	var mteamIntegration *mteam.Integration
 	var qbtIntegration *qbittorrent.Integration
 	var jellyfinIntegration *jellyfin.Integration
 	var taskStore *task.Store
@@ -76,6 +78,8 @@ func run(logger *slog.Logger) error {
 
 		// JavDB 集成门面：既是设置域的「测试读取」实现，也是向导探测/代建清单的客户端。
 		javdbIntegration = javdb.New(javdb.Options{})
+		// M-Team 集成门面：设置域的「测试检索」实现 + poll 的取种来源（可选集成）。
+		mteamIntegration = mteam.New(mteam.Options{})
 		// qBittorrent 集成门面：设置域的「测试连接」实现 + 向导的 autorun 对比/落地。
 		qbtIntegration = qbittorrent.New(qbittorrent.Options{})
 		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（sidefx 票接线）。
@@ -87,7 +91,8 @@ func run(logger *slog.Logger) error {
 		settingsStore = settings.NewStore(database.Pool(),
 			settings.WithTester("javdb", javdbIntegration),
 			settings.WithTester("qbittorrent", qbtIntegration),
-			settings.WithTester("jellyfin", jellyfinIntegration))
+			settings.WithTester("jellyfin", jellyfinIntegration),
+			settings.WithTester("mteam", mteamIntegration))
 
 		// 读设置是启动顺序的一环（规格 §4.4）：这一次读失败说明设置域不可用，
 		// 与迁移失败同等对待——照常监听，但 /readyz 回 503 带原因。
@@ -107,6 +112,8 @@ func run(logger *slog.Logger) error {
 					Settings: settingsStore,
 					Source:   javdbIntegration,
 					Adder:    qbtIntegration,
+					// M-Team 是可选来源：未配置/禁用时 poll 自己不会问它（P5-1）。
+					Torrents: mteamIntegration,
 					Pool:     database.Pool(),
 					Loops:    loopsRegistry,
 					Logger:   logger,
