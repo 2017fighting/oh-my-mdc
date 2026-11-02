@@ -51,9 +51,6 @@ const GateCheckInterval = 30 * time.Second
 // 它是常量而不是设置项（规格 §6.1：常量 60 分钟，非设置项）。
 const StallAfter = 60 * time.Minute
 
-// stallReasonPrefix 是停滞告警的固定开头：告警「只发一次」的判据按它查 task_event。
-const stallReasonPrefix = "下载停滞"
-
 // 下载阶段的失败原因（规格 §6.1 原文）。面板直译 phase + reason，所以这里就是用户看到的那句话。
 const (
 	ReasonSeedGone     = "种子已从 qBittorrent 移除"
@@ -528,7 +525,7 @@ func (r *Runner) fail(ctx context.Context, version task.Version, reason string) 
 // 「只发一次」的判据在 task_event（GLOSSARY「任务事件」）：重启后同一条版本不会再发。
 // 返回本次是否真的发了（已发过 → false，调用方不要把这一轮算成停滞）。
 func (r *Runner) alertStall(ctx context.Context, version task.Version, progress float64, elapsed time.Duration) (bool, error) {
-	alerted, err := r.store.HasAlert(ctx, version.Infohash, stallReasonPrefix)
+	alerted, err := r.store.HasAlert(ctx, version.Infohash, task.StallReasonPrefix)
 	if err != nil {
 		return false, err
 	}
@@ -536,7 +533,7 @@ func (r *Runner) alertStall(ctx context.Context, version task.Version, progress 
 		return false, nil
 	}
 
-	reason := fmt.Sprintf("%s：进度 %d%%，已 %d 分钟未动", stallReasonPrefix, int(progress*100), int(elapsed.Minutes()))
+	reason := fmt.Sprintf("%s：进度 %d%%，已 %d 分钟未动", task.StallReasonPrefix, int(progress*100), int(elapsed.Minutes()))
 	if err := r.store.AppendEvent(ctx, task.Event{
 		MovieID:  version.MovieID,
 		Infohash: version.Infohash,

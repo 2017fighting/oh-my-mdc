@@ -190,3 +190,57 @@ func toEventBody(event task.Event) taskEventBody {
 		At:        event.At,
 	}
 }
+
+// attentionBody 是 GET /api/attention 的回执（面板「需要人工」区的任务侧两半）。
+type attentionBody struct {
+	OK      bool            `json:"ok"`
+	Failed  []attentionItem `json:"failed"`
+	Stalled []attentionItem `json:"stalled"`
+}
+
+// attentionItem 是「需要人工」区的一行：失败的版本或停滞的下载。
+type attentionItem struct {
+	MovieID  string    `json:"movie_id"`
+	Number   string    `json:"number"`
+	Infohash string    `json:"infohash"`
+	Phase    string    `json:"phase,omitempty"`
+	Reason   string    `json:"reason"`
+	At       time.Time `json:"at"`
+}
+
+// attention 返回「需要人工」区的任务侧两半（规格 §8.2）。
+//
+// 驻留副作用不在这里：它属于副作用域，面板用 GET /api/side-effects?state=stuck
+// 拼进同一个区，两边的行各带自己的操作（重发 / 看任务）。
+func (s *server) attention(w http.ResponseWriter, r *http.Request) {
+	store, ok := s.tasksStore(w)
+	if !ok {
+		return
+	}
+
+	attention, err := store.Attention(r.Context(), 50)
+	if err != nil {
+		s.writeTaskError(w, err)
+		return
+	}
+
+	body := attentionBody{OK: true, Failed: []attentionItem{}, Stalled: []attentionItem{}}
+	for _, item := range attention.Failed {
+		body.Failed = append(body.Failed, toAttentionItem(item))
+	}
+	for _, item := range attention.Stalled {
+		body.Stalled = append(body.Stalled, toAttentionItem(item))
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func toAttentionItem(item task.AttentionItem) attentionItem {
+	return attentionItem{
+		MovieID:  item.MovieID,
+		Number:   item.Number,
+		Infohash: item.Infohash,
+		Phase:    item.Phase,
+		Reason:   item.Reason,
+		At:       item.At,
+	}
+}

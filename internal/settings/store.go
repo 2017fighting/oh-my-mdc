@@ -508,6 +508,17 @@ func (s Snapshot) GateReason() string {
 	return ""
 }
 
+// MaxAttempts 读 app_config.max_attempts（副作用引擎的自动重试上限）。
+//
+// fallback 是读不到时的兜底：与 Interval 同理，类型断言只写这一处，
+// 免得每条循环各写一遍 Sections["app"].Data[...]。
+func (s Snapshot) MaxAttempts(fallback int) int {
+	if value, ok := s.Sections["app"].Data["max_attempts"].(int); ok && value > 0 {
+		return value
+	}
+	return fallback
+}
+
 // Interval 读 app_config 里的一条间隔（poll_interval / reconcile_interval / sidefx_interval）。
 //
 // fallback 是读不到时的兜底：调用方给的默认值与表默认值一致（规格 §4.3）。

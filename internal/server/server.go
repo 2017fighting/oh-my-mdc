@@ -57,7 +57,8 @@ type Options struct {
 	Qbt *qbittorrent.Integration
 	// Tasks 是任务域读模型（/api/tasks、/api/overview counts）；nil 时这些端点回 503。
 	Tasks *task.Store
-	// Sidefx 是副作用出箱（overview 的「需人工」要把驻留待办算进去）；nil 时按 0 计。
+	// Sidefx 是副作用出箱（overview 的「需人工」要把驻留待办算进去；/api/side-effects 也走它）。
+	// nil 时 overview 按 0 计，副作用端点回 503 db_unavailable。
 	Sidefx *sidefx.Outbox
 	// Loops 是三条循环的进程内健康位；nil 时 overview 的 loops 全空。
 	Loops *loops.Registry
@@ -115,6 +116,9 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/hooks/qbt", s.qbtHook)
 	mux.HandleFunc("GET /api/tasks", s.tasksList)
 	mux.HandleFunc("GET /api/tasks/{movie_id}", s.taskDetail)
+	mux.HandleFunc("GET /api/attention", s.attention)
+	mux.HandleFunc("GET /api/side-effects", s.sideEffectsList)
+	mux.HandleFunc("POST /api/side-effects/{id}/retry", s.sideEffectRetry)
 	mux.HandleFunc("GET /api/config/{section}", s.configSection)
 	mux.HandleFunc("PATCH /api/config/{section}", s.patchSection)
 	mux.HandleFunc("DELETE /api/config/{section}", s.deleteSection)
@@ -248,4 +252,15 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+// decodeJSONObject 把一个 JSON 对象解成 map；解不出来时回 ok=false。
+//
+// 它只服务「透出自写的 payload」这一处：坏数据不该把一个只读端点变成 500。
+func decodeJSONObject(raw []byte) (map[string]any, bool) {
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil || decoded == nil {
+		return nil, false
+	}
+	return decoded, true
 }

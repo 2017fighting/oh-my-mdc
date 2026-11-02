@@ -133,6 +133,20 @@ func (i *Integration) CreateList(ctx context.Context, token, name, description s
 	return i.client(token).CreateList(ctx, name, description)
 }
 
+// RemoveFromList 把一部作品移出清单（规格 §5.1 的写侧；list_removal 的唯一执行路径）。
+//
+// 只有它需要 token：读清单匿名可读（P16-1），写清单不行。token 为空时本地就报
+// business，不空打一次上游换回一个 auth。
+//
+// 幂等：实测重复 remove 回 success:1（#16），所以「删成功但没落库」的下一次尝试
+// 会直接成功，不需要额外的去重记录。
+func (i *Integration) RemoveFromList(ctx context.Context, token, listID, movieID string) error {
+	if strings.TrimSpace(token) == "" {
+		return &appapi.ValidationError{Message: "还没保存 JavDB token"}
+	}
+	return i.client(token).RemoveFromList(ctx, listID, movieID)
+}
+
 // classify 把一次上游错误翻成 settings 的稳定机器码（规格 §8.4 的测试错误码）。
 //
 // 分类本身由 appapi.Classify 单点决定（与 /api/javdb/* 的 HTTP 错误共用一套）；

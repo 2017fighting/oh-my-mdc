@@ -317,6 +317,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `GET /api/tasks/{movie_id}` | 任务 + 版本列表 + 最近事件（抽屉数据） |
 | `POST /api/tasks/{movie_id}/retry` | `{force: bool=false}`，语义照 §6.1 人工重试行 |
 | `GET /api/events?movie_id=&limit=` | 事件时间线 |
+| `GET /api/attention` | 「需要人工」区的任务侧两半（#26 落地 §8.2 时新增）：`{failed:[{movie_id,number,infohash,phase,reason,at}], stalled:[…]}`；驻留副作用由下面那一条提供 |
 | `GET /api/side-effects?state=pending\|stuck` | 副作用队列（stuck = §4.2 驻留） |
 | `POST /api/side-effects/{id}/retry` | 人工重发（清驻留、重排 next_attempt_at） |
 | `GET /api/hooks/qbt?ih=<hex>` | qbt autorun 回调；恒 200；未知 ih 静默 no-op（§5.4） |

@@ -100,6 +100,23 @@ func (s *Store) TaskHasVersion(ctx context.Context, movieID string) (bool, error
 	return exists, nil
 }
 
+// Number 读一个任务的番号。
+//
+// 旁路引擎用它给待办补番号：番号是媒体库目录名（规格 §7.2），而 side_effect 的
+// payload 未必带它（早先入箱的待办、或由别的票入箱的待办）。
+func (s *Store) Number(ctx context.Context, movieID string) (string, error) {
+	var number string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT number FROM task WHERE movie_id = $1`, movieID,
+	).Scan(&number); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrTaskNotFound
+		}
+		return "", fmt.Errorf("task: 读任务 %s 的番号: %w", movieID, err)
+	}
+	return number, nil
+}
+
 // Claim 给一条指定版本上租约。抢不到（别人拿着未过期的租约）返回 ErrClaimLost。
 func (s *Store) Claim(ctx context.Context, infohash, owner string) (Version, error) {
 	return s.claim(ctx, infohash, owner)

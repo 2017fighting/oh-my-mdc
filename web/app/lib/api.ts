@@ -142,6 +142,49 @@ export type TaskDetail = {
   events: TaskEvent[];
 };
 
+/** 副作用的三种 kind（规格 §4.2）。 */
+export type SideEffectKind = "list_removal" | "jellyfin_refresh" | "notify";
+
+/** 副作用队列的两个筛选（规格 §8.4）：pending = 排队中，stuck = 驻留（需人工）。 */
+export type SideEffectState = "pending" | "stuck";
+
+/** 一条待办：面板的「需要人工」区与底部副作用队列读它。 */
+export type SideEffect = {
+  id: number;
+  kind: SideEffectKind;
+  /** list_removal 是 "<list_id>:<movie_id>"，jellyfin_refresh 是 movie_id，notify 是 "<event>:<infohash>"。 */
+  target_key: string;
+  /** 入箱时写的上下文（番号/标签/清单 id）：面板用它说清这一条在做什么。 */
+  payload: Record<string, unknown>;
+  attempts: number;
+  last_error?: string;
+  next_attempt_at: string | null;
+  /** 驻留＝需人工（done_at IS NULL 且 next_attempt_at 为 NULL）。 */
+  stuck: boolean;
+};
+
+export type SideEffectList = {
+  ok: boolean;
+  side_effects: SideEffect[];
+};
+
+/** 「需要人工」区的一行（任务侧）：失败（phase + reason）或停滞。 */
+export type AttentionItem = {
+  movie_id: string;
+  number: string;
+  infohash: string;
+  /** 仅失败行有值：失败发生在哪一步。 */
+  phase?: "downloading" | "scrape" | "organize";
+  reason: string;
+  at: string;
+};
+
+export type Attention = {
+  ok: boolean;
+  failed: AttentionItem[];
+  stalled: AttentionItem[];
+};
+
 /** autorun 改写的前后对比：GET 只读预览，POST 是人工确认后的落地。 */
 export type AutorunPlan = {
   ok: boolean;
@@ -219,6 +262,19 @@ export const api = {
 
   /** 抽屉数据：任务 + 版本列表 + 最近事件。 */
   task: (movieID: string) => request<TaskDetail>(`/api/tasks/${encodeURIComponent(movieID)}`),
+
+  /** 「需要人工」区的任务侧两半：失败版本与停滞下载（规格 §8.2）。 */
+  attention: () => request<Attention>("/api/attention"),
+
+  /** 副作用队列；不传 state 即全部未完成（规格 §8.4）。 */
+  sideEffects: (state?: SideEffectState) =>
+    request<SideEffectList>(`/api/side-effects${state ? `?state=${state}` : ""}`),
+
+  /** 人工重发：清驻留、重排；执行仍归 sidefx 循环。 */
+  retrySideEffect: (id: number) =>
+    request<{ ok: boolean; side_effect: SideEffect }>(`/api/side-effects/${id}/retry`, {
+      method: "POST",
+    }),
 
   /** 探测用户自建的清单（向导「读取已有清单」）。 */
   javdbLists: () => request<{ ok: boolean; lists: JavDBList[] }>("/api/javdb/lists"),

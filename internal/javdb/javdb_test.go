@@ -205,3 +205,62 @@ func TestCreateListReturnsNewID(t *testing.T) {
 		t.Errorf("id = %q, want e8r1OM", id)
 	}
 }
+
+// TestRemoveFromListSendsLiteralRemove 钉住写侧的传输面：form 里的 name 是常量 remove，
+// 作品是 movie_id（服务端对未知 name 默认执行 remove —— 这条路径不许猜）。
+func TestRemoveFromListSendsLiteralRemove(t *testing.T) {
+	var (
+		gotMethod string
+		gotName   string
+		gotMovie  string
+	)
+	srv := fakeJavDB(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v1/lists/e8r1OM/movie_actions": func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			gotName = r.PostForm.Get("name")
+			gotMovie = r.PostForm.Get("movie_id")
+			_, _ = w.Write([]byte(env(`null`)))
+		},
+	})
+	integration := New(Options{Host: srv.URL})
+
+	if err := integration.RemoveFromList(context.Background(), "tk", "e8r1OM", "YwrO3B"); err != nil {
+		t.Fatalf("RemoveFromList: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %s, want POST", gotMethod)
+	}
+	if gotName != "remove" {
+		t.Errorf("name = %q, want remove", gotName)
+	}
+	if gotMovie != "YwrO3B" {
+		t.Errorf("movie_id = %q, want YwrO3B", gotMovie)
+	}
+}
+
+// TestRemoveFromListWithoutTokenDoesNotCallUpstream：写侧要 token，缺了就在本地报 business，
+// 不空打一次上游换回一个 auth（与 Lists 的判据一致）。
+func TestRemoveFromListWithoutTokenDoesNotCallUpstream(t *testing.T) {
+	calls := 0
+	srv := fakeJavDB(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v1/lists/e8r1OM/movie_actions": func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			_, _ = w.Write([]byte(env(`null`)))
+		},
+	})
+	integration := New(Options{Host: srv.URL})
+
+	err := integration.RemoveFromList(context.Background(), " ", "e8r1OM", "YwrO3B")
+	if err == nil {
+		t.Fatal("缺 token 应该报错")
+	}
+	if appapi.Classify(err) != appapi.CodeBusiness {
+		t.Errorf("分类 = %q, want business", appapi.Classify(err))
+	}
+	if calls != 0 {
+		t.Errorf("发出去 %d 个请求，want 0", calls)
+	}
+}

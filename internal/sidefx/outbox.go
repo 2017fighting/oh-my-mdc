@@ -1,12 +1,16 @@
-// Package sidefx 拥有副作用出箱表：删清单项 / 刷 Jellyfin / 发 Telegram（ADR-0005，规格 §4.2）。
+// Package sidefx 拥有旁路副作用：出箱表与执行引擎（ADR-0005，规格 §4.2/§5.5/§6.2）。
 //
-// 本包当前只做「入箱」：任务流程结束时把待办写进 side_effect，失败不阻塞任务本身。
-// 执行器（按 kind 重试、瞬时退避、永久驻留）由旁路引擎票落地（#26）。
+// 分工是固定的：
 //
-// 两条语义在这里已经固定：
-//   - 同一目标只许一条未完成的待办（部分唯一索引），所以刷新可以天然合并；
-//   - 驻留（需人工）＝ done_at IS NULL AND next_attempt_at IS NULL。因此新待办必须
-//     带 next_attempt_at = now()，NULL 只由执行器在放弃重试时写。
+//   - **入箱**（outbox.go）：任务流程结束时把待办写进 side_effect，失败不阻塞任务本身。
+//     新待办必须带 next_attempt_at = now()：NULL 只由执行器在放弃重试时写。
+//   - **执行**（engine.go）：sidefx 循环按 kind 消费待办，瞬时错指数退避、永久错立即驻留
+//     （需人工），绝不自动禁用集成。
+//
+// 两条语义在这里固定：
+//   - 同一目标只许一条未完成的待办（部分唯一索引），所以刷新可以天然合并，完成之后
+//     同一目标还可以再入箱（同片再进清单可再删、同事件再来可再发）；
+//   - 驻留（需人工）＝ done_at IS NULL AND next_attempt_at IS NULL，驱动面板需人工区。
 package sidefx
 
 import (
@@ -58,18 +62,8 @@ func (o *Outbox) Enqueue(ctx context.Context, kind Kind, targetKey string, paylo
 		return errors.New("sidefx: 待办缺 target_key")
 	}
 
-	encoded, err := marshalPayload(payload)
-	if err != nil {
+	if err := insertJob(ctx, o.pool, kind, targetKey, payload); err != nil {
 		return err
-	}
-
-	if _, err := o.pool.Exec(ctx,
-		`INSERT INTO side_effect (kind, target_key, payload, next_attempt_at)
-		 VALUES ($1, $2, $3, now())
-		 ON CONFLICT DO NOTHING`,
-		string(kind), targetKey, encoded,
-	); err != nil {
-		return fmt.Errorf("sidefx: 入箱 %s %s: %w", kind, targetKey, err)
 	}
 	return nil
 }
@@ -81,7 +75,7 @@ func (o *Outbox) EnqueueNotify(ctx context.Context, event, infohash string, payl
 
 // StuckCount 数驻留待办（done_at IS NULL AND next_attempt_at IS NULL）。
 //
-// 它是「需人工」统计卡的一分子（规格 §8.2）；执行器落地前恒为 0。
+// 它是「需人工」统计卡的一分子（规格 §8.2）：失败任务由 task_state 数，驻留副作用数这里。
 func (o *Outbox) StuckCount(ctx context.Context) (int, error) {
 	var count int
 	if err := o.pool.QueryRow(ctx,

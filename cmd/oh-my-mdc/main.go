@@ -84,7 +84,7 @@ func run(logger *slog.Logger) error {
 		mteamIntegration = mteam.New(mteam.Options{})
 		// qBittorrent 集成门面：设置域的「测试连接」实现 + 向导的 autorun 对比/落地。
 		qbtIntegration = qbittorrent.New(qbittorrent.Options{})
-		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（sidefx 票接线）。
+		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（由 sidefx 引擎消费）。
 		jellyfinIntegration = jellyfin.New(jellyfin.Options{})
 		// 任务域读模型与副作用出箱：面板与 poll 循环共用。
 		taskStore = task.NewStore(database.Pool())
@@ -153,6 +153,26 @@ func run(logger *slog.Logger) error {
 				}()
 				loopDone = append(loopDone, reconcileDone)
 				logger.Info("reconcile 循环已启动")
+
+				// 旁路副作用引擎：删清单项 / 刷 Jellyfin / 发通知（规格 §6.2 的 sidefx 通道）。
+				// 它自己入箱（把 list_removal_pending 翻成待办）、自己重试，失败不阻塞任务。
+				sidefxEngine := sidefx.NewEngine(sidefx.Options{
+					Outbox:    sidefxOutbox,
+					Settings:  settingsStore,
+					Remover:   javdbIntegration,
+					Refresher: jellyfinIntegration,
+					Tasks:     taskStore,
+					Pool:      database.Pool(),
+					Loops:     loopsRegistry,
+					Logger:    logger,
+				})
+				sidefxDone := make(chan struct{})
+				go func() {
+					defer close(sidefxDone)
+					sidefxEngine.Run(ctx)
+				}()
+				loopDone = append(loopDone, sidefxDone)
+				logger.Info("sidefx 循环已启动")
 
 				// defer 顺序：这里注册的最先执行——先取消 ctx，等循环退出，
 				// 之后才是 database.Close（它在更早处注册）。
