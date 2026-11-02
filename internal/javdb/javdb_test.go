@@ -264,3 +264,38 @@ func TestRemoveFromListWithoutTokenDoesNotCallUpstream(t *testing.T) {
 		t.Errorf("发出去 %d 个请求，want 0", calls)
 	}
 }
+
+// TestDetailReadsTheV4Endpoint 确认刮削取数的 JavDB 一侧接在详情端点上，
+// 且 token 在场时携带（详情匿名可读，但没理由不用它）。
+func TestDetailReadsTheV4Endpoint(t *testing.T) {
+	var (
+		gotPath string
+		gotAuth string
+	)
+	srv := fakeJavDB(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v4/movies/ZY5eq": func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			gotAuth = r.Header.Get("authorization")
+			_, _ = w.Write([]byte(env(`{"movie":{"id":"ZY5eq","number":"SSIS-001","score":"4.43"}}`)))
+		},
+	})
+	integration := New(Options{Host: srv.URL})
+
+	result, err := integration.Detail(context.Background(), "tk", "ZY5eq")
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	movie, raw := result.Movie, result.Raw
+	if gotPath != "/api/v4/movies/ZY5eq" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer tk" {
+		t.Errorf("authorization = %q, want Bearer tk", gotAuth)
+	}
+	if movie.Number != "SSIS-001" || movie.Score != "4.43" {
+		t.Errorf("movie = %+v", movie)
+	}
+	if len(raw) == 0 {
+		t.Error("raw 快照为空（raw_snapshot 要按源留一份）")
+	}
+}

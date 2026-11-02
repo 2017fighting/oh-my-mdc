@@ -17,6 +17,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/config"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
+	"github.com/2017fighting/oh-my-mdc/internal/dmm"
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
@@ -24,6 +25,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
+	"github.com/2017fighting/oh-my-mdc/internal/scrape"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
@@ -106,16 +108,28 @@ func run(logger *slog.Logger) error {
 			} else {
 				logger.Info("设置已读取", "initialized", snapshot.Initialized, "paused", snapshot.Paused)
 
+				// 刮削取数（加工第一段）：版本进 processing 后取齐元数据三面，
+				// 取完仍驻 processing 等整理票（#29）。DMM 的日本出口由集群侧保证（§13）。
+				scrapeRunner := scrape.New(scrape.Options{
+					Store:    taskStore,
+					Settings: settingsStore,
+					DMM:      dmm.New(dmm.Options{}),
+					JavDB:    javdbIntegration,
+					Logger:   logger,
+				})
+
 				// 下载完成的第二条通道：qbt 回调（即时）+ 对账循环（5 分钟）。
 				// 两者共用一个推进引擎，互斥靠版本行租约（规格 §4.4）。
+				// 对账同时推进 processing：取数段交给 scrape（§6.2）。
 				reconcileRunner = reconcile.New(reconcile.Options{
-					Store:    taskStore,
-					Outbox:   sidefxOutbox,
-					Settings: settingsStore,
-					Qbt:      qbtIntegration,
-					Pool:     database.Pool(),
-					Loops:    loopsRegistry,
-					Logger:   logger,
+					Store:     taskStore,
+					Outbox:    sidefxOutbox,
+					Settings:  settingsStore,
+					Qbt:       qbtIntegration,
+					Pool:      database.Pool(),
+					Loops:     loopsRegistry,
+					Logger:    logger,
+					Processor: scrapeRunner,
 				})
 				// 重启复位（规格 §6.1 重启行）：只复位 processing，其它状态一概不动。
 				if reset, err := reconcileRunner.ResetOnStartup(ctx); err != nil {

@@ -15,6 +15,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
+	"github.com/2017fighting/oh-my-mdc/internal/scrape"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
@@ -103,6 +104,7 @@ type fixture struct {
 	qbt      *fakeQbt
 	settings *fakeSettings
 	runner   *reconcile.Runner
+	opts     reconcile.Options
 	now      time.Time
 }
 
@@ -123,7 +125,7 @@ func newFixture(t *testing.T) *fixture {
 		settings: readySettings(),
 		now:      time.Date(2025, 4, 1, 12, 0, 0, 0, time.UTC),
 	}
-	f.runner = reconcile.New(reconcile.Options{
+	f.opts = reconcile.Options{
 		Store:    f.store,
 		Outbox:   sidefx.New(database.Pool()),
 		Settings: f.settings,
@@ -132,8 +134,15 @@ func newFixture(t *testing.T) *fixture {
 		Owner:    "test-owner",
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now:      func() time.Time { return f.now },
-	})
+	}
+	f.runner = reconcile.New(f.opts)
 	return f
+}
+
+// withProcessor 换上加工阶段的假推进器，重建引擎（其它依赖不变）。
+func (f *fixture) withProcessor(processor reconcile.Processor) {
+	f.opts.Processor = processor
+	f.runner = reconcile.New(f.opts)
 }
 
 func readySettings() *fakeSettings {
@@ -790,4 +799,69 @@ func stallAlerts(t *testing.T, f *fixture) []task.Event {
 		}
 	}
 	return alerts
+}
+
+// ------------------------------------------------------------------ 加工阶段
+
+// fakeProcessor 是加工推进接缝的假实现：只数「有没有被叫到」。
+type fakeProcessor struct {
+	progress scrape.Progress
+	err      error
+	calls    int
+}
+
+func (f *fakeProcessor) ProcessPending(context.Context) (scrape.Progress, error) {
+	f.calls++
+	return f.progress, f.err
+}
+
+// TestRunOnceDrivesTheProcessingPass 钉住 §6.2：reconcile 的第三件事是「推进 processing」，
+// 取数段（#27）与整理段（#29）都挂在这条通道上。
+func TestRunOnceDrivesTheProcessingPass(t *testing.T) {
+	f := newFixture(t)
+	processor := &fakeProcessor{progress: scrape.Progress{Scanned: 1, Fetched: 1}}
+	f.withProcessor(processor)
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if processor.calls != 1 {
+		t.Fatalf("加工推进被叫了 %d 次, want 1", processor.calls)
+	}
+	if result.Processing.Fetched != 1 {
+		t.Errorf("result.Processing = %+v, want 取数 1 条", result.Processing)
+	}
+}
+
+// TestRunOnceSkipsTheProcessingPassWhenGated 确认门禁关着时加工也不跑
+// （未初始化＝整站只剩向导，不该有上游取数）。
+func TestRunOnceSkipsTheProcessingPassWhenGated(t *testing.T) {
+	f := newFixture(t)
+	f.settings.snapshot = settings.Snapshot{Paused: true, Sections: map[string]settings.SectionState{}}
+	processor := &fakeProcessor{progress: scrape.Progress{Scanned: 1, Fetched: 1}}
+	f.withProcessor(processor)
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !result.Gated {
+		t.Fatalf("result = %+v, want Gated", result)
+	}
+	if processor.calls != 0 {
+		t.Errorf("门禁关着仍推进了加工 %d 次", processor.calls)
+	}
+}
+
+// TestRunOnceReportsProcessingErrors 确认取数失败会记进这一轮的错误（循环日志看得见），
+// 但不会吞掉下载侧已经做完的工作。
+func TestRunOnceReportsProcessingErrors(t *testing.T) {
+	f := newFixture(t)
+	processor := &fakeProcessor{err: errors.New("dmm region blocked")}
+	f.withProcessor(processor)
+
+	if _, err := f.runner.RunOnce(context.Background()); err == nil {
+		t.Fatal("加工错误应当传出来")
+	}
 }
