@@ -52,6 +52,19 @@ const (
 	PhaseOrganize    Phase = "organize"
 )
 
+// Label 是 phase 的中文名：面板的「失败原因」与通知模板都直译它（规格 §8.3）。
+func (p Phase) Label() string {
+	switch p {
+	case PhaseDownloading:
+		return "下载"
+	case PhaseScrape:
+		return "刮削"
+	case PhaseOrganize:
+		return "整理"
+	}
+	return string(p)
+}
+
 // EventKind 是 task_event.kind 的取值（规格 §4.1）。
 type EventKind string
 

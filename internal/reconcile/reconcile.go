@@ -31,6 +31,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/media"
+	"github.com/2017fighting/oh-my-mdc/internal/organize"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/scrape"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -89,6 +90,14 @@ type Processor interface {
 	ProcessPending(ctx context.Context) (scrape.Progress, error)
 }
 
+// Organizer 是加工第二段（整理入库，#29）的推进接缝。
+//
+// 与 Processor 串在同一条通道上、按同一个顺序跑：先取齐元数据，再落盘换 tag。
+// 两段都是「推进一轮并回报计数」，所以都只约定一个方法。
+type Organizer interface {
+	ProcessPending(ctx context.Context) (organize.Progress, error)
+}
+
 // Options 装配一个推进引擎 / 对账循环。
 type Options struct {
 	Store    *task.Store
@@ -105,8 +114,10 @@ type Options struct {
 	Owner string
 	// Now 可注入测试时钟；空则 time.Now。
 	Now func() time.Time
-	// Processor 是加工阶段的推进接缝；nil 时 reconcile 只推进下载、不碰 processing。
+	// Processor 是加工第一段（取数）的推进接缝；nil 时 reconcile 不碰取数。
 	Processor Processor
+	// Organizer 是加工第二段（整理入库）的推进接缝；nil 时 reconcile 不碰整理。
+	Organizer Organizer
 }
 
 // Runner 是推进引擎与对账循环。
@@ -122,6 +133,7 @@ type Runner struct {
 	now       func() time.Time
 	progress  *progressTracker
 	processor Processor
+	organizer Organizer
 }
 
 // New 构造引擎。
@@ -151,6 +163,7 @@ func New(opts Options) *Runner {
 		now:       now,
 		progress:  newProgressTracker(),
 		processor: opts.Processor,
+		organizer: opts.Organizer,
 	}
 }
 
@@ -171,8 +184,10 @@ type Result struct {
 	Stalled  int
 	Waiting  int
 	Skipped  int
-	// Processing 是本轮加工阶段的取数结果（#27；整理段接在同一条通道上）。
+	// Processing 是本轮加工第一段（取数，#27）的结果。
 	Processing scrape.Progress
+	// Organized 是本轮加工第二段（整理入库，#29）的结果。
+	Organized organize.Progress
 }
 
 // Run 跑对账循环直到 ctx 结束。第一轮立即跑，之后按 app_config 的 reconcile_interval 等。
@@ -217,7 +232,8 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 			"scanned", result.Scanned, "advanced", result.Advanced,
 			"failed", result.Failed, "stalled", result.Stalled,
 			"waiting", result.Waiting, "skipped", result.Skipped,
-			"scraped", result.Processing.Fetched, "reused", result.Processing.Reused, "err", err)
+			"scraped", result.Processing.Fetched, "reused", result.Processing.Reused,
+			"filed", result.Organized.Filed, "organize_failed", result.Organized.Failed, "err", err)
 	}
 	return result, err
 }
@@ -317,11 +333,19 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 		}
 	}
 
-	// 推进 processing（§6.2 reconcile 的第三件事）：取数段在本票（#27），
-	// 整理段接在同一条通道上（#29）。它自己看门禁——门禁关着就零动作。
+	// 推进 processing（§6.2 reconcile 的第三件事）：先取数（#27），再整理入库（#29）。
+	// 两段在同一个版本状态上接续：取数落完元数据，整理在同一轮就能把它落盘。
+	// 它们自己看门禁——门禁关着就零动作。
 	if r.processor != nil {
 		progress, err := r.processor.ProcessPending(ctx)
 		result.Processing = progress
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if r.organizer != nil {
+		progress, err := r.organizer.ProcessPending(ctx)
+		result.Organized = progress
 		if err != nil {
 			errs = append(errs, err)
 		}

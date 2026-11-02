@@ -24,8 +24,8 @@ import (
 
 // ScrapeFailurePrefix 是刮削取数失败事件的 reason 前缀。
 //
-// 每失败一次留一条（时间线要看得见尝试史）；聚合整理票（#29）在三次耗尽时
-// 用 HasAlert 按这个前缀判定「这条版本告过警没有」，所以它必须是常量。
+// 取数段每失败一次留一条（时间线要看得见尝试史）；三次耗尽的最后一条改由
+// processing.Recorder 统一写「加工失败」，所以这个前缀只标「还在重试的那几次」。
 const ScrapeFailurePrefix = "刮削取数失败"
 
 // Lease 是加工段持有的一份版本租约：成功后由 SaveMetadata 放回。
@@ -257,7 +257,7 @@ func (s *Store) Actors(ctx context.Context, movieID string) ([]Actor, error) {
 
 // ProcessingVersions 列本轮该推进的加工版本：processing、租约空闲或过期、退避到期。
 //
-// 退避到期由 next_attempt_at 表示（失败一次推一次，见 ScheduleProcessingRetry）；
+// 退避到期由 next_attempt_at 表示（失败一次推一次，见 RecordProcessingFailure）；
 // 时间用库的 now()，与租约判据同一个时钟。
 func (s *Store) ProcessingVersions(ctx context.Context) ([]Version, error) {
 	rows, err := s.pool.Query(ctx,
@@ -288,30 +288,6 @@ func (s *Store) ProcessingVersions(ctx context.Context) ([]Version, error) {
 		return nil, fmt.Errorf("task: 遍历加工中的版本: %w", err)
 	}
 	return versions, nil
-}
-
-// ScheduleProcessingRetry 记一次加工失败：attempts+1、next_attempt_at 推到 at+delay、
-// 放回租约。状态不变（失败三次落 failed 的裁决归聚合的整理票，#29）。
-//
-// 租约不在自己手里 → ErrClaimLost（零写入，别把别人的账改了）。
-func (s *Store) ScheduleProcessingRetry(ctx context.Context, infohash, owner string, at time.Time, delay time.Duration) (int, error) {
-	var attempts int
-	err := s.pool.QueryRow(ctx,
-		`UPDATE task_version
-		 SET attempts = attempts + 1,
-		     next_attempt_at = $3,
-		     claimed_at = NULL, claimed_by = '', updated_at = now()
-		 WHERE infohash = $1 AND claimed_by = $2 AND status = 'processing'
-		 RETURNING attempts`,
-		infohash, owner, at.Add(delay),
-	).Scan(&attempts)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, ErrClaimLost
-		}
-		return 0, fmt.Errorf("task: 记版本 %s 的加工重试: %w", infohash, err)
-	}
-	return attempts, nil
 }
 
 // nonNilStrings 把 nil 切片写成空数组而不是 NULL（tags 列是 NOT NULL）。

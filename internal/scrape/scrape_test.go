@@ -15,6 +15,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/dmm"
 	"github.com/2017fighting/oh-my-mdc/internal/scrape"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
@@ -104,6 +105,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.runner = scrape.New(scrape.Options{
 		Store:    f.store,
+		Outbox:   sidefx.New(database.Pool()),
 		Settings: f.settings,
 		DMM:      f.dmm,
 		JavDB:    f.javdb,
@@ -386,6 +388,58 @@ func TestProcessPendingFailsWhenJavDBIsUnavailable(t *testing.T) {
 	}
 	if f.dmm.hit() != 0 {
 		t.Errorf("JavDB 先失败却问了 DMM %d 次", f.dmm.hit())
+	}
+}
+
+// TestExhaustedScrapeLandsFailedAndNotifiesOnce 钉住加工失败的终局（#29 的失败语义）：
+// 三次取数失败 → failed(scrape, reason) 驻留 + 一条「加工失败」通知。
+func TestExhaustedScrapeLandsFailedAndNotifiesOnce(t *testing.T) {
+	f := newFixture(t)
+	f.seedProcessing(t, firstMovie, firstNum, firstHash)
+	f.dmm.err = &dmm.Error{Code: settings.CodeProtocol, Op: "graphql", Detail: "地区阻断", Region: true}
+
+	ctx := context.Background()
+	for round := 1; round <= 3; round++ {
+		if _, err := f.runner.ProcessPending(ctx); err == nil {
+			t.Fatalf("第 %d 轮应当报出取数失败", round)
+		}
+		// 退避推进到过去，下一轮马上到期（真实退避是分钟级，测试不等）。
+		if _, err := f.database.Pool().Exec(ctx,
+			`UPDATE task_version SET next_attempt_at = now() - interval '1 second' WHERE infohash = $1`,
+			firstHash); err != nil {
+			t.Fatalf("推进退避: %v", err)
+		}
+	}
+
+	version := f.version(t, firstHash)
+	if version.Status != task.StatusFailed || version.ErrorPhase != task.PhaseScrape {
+		t.Fatalf("version = status %q phase %q, want failed(scrape)", version.Status, version.ErrorPhase)
+	}
+	if !strings.Contains(version.ErrorReason, "地区阻断") {
+		t.Errorf("reason = %q, want 带上游原因", version.ErrorReason)
+	}
+
+	rows, err := f.database.Pool().Query(ctx,
+		`SELECT target_key FROM side_effect WHERE kind = 'notify'`)
+	if err != nil {
+		t.Fatalf("读 side_effect: %v", err)
+	}
+	defer rows.Close()
+	keys := []string{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			t.Fatalf("扫 target_key: %v", err)
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) != 1 || keys[0] != "processing_failed:"+firstHash {
+		t.Errorf("notify = %v, want 一条 processing_failed", keys)
+	}
+
+	// 落 failed 之后不再自动重试。
+	if progress, err := f.runner.ProcessPending(ctx); err != nil || progress.Scanned != 0 {
+		t.Errorf("failed 版本仍被自动捞起: progress = %+v err = %v", progress, err)
 	}
 }
 

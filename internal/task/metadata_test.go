@@ -229,9 +229,9 @@ func TestSaveMetadataRequiresTheTask(t *testing.T) {
 	}
 }
 
-// TestScheduleRetryBacksOffAndReleasesTheLease 是取数失败的重试记账：
+// TestRecordProcessingFailureBacksOffAndReleasesTheLease 是取数失败的重试记账：
 // attempts 递增、next_attempt_at 往后推、租约放回；状态仍是 processing。
-func TestScheduleRetryBacksOffAndReleasesTheLease(t *testing.T) {
+func TestRecordProcessingFailureBacksOffAndReleasesTheLease(t *testing.T) {
 	store, _ := metadataFixture(t)
 	infohash := "1111111111111111111111111111111111111111"
 	processingVersion(t, store, "YwrO3B", "ABP-123", infohash)
@@ -240,12 +240,13 @@ func TestScheduleRetryBacksOffAndReleasesTheLease(t *testing.T) {
 	}
 
 	at := time.Now().UTC()
-	attempts, err := store.ScheduleProcessingRetry(context.Background(), infohash, "owner-scrape", at, 5*time.Minute)
+	failure, err := store.RecordProcessingFailure(context.Background(), infohash, "owner-scrape",
+		task.PhaseScrape, "DMM 地区阻断", at, 5*time.Minute, 3)
 	if err != nil {
-		t.Fatalf("ScheduleProcessingRetry: %v", err)
+		t.Fatalf("RecordProcessingFailure: %v", err)
 	}
-	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1", attempts)
+	if failure.Attempts != 1 || failure.Exhausted {
+		t.Errorf("failure = %+v, want attempts=1 且未耗尽", failure)
 	}
 
 	version := versionOf(detail(t, store, "YwrO3B"), infohash)
@@ -266,7 +267,8 @@ func TestScheduleRetryBacksOffAndReleasesTheLease(t *testing.T) {
 	}
 
 	// 抢输不是失败：别人的租约不归我写。
-	if _, err := store.ScheduleProcessingRetry(context.Background(), infohash, "someone-else", at, time.Minute); !errors.Is(err, task.ErrClaimLost) {
+	if _, err := store.RecordProcessingFailure(context.Background(), infohash, "someone-else",
+		task.PhaseScrape, "x", at, time.Minute, 3); !errors.Is(err, task.ErrClaimLost) {
 		t.Errorf("err = %v, want ErrClaimLost", err)
 	}
 }

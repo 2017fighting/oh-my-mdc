@@ -22,6 +22,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
+	"github.com/2017fighting/oh-my-mdc/internal/organize"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
@@ -117,9 +118,22 @@ func run(logger *slog.Logger) error {
 				// 取完仍驻 processing 等整理票（#29）。DMM 的日本出口由集群侧保证（§13）。
 				scrapeRunner := scrape.New(scrape.Options{
 					Store:    taskStore,
+					Outbox:   sidefxOutbox,
 					Settings: settingsStore,
 					DMM:      dmm.New(dmm.Options{}),
 					JavDB:    javdbIntegration,
+					Logger:   logger,
+				})
+
+				// 整理入库（加工第二段）：硬链进媒体库 + NFO/图片 + 换 tag + 置刷库/通知待办。
+				// 图片走 HTTP（DMM/JavDB 的绝对 URL），硬链的跨设备判据归文件系统（EXDEV 即失败）。
+				organizeRunner := organize.New(organize.Options{
+					Store:    taskStore,
+					Outbox:   sidefxOutbox,
+					Settings: settingsStore,
+					Qbt:      qbtIntegration,
+					Tags:     qbtIntegration,
+					Images:   organize.NewHTTPImages(nil),
 					Logger:   logger,
 				})
 
@@ -135,6 +149,7 @@ func run(logger *slog.Logger) error {
 					Loops:     loopsRegistry,
 					Logger:    logger,
 					Processor: scrapeRunner,
+					Organizer: organizeRunner,
 				})
 				// 重启复位（规格 §6.1 重启行）：只复位 processing，其它状态一概不动。
 				if reset, err := reconcileRunner.ResetOnStartup(ctx); err != nil {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
+	"github.com/2017fighting/oh-my-mdc/internal/organize"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
 	"github.com/2017fighting/oh-my-mdc/internal/scrape"
@@ -142,6 +143,12 @@ func newFixture(t *testing.T) *fixture {
 // withProcessor 换上加工阶段的假推进器，重建引擎（其它依赖不变）。
 func (f *fixture) withProcessor(processor reconcile.Processor) {
 	f.opts.Processor = processor
+	f.runner = reconcile.New(f.opts)
+}
+
+// withOrganizer 换上整理段的假推进器。
+func (f *fixture) withOrganizer(organizer reconcile.Organizer) {
+	f.opts.Organizer = organizer
 	f.runner = reconcile.New(f.opts)
 }
 
@@ -808,10 +815,15 @@ type fakeProcessor struct {
 	progress scrape.Progress
 	err      error
 	calls    int
+	// order 非 nil 时记下调用顺序（与 fakeOrganizer 共用一份）。
+	order *[]string
 }
 
 func (f *fakeProcessor) ProcessPending(context.Context) (scrape.Progress, error) {
 	f.calls++
+	if f.order != nil {
+		*f.order = append(*f.order, "scrape")
+	}
 	return f.progress, f.err
 }
 
@@ -851,6 +863,48 @@ func TestRunOnceSkipsTheProcessingPassWhenGated(t *testing.T) {
 	}
 	if processor.calls != 0 {
 		t.Errorf("门禁关着仍推进了加工 %d 次", processor.calls)
+	}
+}
+
+// fakeOrganizer 是整理段的假实现。
+type fakeOrganizer struct {
+	progress organize.Progress
+	err      error
+	calls    int
+	// order 非 nil 时记下调用顺序（与 fakeProcessor 共用一份）。
+	order *[]string
+}
+
+func (f *fakeOrganizer) ProcessPending(context.Context) (organize.Progress, error) {
+	f.calls++
+	if f.order != nil {
+		*f.order = append(*f.order, "organize")
+	}
+	return f.progress, f.err
+}
+
+// TestRunOnceRunsScrapeThenOrganize 钉住两段的接续与顺序：
+// 取齐元数据（#27）之后，同一条通道上接着整理入库（#29）。
+func TestRunOnceRunsScrapeThenOrganize(t *testing.T) {
+	f := newFixture(t)
+	order := []string{}
+	processor := &fakeProcessor{progress: scrape.Progress{Scanned: 1, Fetched: 1}, order: &order}
+	organizer := &fakeOrganizer{progress: organize.Progress{Scanned: 1, Filed: 1}, order: &order}
+	f.withProcessor(processor)
+	f.withOrganizer(organizer)
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if processor.calls != 1 || organizer.calls != 1 {
+		t.Fatalf("调用次数 = 取数 %d / 整理 %d, want 各 1", processor.calls, organizer.calls)
+	}
+	if len(order) != 2 || order[0] != "scrape" || order[1] != "organize" {
+		t.Errorf("顺序 = %v, want 先取数后整理", order)
+	}
+	if result.Organized.Filed != 1 {
+		t.Errorf("result.Organized = %+v, want Filed=1", result.Organized)
 	}
 }
 

@@ -24,18 +24,14 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/dmm"
+	"github.com/2017fighting/oh-my-mdc/internal/processing"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
-const (
-	// DefaultRetryBase 是第一次取数失败的退避基数。
-	DefaultRetryBase = time.Minute
-	// DefaultRetryCap 是退避上限：再久也只是「下个对账周期再看」，别把重试排到几小时后。
-	DefaultRetryCap = 30 * time.Minute
-	// maxScrapesPerRound 挡住异常积压把一轮对账拖成无尽循环。
-	maxScrapesPerRound = 100
-)
+// maxScrapesPerRound 挡住异常积压把一轮对账拖成无尽循环。
+const maxScrapesPerRound = 100
 
 // Settings 是这一段对设置域的全部要求（与其它循环同一形状）。
 type Settings interface {
@@ -57,30 +53,29 @@ type JavDB interface {
 type Options struct {
 	Store    *task.Store
 	Settings Settings
-	DMM      DMM
-	JavDB    JavDB
+	// Outbox 是通知入箱口（可选）：取数三次耗尽时发「加工失败」一条（规格 §5.6）。
+	Outbox *sidefx.Outbox
+	DMM    DMM
+	JavDB  JavDB
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Owner 是 claim 的持有者标识；空则用 hostname-pid。
 	Owner string
 	// Now 可注入测试时钟；空则 time.Now。
 	Now func() time.Time
-	// RetryBase/RetryCap 是失败退避的基数与上限；零值用默认。
-	RetryBase time.Duration
-	RetryCap  time.Duration
 }
 
 // Runner 是取数引擎。
 type Runner struct {
-	store     *task.Store
-	settings  Settings
-	dmm       DMM
-	javdb     JavDB
-	logger    *slog.Logger
-	owner     string
-	now       func() time.Time
-	retryBase time.Duration
-	retryCap  time.Duration
+	store    *task.Store
+	settings Settings
+	dmm      DMM
+	javdb    JavDB
+	logger   *slog.Logger
+	owner    string
+	now      func() time.Time
+	// recorder 是加工失败记账的单点（与整理段共用，见 internal/processing）。
+	recorder *processing.Recorder
 }
 
 // New 构造引擎。
@@ -97,24 +92,21 @@ func New(opts Options) *Runner {
 	if now == nil {
 		now = time.Now
 	}
-	retryBase := opts.RetryBase
-	if retryBase <= 0 {
-		retryBase = DefaultRetryBase
-	}
-	retryCap := opts.RetryCap
-	if retryCap <= 0 {
-		retryCap = DefaultRetryCap
-	}
 	return &Runner{
-		store:     opts.Store,
-		settings:  opts.Settings,
-		dmm:       opts.DMM,
-		javdb:     opts.JavDB,
-		logger:    logger,
-		owner:     owner,
-		now:       now,
-		retryBase: retryBase,
-		retryCap:  retryCap,
+		store:    opts.Store,
+		settings: opts.Settings,
+		dmm:      opts.DMM,
+		javdb:    opts.JavDB,
+		logger:   logger,
+		owner:    owner,
+		now:      now,
+		recorder: processing.NewRecorder(processing.Options{
+			Store:  opts.Store,
+			Outbox: opts.Outbox,
+			Logger: logger,
+			Now:    now,
+			Owner:  owner,
+		}),
 	}
 }
 
@@ -159,6 +151,8 @@ func (r *Runner) ProcessPending(ctx context.Context) (Progress, error) {
 	if err != nil {
 		return Progress{}, err
 	}
+	// 加工失败的自动重试上限与旁路引擎同一个设置（规格 §4.3 max_attempts）。
+	maxAttempts := snapshot.MaxAttempts(processing.DefaultMaxAttempts)
 
 	progress := Progress{}
 	var errs []error
@@ -167,7 +161,7 @@ func (r *Runner) ProcessPending(ctx context.Context) (Progress, error) {
 			break
 		}
 		progress.Scanned++
-		outcome, err := r.processVersion(ctx, version, token)
+		outcome, err := r.processVersion(ctx, version, token, maxAttempts)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -209,7 +203,7 @@ const (
 //
 // 复用判据刻意放在**抢租约之前**：命中复用的版本不需要取数，也就不该占着租约
 // 让整理票（#29）等它。抢到租约后再查一次——两次查询之间别的进程可能已经刮完了。
-func (r *Runner) processVersion(ctx context.Context, version task.Version, token string) (outcome, error) {
+func (r *Runner) processVersion(ctx context.Context, version task.Version, token string, maxAttempts int) (outcome, error) {
 	reused, err := r.store.HasMetadata(ctx, version.MovieID)
 	if err != nil {
 		return outcomeSkipped, err
@@ -246,7 +240,7 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 
 	fetched, err := r.fetch(ctx, claimed, token)
 	if err != nil {
-		return outcomeFailed, r.fail(ctx, claimed, err)
+		return outcomeFailed, r.fail(ctx, claimed, maxAttempts, err)
 	}
 	metadata, err := fetched.TaskMetadata()
 	if err != nil {
@@ -279,45 +273,26 @@ func (r *Runner) fetch(ctx context.Context, version task.Version, token string) 
 	return Merge(r.now(), dmmResult, detail), nil
 }
 
-// fail 记一次取数失败：排下一次重试 + 留一条告警事件。状态不变（仍是 processing）。
-func (r *Runner) fail(ctx context.Context, version task.Version, cause error) error {
-	delay := r.backoff(version.Attempts + 1)
-	attempts, err := r.store.ScheduleProcessingRetry(ctx, version.Infohash, r.owner, r.now(), delay)
+// fail 记一次取数失败（退避/耗尽/通知都归 processing.Recorder）。
+//
+// 取数失败仍然把原因传出去：循环日志要看得见上游怎么了。耗尽时版本已落
+// failed(scrape, reason) 并入了「加工失败」通知（规格 §5.6 四事件之一）。
+func (r *Runner) fail(ctx context.Context, version task.Version, maxAttempts int, cause error) error {
+	failure, err := r.recorder.Fail(ctx, version, task.PhaseScrape, cause, false, maxAttempts)
 	if err != nil {
-		// 抢输不是失败（别人接手了这条版本），别把它当故障抛出去。
-		if errors.Is(err, task.ErrClaimLost) {
-			return nil
-		}
 		return errors.Join(cause, err)
 	}
-
-	reason := fmt.Sprintf("%s：%v", task.ScrapeFailurePrefix, cause)
-	r.logger.Warn("刮削取数失败，已排下一次重试",
-		"movie_id", version.MovieID, "number", version.Number, "attempts", attempts, "retry_in", delay, "err", cause)
-
-	if err := r.store.AppendEvent(ctx, task.Event{
-		MovieID:  version.MovieID,
-		Infohash: version.Infohash,
-		Kind:     task.EventAlert,
-		Phase:    string(task.PhaseScrape),
-		Reason:   reason,
-	}); err != nil {
-		r.logger.Error("scrape: 记取数失败事件失败", "infohash", version.Infohash, "err", err)
+	if !failure.Exhausted {
+		// 每次失败都留一条尝试史（耗尽的最后一次由记账器统一写「加工失败」）。
+		if err := r.store.AppendEvent(ctx, task.Event{
+			MovieID:  version.MovieID,
+			Infohash: version.Infohash,
+			Kind:     task.EventAlert,
+			Phase:    string(task.PhaseScrape),
+			Reason:   fmt.Sprintf("%s：%v", task.ScrapeFailurePrefix, cause),
+		}); err != nil {
+			r.logger.Error("scrape: 记取数失败事件失败", "infohash", version.Infohash, "err", err)
+		}
 	}
 	return cause
-}
-
-// backoff 是第 attempts 次失败的退避：基数翻倍，封顶 retryCap。
-func (r *Runner) backoff(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
-	delay := r.retryBase
-	for i := 1; i < attempts && delay < r.retryCap; i++ {
-		delay *= 2
-	}
-	if delay > r.retryCap {
-		delay = r.retryCap
-	}
-	return delay
 }
