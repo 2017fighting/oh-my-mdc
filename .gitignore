@@ -1,0 +1,24 @@
+# 构建产物
+/bin/
+/node_modules/
+
+# internal/web/dist 只有占位壳页进版本库；Vite 的真实产物（assets/、favicon 等）都是构建输出。
+/internal/web/dist/*
+!/internal/web/dist/index.html
+
+# 有些机器的全局 gitignore 会忽略 dist/、scripts/、lib/ 这类目录名；
+# 下面这几个是可交付源码，必须进版本库（少了它们全新 clone 构建不起来）。
+!/internal/web/dist/
+!/web/scripts/
+!/web/scripts/copy-dist.mjs
+!/web/app/lib/
+!/web/app/lib/utils.ts
+
+# 本地环境
+.env
+*.local
+
+# 编辑器/系统
+.DS_Store
+.idea/
+.vscode/

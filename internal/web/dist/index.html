@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  占位壳页：`make web-build` 之前仓库里带的兜底产物，
+  让没装 Node 的机器也能 go build / go vet / go test。
+  `make web-build` 会用 Vite 的真实构建覆盖整个 dist/ 目录；
+  构建后想恢复这一页就跑 `make web-reset`。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>oh-my-mdc</title>
+  </head>
+  <body>
+    <main>
+      <h1>oh-my-mdc</h1>
+      <p>前端尚未构建：运行 <code>make web-build</code> 生成真实界面。</p>
+    </main>
+  </body>
+</html>

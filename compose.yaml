@@ -1,0 +1,28 @@
+# 开发用的本地栈。生产在 k8s（home-ops），仓内只有这一份 compose（规格 §10）。
+#
+# 只有 Postgres 在容器里：服务本身由 `make dev` 用 `go run` 起，
+# 这样改代码不用重建镜像。凭据与 config.DefaultDatabaseURL 的默认值对齐，即零配置。
+name: oh-my-mdc
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: mdc
+      POSTGRES_PASSWORD: mdc
+      POSTGRES_DB: mdc
+    ports:
+      - "5432:5432"
+    # postgres:18 起卷挂在 /var/lib/postgresql，PGDATA 在其下的版本子目录里。
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mdc -d mdc"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

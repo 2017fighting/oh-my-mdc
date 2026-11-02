@@ -1,0 +1,86 @@
+# CI 只调 make 的 target：构建门的唯一真源是 Makefile（规格 §10）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go 门（gofmt / vet / test -race + Postgres 集成）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mdc
+          POSTGRES_PASSWORD: mdc
+          POSTGRES_DB: mdc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mdc -d mdc"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 60
+    env:
+      MDC_TEST_DATABASE_URL: postgres://mdc:mdc@localhost:5432/mdc?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt 校验
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      # 集成测试会自己建一次性库做 goose Up，再删库。
+      - name: 测试（含迁移与 HTTP 面）
+        run: make test
+
+  frontend:
+    name: 前端门（lint / typecheck / build + embed）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 安装前端依赖
+        run: make web-install
+
+      - name: 前端 lint
+        run: make web-lint
+
+      - name: 前端类型检查
+        run: make web-typecheck
+
+      - name: 前端构建（embed 的输入）
+        run: make web-build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 真实 vite 产物进 embed 后再编一次，证明打包链路完整。
+      - name: 编译单二进制（embed 真实产物）
+        run: make build
