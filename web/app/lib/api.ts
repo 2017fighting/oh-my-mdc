@@ -82,6 +82,66 @@ export type Overview = {
   >;
 };
 
+/** 版本状态：四个值是规格 §3 的完整集合（任务级状态由视图聚合，名字相同）。 */
+export type TaskState = "downloading" | "processing" | "finished" | "failed";
+
+/** 一条版本（面板 chip 与抽屉列表）。 */
+export type TaskVersion = {
+  infohash: string;
+  source: "javdb_magnet" | "mteam_torrent";
+  delivery: "magnet" | "torrent";
+  /** best-effort 展示标签（如「中文」），空串表示没有可展示的标签。 */
+  label: string;
+  status: TaskState;
+  /** 失败发生在哪一步（仅 failed 时有值）。 */
+  error_phase?: "downloading" | "scrape" | "organize";
+  error_reason?: string;
+  /** 已落库、还没加种（崩溃自愈的中间态）。 */
+  add_pending: boolean;
+  /** 加种成功后置起，等旁路循环删清单项。 */
+  list_removal_pending: boolean;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/** 任务行：一行一任务，版本以小 chip 展示。 */
+export type TaskRow = {
+  movie_id: string;
+  number: string;
+  list_id: string;
+  /** 空串表示这个任务还没有版本（正常流程不会出现）。 */
+  state: TaskState | "";
+  versions: TaskVersion[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaskEvent = {
+  id: number;
+  movie_id: string;
+  infohash?: string;
+  kind: "state_change" | "side_effect" | "alert" | "manual_retry";
+  from_state?: string;
+  to_state?: string;
+  phase?: string;
+  reason: string;
+  at: string;
+};
+
+export type TaskList = {
+  ok: boolean;
+  tasks: TaskRow[];
+  page: number;
+  page_size: number;
+};
+
+export type TaskDetail = {
+  ok: boolean;
+  task: TaskRow;
+  events: TaskEvent[];
+};
+
 /** autorun 改写的前后对比：GET 只读预览，POST 是人工确认后的落地。 */
 export type AutorunPlan = {
   ok: boolean;
@@ -146,6 +206,19 @@ export const api = {
     request<TestResult>(`/api/config/${name}/test`, { method: "POST" }),
 
   overview: () => request<Overview>("/api/overview"),
+
+  /** 面板任务表：一行一任务，带版本摘要（规格 §8.4）。 */
+  tasks: (params: { state?: TaskState; q?: string; page?: number } = {}) => {
+    const search = new URLSearchParams();
+    if (params.state) search.set("state", params.state);
+    if (params.q) search.set("q", params.q);
+    if (params.page) search.set("page", String(params.page));
+    const query = search.toString();
+    return request<TaskList>(`/api/tasks${query ? `?${query}` : ""}`);
+  },
+
+  /** 抽屉数据：任务 + 版本列表 + 最近事件。 */
+  task: (movieID: string) => request<TaskDetail>(`/api/tasks/${encodeURIComponent(movieID)}`),
 
   /** 探测用户自建的清单（向导「读取已有清单」）。 */
   javdbLists: () => request<{ ok: boolean; lists: JavDBList[] }>("/api/javdb/lists"),

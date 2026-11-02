@@ -592,7 +592,9 @@ func TestAppSectionIsSingleRowAndNotDeletable(t *testing.T) {
 	}
 }
 
-func TestOverviewIsASkeletonUntilLoopsAndTasksExist(t *testing.T) {
+// TestOverviewIsEmptyWithoutTaskDomain 确认没装配任务域/循环时仍是合法回执：
+// 计数为 0、健康位为空位，而不是 500 或假数据。
+func TestOverviewIsEmptyWithoutTaskDomain(t *testing.T) {
 	h := newSettingsHandler(t)
 
 	body := jsonOf(t, send(t, h, http.MethodGet, "/api/overview", ""))

@@ -42,10 +42,28 @@ func TestSensitiveColumnsListTheSpecsSecrets(t *testing.T) {
 }
 
 // TestEveryTextColumnInMigrationsIsClassified 是规格 §4.4 的反射单测。
+//
+// 覆盖全部迁移里的文本列：设置域的列必须登记（敏感）或进 bookkeepingColumns；
+// 非设置域的表必须先在 credentialFreeTables 里声明「按设计不存凭据」。
+// 新表/新列的默认结局是红，而不是静默绕过。
 func TestEveryTextColumnInMigrationsIsClassified(t *testing.T) {
-	columns := textColumnsInMigrations(t)
+	all := textColumnsInMigrations(t)
+
+	settingsTables := make(map[string]bool, len(sections))
+	for _, section := range sections {
+		settingsTables[section.Table()] = true
+	}
+	for _, column := range all {
+		if settingsTables[column.table] || credentialFreeTables[column.table] {
+			continue
+		}
+		t.Errorf("表 %q 的文本列 %q 未分类：设置域要登记字段，非设置域要在 credentialFreeTables 声明无凭据",
+			column.table, column.name)
+	}
+
+	columns := settingsColumns(all)
 	if len(columns) < 20 {
-		t.Fatalf("只从迁移里解析出 %d 个文本列：解析器或迁移不对（期望二十多个）", len(columns))
+		t.Fatalf("只从迁移里解析出 %d 个设置域文本列：解析器或迁移不对（期望二十多个）", len(columns))
 	}
 
 	registered := make(map[string]bool)
@@ -95,6 +113,38 @@ func TestMaskHidesShortSecretsEntirely(t *testing.T) {
 type tableColumn struct {
 	table string
 	name  string
+}
+
+// credentialFreeTables 是设置域之外、**按设计不存凭据**的表。
+//
+// 加表必须在这里显式声明一次；这样「新增文本列未分类即失败」的护栏覆盖整库，
+// 而不是只覆盖设置域。
+var credentialFreeTables = map[string]bool{
+	"task":         true,
+	"task_version": true,
+	"version_file": true,
+	"task_event":   true,
+	"side_effect":  true,
+	"actor":        true,
+	"task_actor":   true,
+}
+
+// settingsColumns 只留下落在设置域表里的列（八节各自的表）。
+//
+// 任务域的表没有凭据，也不需要在这里逐列登记：把整库文本列都塞进设置域的清单，
+// 会让「新增一列就红」的护栏变成一份越来越长的噪音。
+func settingsColumns(columns []tableColumn) []tableColumn {
+	tables := make(map[string]bool, len(sections))
+	for _, section := range sections {
+		tables[section.Table()] = true
+	}
+	kept := make([]tableColumn, 0, len(columns))
+	for _, column := range columns {
+		if tables[column.table] {
+			kept = append(kept, column)
+		}
+	}
+	return kept
 }
 
 // createTable 只认本项目迁移的固定写法：`CREATE TABLE <name> (` 起，`);` 止。

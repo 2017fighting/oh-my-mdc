@@ -121,26 +121,40 @@ func (c *Client) listPages(ctx context.Context) ([]listSimple, error) {
 	return out, nil
 }
 
-// ListItems 读某张清单里的项（/api/v1/movies/tags?filter_by=0:l:{list_id}）。
+// ListItems 读某张清单的第一页（/api/v1/movies/tags?filter_by=0:l:{list_id}）。
 //
 // zone 写死 0：清单形态里没有 zone，而写错 zone 不会报错、只会静默给别的作品
 // （实测 0:l:{id} 与上游 movies_count 逐位相同，换成 2:l:{id} 全部变成 50 条）。
 //
 // 匿名可读；token 在场则携带。每项带 id（=movie_id）与 number（番号）。
-// 这里只读第一页：「测试读取」只需证明这张清单真的读得到，不需要全量扫到底。
+// 「测试读取」与向导只需要第一页；poll 的全量扫用 AllListItems。
 func (c *Client) ListItems(ctx context.Context, listID string) ([]ListItem, error) {
+	return c.ListItemsPage(ctx, listID, 1)
+}
+
+// maxListItemPages 是清单项翻页的上限。
+//
+// 上游「返回空即到底」，因此需要一个上限防一个异常的上游让我们无限翻下去。
+// 单用户清单量级远小于 200 页；这是宽余量，不是业务约束。
+const maxListItemPages = 200
+
+// ListItemsPage 读某张清单的第 page 页（从 1 开始）。
+func (c *Client) ListItemsPage(ctx context.Context, listID string, page int) ([]ListItem, error) {
 	listID = strings.TrimSpace(listID)
 	if listID == "" {
 		return nil, &ValidationError{Message: "清单 id 为空"}
+	}
+	if page < 1 {
+		page = 1
 	}
 
 	var env movieListEnvelope
 	if err := c.GetJSON(ctx, "/api/v1/movies/tags",
 		url.Values{
 			"filter_by": {"0:l:" + listID},
-			"page":      {"1"},
+			"page":      {fmt.Sprint(page)},
 		}, &env); err != nil {
-		return nil, fmt.Errorf("取清单 %s 的项: %w", listID, err)
+		return nil, fmt.Errorf("取清单 %s 第 %d 页的项: %w", listID, page, err)
 	}
 
 	out := make([]ListItem, 0, len(env.Movies))
@@ -149,6 +163,34 @@ func (c *Client) ListItems(ctx context.Context, listID string) ([]ListItem, erro
 			MovieID: strings.TrimSpace(m.ID),
 			Number:  strings.TrimSpace(m.Number),
 		})
+	}
+	return out, nil
+}
+
+// AllListItems 全量扫一张清单，按 movie_id 去重。
+//
+// 规格 §5.1/§6.1：上游不给总页数，「空页即止」。翻页期间清单可能被增删，
+// 因此按 movie_id 去重，同 id 以第一次出现的番号为准。空 movie_id 的行走不过去
+// （没有主键就没法建任务）。
+func (c *Client) AllListItems(ctx context.Context, listID string) ([]ListItem, error) {
+	seen := make(map[string]bool)
+	var out []ListItem
+
+	for page := 1; page <= maxListItemPages; page++ {
+		items, err := c.ListItemsPage(ctx, listID, page)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			return out, nil
+		}
+		for _, item := range items {
+			if item.MovieID == "" || seen[item.MovieID] {
+				continue
+			}
+			seen[item.MovieID] = true
+			out = append(out, item)
+		}
 	}
 	return out, nil
 }

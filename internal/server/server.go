@@ -14,8 +14,11 @@ import (
 	"time"
 
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
+	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
 // defaultVersion 是没被 -ldflags -X 注入时的版本，与镜像构建前的本地运行一致。
@@ -43,6 +46,12 @@ type Options struct {
 	JavDB *javdb.Integration
 	// Qbt 是 qBittorrent 集成门面（测试连接、autorun 改写）；nil 时 /api/qbittorrent/* 回 503。
 	Qbt *qbittorrent.Integration
+	// Tasks 是任务域读模型（/api/tasks、/api/overview counts）；nil 时这些端点回 503。
+	Tasks *task.Store
+	// Sidefx 是副作用出箱（overview 的「需人工」要把驻留待办算进去）；nil 时按 0 计。
+	Sidefx *sidefx.Outbox
+	// Loops 是三条循环的进程内健康位；nil 时 overview 的 loops 全空。
+	Loops *loops.Registry
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
 	// 非 nil 时 /readyz 恒 503 db_unavailable 并原样回出这句原因——启动不 abort。
 	Unready error
@@ -67,6 +76,9 @@ func New(opts Options) (http.Handler, error) {
 		settings: opts.Settings,
 		javdb:    opts.JavDB,
 		qbt:      opts.Qbt,
+		tasks:    opts.Tasks,
+		sidefx:   opts.Sidefx,
+		loops:    opts.Loops,
 	}
 
 	shell, err := fs.ReadFile(opts.Assets, "index.html")
@@ -81,6 +93,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /version", s.versionHandler)
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/config", s.configAll)
+	mux.HandleFunc("GET /api/tasks", s.tasksList)
+	mux.HandleFunc("GET /api/tasks/{movie_id}", s.taskDetail)
 	mux.HandleFunc("GET /api/config/{section}", s.configSection)
 	mux.HandleFunc("PATCH /api/config/{section}", s.patchSection)
 	mux.HandleFunc("DELETE /api/config/{section}", s.deleteSection)
@@ -102,6 +116,9 @@ type server struct {
 	settings *settings.Store
 	javdb    *javdb.Integration
 	qbt      *qbittorrent.Integration
+	tasks    *task.Store
+	sidefx   *sidefx.Outbox
+	loops    *loops.Registry
 }
 
 // healthz 只看进程活不活：数据库或上游挂了也不该让编排器重启容器。

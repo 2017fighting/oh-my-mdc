@@ -3,12 +3,11 @@ package server
 import (
 	"net/http"
 	"time"
+
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
 )
 
 // overviewBody 是 GET /api/overview 的形状（规格 §8.4）。
-//
-// 这是骨架：counts 要等任务域落地（#23）才有真数据，loops 要等三条循环起来
-// （#26）才有 last_run_at。形状先定，前端照它接。
 type overviewBody struct {
 	OK          bool       `json:"ok"`
 	Initialized bool       `json:"initialized"`
@@ -37,6 +36,9 @@ type loopsBody struct {
 }
 
 // overview 汇总门禁与面板顶部要用的计数。
+//
+// counts 来自 task_state 视图（任务级状态不落列，ADR-0006）；需人工 = 失败任务 +
+// 驻留副作用（规格 §8.2）。loops 来自进程内健康位：循环没起来/还没跑过时是空位。
 func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	store, ok := s.settingsStore(w)
 	if !ok {
@@ -49,12 +51,48 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, overviewBody{
+	body := overviewBody{
 		OK:          true,
 		Initialized: snapshot.Initialized,
 		Paused:      snapshot.Paused,
-		// 任务域表在 #23 落地；在那之前计数恒为 0，而不是假装查成功。
-		Counts: countsBody{},
-		Loops:  loopsBody{},
-	})
+	}
+
+	if s.tasks != nil {
+		counts, err := s.tasks.Counts(r.Context())
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "db_unavailable", err.Error())
+			return
+		}
+		body.Counts = countsBody{
+			Downloading:    counts.Downloading,
+			Processing:     counts.Processing,
+			Finished:       counts.Finished,
+			NeedsAttention: counts.NeedsAttention,
+		}
+	}
+	if s.sidefx != nil {
+		stuck, err := s.sidefx.StuckCount(r.Context())
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "db_unavailable", err.Error())
+			return
+		}
+		body.Counts.NeedsAttention += stuck
+	}
+
+	body.Loops = loopsBody{
+		Poll:      s.healthOf(loops.Poll),
+		Reconcile: s.healthOf(loops.Reconcile),
+		Sidefx:    s.healthOf(loops.Sidefx),
+	}
+
+	writeJSON(w, http.StatusOK, body)
+}
+
+// healthOf 把登记处的一条状态翻成对外的空位/实位。
+func (s *server) healthOf(name string) loopHealth {
+	if s.loops == nil {
+		return loopHealth{}
+	}
+	status := s.loops.Health(name)
+	return loopHealth{LastRunAt: status.LastRunAt, LastOK: status.LastOK}
 }

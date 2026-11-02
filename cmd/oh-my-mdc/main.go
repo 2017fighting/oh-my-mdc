@@ -19,9 +19,13 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
+	"github.com/2017fighting/oh-my-mdc/internal/task"
 	"github.com/2017fighting/oh-my-mdc/internal/web"
 )
 
@@ -62,6 +66,11 @@ func run(logger *slog.Logger) error {
 	var javdbIntegration *javdb.Integration
 	var qbtIntegration *qbittorrent.Integration
 	var jellyfinIntegration *jellyfin.Integration
+	var taskStore *task.Store
+	var sidefxOutbox *sidefx.Outbox
+	var loopsRegistry *loops.Registry
+	// pollDone 在循环退出时关闭：关连接池之前要先等它，别把在途查询踩掉。
+	var pollDone chan struct{}
 	if database != nil {
 		pinger = database
 
@@ -71,6 +80,10 @@ func run(logger *slog.Logger) error {
 		qbtIntegration = qbittorrent.New(qbittorrent.Options{})
 		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（sidefx 票接线）。
 		jellyfinIntegration = jellyfin.New(jellyfin.Options{})
+		// 任务域读模型与副作用出箱：面板与 poll 循环共用。
+		taskStore = task.NewStore(database.Pool())
+		sidefxOutbox = sidefx.New(database.Pool())
+		loopsRegistry = loops.NewRegistry()
 		settingsStore = settings.NewStore(database.Pool(),
 			settings.WithTester("javdb", javdbIntegration),
 			settings.WithTester("qbittorrent", qbtIntegration),
@@ -85,6 +98,36 @@ func run(logger *slog.Logger) error {
 				unready = fmt.Errorf("读取设置失败: %w", err)
 			} else {
 				logger.Info("设置已读取", "initialized", snapshot.Initialized, "paused", snapshot.Paused)
+
+				// 循环随进程起，每轮自己看门禁（未初始化/已暂停就零动作）：
+				// 向导配完三件套后不必重启，下一个探路周期就会开始轮询。
+				pollRunner := poll.New(poll.Options{
+					Store:    taskStore,
+					Outbox:   sidefxOutbox,
+					Settings: settingsStore,
+					Source:   javdbIntegration,
+					Adder:    qbtIntegration,
+					Pool:     database.Pool(),
+					Loops:    loopsRegistry,
+					Logger:   logger,
+				})
+				pollDone = make(chan struct{})
+				go func() {
+					defer close(pollDone)
+					pollRunner.Run(ctx)
+				}()
+				logger.Info("poll 循环已启动")
+
+				// defer 顺序：这里注册的最先执行——先取消 ctx，等循环退出，
+				// 之后才是 database.Close（它在更早处注册）。
+				defer func() {
+					stop()
+					select {
+					case <-pollDone:
+					case <-time.After(shutdownGrace):
+						logger.Warn("poll 循环未在宽限内退出")
+					}
+				}()
 			}
 		}
 	}
@@ -97,6 +140,9 @@ func run(logger *slog.Logger) error {
 		Settings: settingsStore,
 		JavDB:    javdbIntegration,
 		Qbt:      qbtIntegration,
+		Tasks:    taskStore,
+		Sidefx:   sidefxOutbox,
+		Loops:    loopsRegistry,
 	})
 	if err != nil {
 		return err
