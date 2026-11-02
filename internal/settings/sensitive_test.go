@@ -100,6 +100,13 @@ type tableColumn struct {
 // createTable 只认本项目迁移的固定写法：`CREATE TABLE <name> (` 起，`);` 止。
 var createTable = regexp.MustCompile(`(?i)^CREATE TABLE\s+(\w+)\s*\($`)
 
+// 后续迁移的列变更也要被看见，否则「新增 text 列未登记即失败」的保证会漏掉
+// 经 ALTER 加进来的列（00004 的 jellyfin.media_root 就是这种）。
+var (
+	addColumn  = regexp.MustCompile(`(?i)^ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)\s+(.+)$`)
+	dropColumn = regexp.MustCompile(`(?i)^ALTER TABLE\s+(\w+)\s+DROP COLUMN\s+(\w+)\s*;$`)
+)
+
 func textColumnsInMigrations(t *testing.T) []tableColumn {
 	t.Helper()
 
@@ -131,6 +138,7 @@ func textColumnsInMigrations(t *testing.T) []tableColumn {
 				continue
 			}
 			if table == "" {
+				columns = applyColumnAlter(trimmed, columns)
 				continue
 			}
 
@@ -145,6 +153,9 @@ func textColumnsInMigrations(t *testing.T) []tableColumn {
 }
 
 func isTextType(rest []string) bool {
+	if len(rest) == 0 {
+		return false
+	}
 	kind := strings.ToLower(rest[0])
 	switch kind {
 	case "text", "varchar":
@@ -154,4 +165,27 @@ func isTextType(rest []string) bool {
 	default:
 		return false
 	}
+}
+
+// applyColumnAlter 把一条 ALTER TABLE ... ADD/DROP COLUMN 应用到已解析的列集上。
+//
+// 只认本项目用到的两种写法，别的 ALTER 原样掠过。
+func applyColumnAlter(line string, columns []tableColumn) []tableColumn {
+	if match := addColumn.FindStringSubmatch(line); match != nil {
+		if isTextType(strings.Fields(match[3])) {
+			return append(columns, tableColumn{table: match[1], name: match[2]})
+		}
+		return columns
+	}
+	if match := dropColumn.FindStringSubmatch(line); match != nil {
+		kept := columns[:0]
+		for _, column := range columns {
+			if column.table == match[1] && column.name == match[2] {
+				continue
+			}
+			kept = append(kept, column)
+		}
+		return kept
+	}
+	return columns
 }

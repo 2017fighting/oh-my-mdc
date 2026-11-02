@@ -112,13 +112,16 @@ func initialized(t *testing.T, h http.Handler) bool {
 }
 
 // configureMainline 把主线三件套配齐（JavDB + 清单登记 + qBittorrent + Jellyfin）。
+//
+// media_root 用一次性的真实目录：门禁要看它在盘上可见（P4-2，本票把 media_root
+// 搬进了 Jellyfin 集成表）。
 func configureMainline(t *testing.T, h http.Handler) {
 	t.Helper()
 
 	save(t, h, "javdb", `"token": "eyJhbGciOiJIUzI1NiJ9.phone-token"`)
 	save(t, h, "list_registry", `"list_id": "k4EVE4", "purpose": "want_watch", "name": "想看清单"`)
 	save(t, h, "qbittorrent", `"url": "http://qbittorrent.media.svc:8080", "download_root": "/media/downloads/completed/av"`)
-	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "0123456789abcdef"`)
+	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "0123456789abcdef", "media_root": "`+t.TempDir()+`"`)
 }
 
 func TestConfigStartsUninitializedWithEverySectionPresent(t *testing.T) {
@@ -132,6 +135,9 @@ func TestConfigStartsUninitializedWithEverySectionPresent(t *testing.T) {
 	body := jsonOf(t, rec)
 	if body["initialized"] != false {
 		t.Errorf("initialized = %v, want false（全新部署三件套不齐）", body["initialized"])
+	}
+	if body["media_root_visible"] != false {
+		t.Errorf("media_root_visible = %v, want false（还没有 media_root）", body["media_root_visible"])
 	}
 
 	sections := sectionsOf(t, rec)
@@ -163,6 +169,15 @@ func TestConfigStartsUninitializedWithEverySectionPresent(t *testing.T) {
 	if app["paused"] != false {
 		t.Errorf("app.paused = %v, want false", app["paused"])
 	}
+
+	// media_root 属于 Jellyfin 那一节（本票从 app_config 搬过来）。
+	if _, ok := app["media_root"]; ok {
+		t.Error("app 节仍有 media_root：媒体库目录已搬到 Jellyfin 表")
+	}
+	jellyfin := dataOf(t, sections["jellyfin"].(map[string]any))
+	if jellyfin["media_root"] != "" {
+		t.Errorf("jellyfin.media_root = %v, want \"\"", jellyfin["media_root"])
+	}
 }
 
 func TestSavingTheMainlineTrioOpensTheGate(t *testing.T) {
@@ -180,9 +195,24 @@ func TestSavingTheMainlineTrioOpensTheGate(t *testing.T) {
 		t.Error("initialized = true：Jellyfin 还没配")
 	}
 
-	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "0123456789abcdef"`)
+	// P4-2：路径不在盘上就不算「Jellyfin 可写」——三个容器没挂同一路径，
+	// 硬链接与刷新都会失败，这时不能把面板打开。
+	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "0123456789abcdef", "media_root": "`+t.TempDir()+"/not-mounted"+`"`)
+	if got := initialized(t, h); got {
+		t.Error("initialized = true：media_root 在这台机器上看不见")
+	}
+	if got := jsonOf(t, send(t, h, http.MethodGet, "/api/config", ""))["media_root_visible"]; got != false {
+		t.Errorf("media_root_visible = %v, want false（向导要靠它说清是哪一半没到）", got)
+	}
+
+	// 末尾空格不该让门禁与 Test/Refresh 看到两个值（都按去空白后的路径判）。
+	save(t, h, "jellyfin", `"media_root": "`+t.TempDir()+` "`)
 	if got := initialized(t, h); !got {
 		t.Error("initialized = false：三件套齐了，循环才该启动")
+	}
+
+	if got := jsonOf(t, send(t, h, http.MethodGet, "/api/config", ""))["media_root_visible"]; got != true {
+		t.Errorf("media_root_visible = %v, want true", got)
 	}
 
 	overview := jsonOf(t, send(t, h, http.MethodGet, "/api/overview", ""))
@@ -207,7 +237,7 @@ func TestSensitiveValuesAreMaskedAndNeverEchoed(t *testing.T) {
 		{"telegram.bot_token", "123456:telegram-bot-token-value"},
 	}
 	save(t, h, "qbittorrent", `"url": "http://qbt.media.svc:8080", "password": "`+secrets[1].value+`"`)
-	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "`+secrets[2].value+`"`)
+	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "`+secrets[2].value+`", "media_root": "`+t.TempDir()+`"`)
 	save(t, h, "mteam", `"api_key": "`+secrets[3].value+`", "enabled": true`)
 	save(t, h, "ai_translation", `"base_url": "https://api.example.com/v1", "api_key": "`+secrets[4].value+`", "model": "gpt-4o-mini"`)
 	save(t, h, "telegram", `"bot_token": "`+secrets[5].value+`", "chat_id": "12345"`)
@@ -538,7 +568,7 @@ func TestTestEndpointNeedsAConfiguredIntegration(t *testing.T) {
 func TestAppSectionIsSingleRowAndNotDeletable(t *testing.T) {
 	h := newSettingsHandler(t)
 
-	saved := save(t, h, "app", `"poll_interval": "20m", "max_attempts": 5, "media_root": "/media/jellyfin/jav", "paused": true`)
+	saved := save(t, h, "app", `"poll_interval": "20m", "max_attempts": 5, "paused": true`)
 	data := dataOf(t, saved)
 	if data["poll_interval"] != "20m0s" {
 		t.Errorf("poll_interval = %v, want 20m0s", data["poll_interval"])

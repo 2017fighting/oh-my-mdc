@@ -75,11 +75,11 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 - **六张集成表**，统一契约：**行存在＝已配置**；可选表（mteam / ai_translation / telegram）另带 `enabled bool`；每表统一 `last_test_at timestamptz`、`last_test_ok bool`、`last_test_error text`：
   - `javdb`：`token`（敏感）、`last_test_*`。
   - `qbittorrent`：`url`、`username`、`password`（敏感）、`category text DEFAULT 'mdc'`、`download_root text`、`webhook_base_url text`、`last_test_*`。（#9 裁决：webhook base URL / 下载根目录 / category 落 qbt 表；#8 的 `app_config.base_url` 因此作废。）
-  - `jellyfin`：`url`、`api_key`（敏感）、`last_test_*`。
+  - `jellyfin`：`url`、`api_key`（敏感）、`media_root`（媒体库根目录；#22 从 `app_config` 搬来——三容器同路径，刷新与硬链接共用）、`last_test_*`。
   - `mteam`：`api_key`（敏感）、`enabled`、`last_test_*`。
   - `ai_translation`：`base_url`、`api_key`（敏感）、`model`、`enabled`、`last_test_*`。
   - `telegram`：`bot_token`（敏感）、`chat_id`、`enabled`、**`notify_download_started bool DEFAULT true`、`notify_filed bool DEFAULT true`、`notify_processing_failed bool DEFAULT true`、`notify_download_stalled bool DEFAULT true`**、`last_test_*`（#13 列名落定）。
-- **`app_config`**（单行 `id=1`）：`poll_interval DEFAULT 15m`、`reconcile_interval DEFAULT 5m`、`sidefx_interval DEFAULT 1m`、`max_attempts DEFAULT 3`、`media_root text`、`paused bool DEFAULT false`、`updated_at`。程序自己写的时间戳不进本表（#8 修订；`last_test_*` 在集成表，不受此限）。
+- **`app_config`**（单行 `id=1`）：`poll_interval DEFAULT 15m`、`reconcile_interval DEFAULT 5m`、`sidefx_interval DEFAULT 1m`、`max_attempts DEFAULT 3`、`paused bool DEFAULT false`、`updated_at`。程序自己写的时间戳不进本表（#8 修订；`last_test_*` 在集成表，不受此限）。
 - **env 只有 bootstrap**：`MDC_DATABASE_URL`（默认 `postgres://mdc:mdc@localhost:5432/mdc?sslmode=disable`）、可选 `MDC_DB_PASSWORD`（进程内拼进 DSN，prod 形态见 §10）、`MDC_LISTEN`（默认 `:8080`）。~~`MDC_DATA_DIR` 作废~~（#12：无应用数据目录）。用户设置零 env 覆盖路径。
 
 ### 4.4 索引与语义要点
@@ -87,7 +87,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 - 索引：`task_version(status, next_attempt_at)`、`task_version(claimed_at)`、`side_effect(kind, next_attempt_at)`、`task_event(movie_id, id DESC)`。
 - **claim**（版本互斥，#7+#8）：`UPDATE task_version SET claimed_at=now(), claimed_by=$2 WHERE infohash=$1 AND (claimed_at IS NULL OR claimed_at < now()-interval '10 minutes') RETURNING ...`，完事清零；配哨兵错误 `ErrNoPendingTask`（本轮没活）/ `ErrClaimLost`（抢输别当失败），进程内再加 per-version 锁。
 - **循环单飞**：poll/reconcile/sidefx 各持一把 `pg_advisory_lock`（专用连接），防 Flux 滚动更新时新旧 pod 重叠；版本级互斥仍归 claim。
-- **启动顺序**：迁移（goose Up，advisory lock）→ 读设置 → 三件套齐（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写）才算 `initialized`，三循环才启动；**迁移失败不 abort 启动**：页面能看、`/readyz` 回 `503 db_unavailable` 带原因、循环不跑（#8 修订）。
+- **启动顺序**：迁移（goose Up，advisory lock）→ 读设置 → 三件套齐（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写＝`url`+`api_key`+`media_root` 齐且目录在本机可见）才算 `initialized`，三循环才启动；**迁移失败不 abort 启动**：页面能看、`/readyz` 回 `503 db_unavailable` 带原因、循环不跑（#8 修订）。
 - 敏感列：代码常量清单（表.列）驱动掩码与日志脱敏，配一条反射单测——新增 string 列未登记即测试失败。DB 明文（信任边界＝CNPG 与其备份）。
 - 历史永久保留，无 retention；UI 单条删除只删记录不碰媒体（判重依赖版本行存在，不做自动清理）。
 
@@ -156,7 +156,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 （来源：#10）
 
-- 设置：`url` + `api_key`；「可写」判定＝鉴权通过的管理员 key。
+- 设置：`url` + `api_key` + `media_root`；「可写」判定＝`GET /System/Info` 鉴权通过（向导要管理员 API key；该端点只要被接受的凭据就读得到，权限不足的 token 会在第一次刷新时以 auth 暴露，见 §9）**且** `media_root` 在本机可见（三容器同路径，缺目录就没有硬链接与刷新）。
 - 刷新：**目录级 rescan**（`POST /Library/Media/Updated`，目标 `{media_root}/{番号}` 目录，目录在盘才调）；被拒降级全库；**2xx 只当「已受理」**（未知路径也回 204，实测陷阱）；两次失败 = warning，走 side_effect 独立重试 + coalesce。
 - 三容器同路径约定：qbt / oh-my-mdc / Jellyfin 把同一 host 目录挂同一路径（`/media`）；设置仅 `media_root` 一项，无路径翻译层。
 
@@ -273,7 +273,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 - **JavDB 步**：token（掩码）+ 清单按 id 登记——读取已有清单优先（探测列表，按 id/名字匹配「想看清单」），新建 = `POST /api/v1/lists` 探测 + **手动粘贴 id 兜底**（#15/#16 流程，名字 4–30 规则见 §5.1）。
 - **qBittorrent 步**：地址/账号（可选）/category/下载根目录/回调 base URL（集群内 svc DNS）+ **autorun 改写前后完整对比**，保存前再确认一次（§5.4）。
-- **Jellyfin 步**：地址 + api key + `media_root` 本机存在性检查。
+- **Jellyfin 步**：地址 + api key + `media_root`（三者同一步一次保存；「测试可写」＝鉴权 + 目录本机可见）。
 - **M-Team / AI 翻译 / Telegram 步**：凭据 + enabled（+ Telegram 四勾选框；测试 = getMe → 测试消息）。
 - 定位：**配完就不碰**——再配置走侧边栏「集成设置」回同一向导（编辑态），不做两套界面。
 
@@ -287,7 +287,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 未初始化（三件套不齐）＝整站只剩向导，面板入口禁用 + 一张解释卡。文案照原型（`prototype/wizard-dashboard` 分支）：
 
-- 解释卡：「主线三件套（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写）齐了，循环才会启动」。
+- 解释卡：「主线三件套（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写）齐了，循环才会启动」；Jellyfin 一行另列「媒体库目录在盘可见」（`media_root_visible`），未初始化时一眼看出是哪一半没到。
 - 状态名「下载中/加工中/已入库/需人工」；按钮「重试/强制重刮/测试连接/保存本步/重发」；版本失败原因直译 phase。全部 copy zh-CN。
 
 ### 8.4 REST 契约（本票落定；全部 JSON；无应用鉴权）
@@ -296,7 +296,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 | 端点 | 语义 |
 |---|---|
-| `GET /api/config` | 全部 section + `initialized`；每节 `{revision, configured, enabled?, data}`；敏感字段呈 `{configured: bool, masked: "ab***yz"}`，原文永不回显 |
+| `GET /api/config` | 全部 section + `initialized` + `media_root_visible`（门禁第二半，向导解释卡用）；每节 `{revision, configured, enabled?, data}`；敏感字段呈 `{configured: bool, masked: "ab***yz"}`，原文永不回显 |
 | `GET /api/config/{section}` | 单节，带 `revision`（内容指纹） |
 | `PATCH /api/config/{section}` | 部分字段 + `revision`；省略＝不改，敏感字段空串也＝不改；`revision` 冲突 → `409 revision_conflict`；校验错 → `400` |
 | `DELETE /api/config/{section}` | 删行＝解除配置；主线三件套被删 → `initialized` 变 false 回到向导 |
@@ -367,8 +367,8 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 - P3-4 既有 moviepilot autorun 的双引号被归一为单引号，语义不变。
 
 **4 设置 Jellyfin** —— 裁决：#5.5。
-- P4-1 向导存 url+api_key，测试连接 = System/Info 鉴权 + `media_root` 存在性。
-- P4-2 media_root 不可见 → 明确错误提示（三件套不齐，面板不开放）。
+- P4-1 向导 Jellyfin 步一次存 url+api_key+`media_root`（#22），测试连接 = System/Info 鉴权 + `media_root` 存在性。
+- P4-2 media_root 不可见 → 明确错误提示（三件套不齐，面板不开放：`initialized=false`，解释卡点名这一条）。
 
 **5 M-Team（可选）** —— 裁决：#5.2。
 - P5-1 未配置/禁用 → 定源只走 JavDB 磁力，无 M-Team 网络调用。

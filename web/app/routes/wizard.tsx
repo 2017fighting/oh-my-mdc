@@ -112,11 +112,19 @@ const steps: StepSpec[] = [
   {
     section: "jellyfin",
     title: "Jellyfin",
-    help: "地址 + API key。媒体库目录在最后一步填（media_root），入库后靠它做目录级刷新。",
+    help: "地址 + API key + 媒体库目录。「测试可写」过两关：System/Info 鉴权，以及这项目录在本机可见——三个容器必须把同一个 host 目录挂到同一路径。",
     test: { label: "测试可写" },
     fields: [
       { key: "url", label: "地址", kind: "text", mono: true, placeholder: "http://jellyfin.media.svc:8096" },
       { key: "api_key", label: "API Key", hint: "留空＝不改", kind: "secret", mono: true },
+      {
+        key: "media_root",
+        label: "媒体库目录",
+        hint: "与 qBittorrent 下载根目录同一 host 目录；目录级刷新靠它",
+        kind: "text",
+        mono: true,
+        placeholder: "/media/jellyfin/jav",
+      },
     ],
   },
   {
@@ -168,7 +176,6 @@ const steps: StepSpec[] = [
       { key: "reconcile_interval", label: "对账（分钟）", kind: "duration" },
       { key: "sidefx_interval", label: "副作用（分钟）", kind: "duration" },
       { key: "max_attempts", label: "最大重试次数", kind: "number" },
-      { key: "media_root", label: "媒体库目录", hint: "与下载根目录必须同路径可见", kind: "text", mono: true, placeholder: "/media/jellyfin/jav" },
       { key: "paused", label: "暂停循环", hint: "正在跑的版本会跑完，不接新的", kind: "bool" },
     ],
   },
@@ -484,7 +491,8 @@ function GateCard({ snapshot }: { snapshot: ConfigSnapshot }) {
           <h2 className="text-sm font-semibold">还没初始化</h2>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
             主线三件套（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin
-            可写）齐了，循环才会启动。在那之前这个页面只有向导，面板进不去。
+            可写）齐了，循环才会启动。Jellyfin 那一项还包括媒体库目录在这台机器上可见
+            ——三个容器把同一个 host 目录挂到同一路径。在那之前这个页面只有向导，面板进不去。
           </p>
           <ul className="mt-2 space-y-1 text-[12px]">
             <CheckLine ok={javdb.configured} label="JavDB token 已保存" />
@@ -494,6 +502,16 @@ function GateCard({ snapshot }: { snapshot: ConfigSnapshot }) {
             />
             <CheckLine ok={qbittorrent.configured} label="qBittorrent 已配置" />
             <CheckLine ok={jellyfin.configured} label="Jellyfin 已配置" />
+            <CheckLine
+              ok={snapshot.media_root_visible}
+              label={
+                !jellyfin.configured
+                  ? "媒体库目录（Jellyfin 步里填）"
+                  : snapshot.media_root_visible
+                    ? "媒体库目录在盘可见"
+                    : "媒体库目录不在盘：三个容器要挂同一路径"
+              }
+            />
           </ul>
         </div>
       </div>
@@ -509,7 +527,10 @@ function MainlineChecklist({ snapshot }: { snapshot: ConfigSnapshot }) {
       <ul className="mt-1.5 space-y-1 text-[12px]">
         <CheckLine ok={javdb.configured} label="JavDB 可读，清单已登记" />
         <CheckLine ok={qbittorrent.configured} label="qBittorrent 可连" />
-        <CheckLine ok={jellyfin.configured} label="Jellyfin 可写" />
+        <CheckLine
+          ok={jellyfin.configured && snapshot.media_root_visible}
+          label="Jellyfin 可写（目录在盘）"
+        />
       </ul>
       <p className="mt-2 text-[11px] text-muted-foreground">
         M-Team / AI 翻译 / Telegram 缺席只降级对应能力，不影响初始化。

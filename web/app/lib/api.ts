@@ -45,6 +45,8 @@ export type SectionState = {
 export type ConfigSnapshot = {
   ok: boolean;
   initialized: boolean;
+  /** 门禁的第二半：媒体库目录在这台机器上可见（P4-2）。 */
+  media_root_visible: boolean;
   sections: Record<SectionName, SectionState>;
 };
 

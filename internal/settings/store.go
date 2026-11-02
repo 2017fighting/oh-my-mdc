@@ -50,6 +50,11 @@ func NewStore(pool *pgxpool.Pool, options ...Option) *Store {
 type Snapshot struct {
 	// Sections 按 name 索引，包含全部八节。
 	Sections map[string]SectionState
+	// MediaRootVisible 报告 jellyfin 节里的 media_root 在本机是否可见。
+	//
+	// 它单独露出来是给向导的解释卡用的：门禁关着时要说得清是哪一半没到
+	//（P4-2：media_root 不可见 → 面板不开放）。
+	MediaRootVisible bool
 	// Initialized 是「主线三件套齐了」的判据（规格 §4.4）。
 	Initialized bool
 	// Paused 是 app_config.paused：循环暂停开关。
@@ -75,7 +80,8 @@ func (s *Store) Load(ctx context.Context) (Snapshot, error) {
 			snapshot.Paused, _ = loaded.values["paused"].(bool)
 		}
 	}
-	snapshot.Initialized = isInitialized(snapshot.Sections)
+	snapshot.MediaRootVisible = DirectoryVisible(mediaRootOf(snapshot.Sections))
+	snapshot.Initialized = isInitialized(snapshot.Sections, snapshot.MediaRootVisible)
 
 	if err := tx.Commit(ctx); err != nil {
 		return Snapshot{}, fmt.Errorf("settings: 提交只读事务: %w", err)
@@ -197,14 +203,22 @@ func (s *Store) RecordTest(ctx context.Context, name string, result TestResult) 
 
 // isInitialized 实现规格 §4.4 的门禁判据：主线三件套都配置了就位。
 //
-// 只看「行在不在」，不看 last_test_*：测试是诊断而非门禁——上游某次抖动不该把
-// 已经跑起来的系统踢回向导。凭据是否还有效由集成自己的告警指标说话（规格 §9）。
-func isInitialized(states map[string]SectionState) bool {
+// 只看「行在不在」与「媒体库目录在不在盘」，不看 last_test_*：测试是诊断而非门禁——
+// 上游某次抖动不该把已经跑起来的系统踢回向导。凭据是否还有效由集成自己的告警指标
+// 说话（规格 §9）。
+//
+// 本机可见性是个例外（#22 修订 ADR-0009）：没有目录就没有硬链接与刷新，三件套里
+// 的「Jellyfin 可写」不成立。它查本机文件系统，不打扰上游，也不会因上游抖动而抖。
+func isInitialized(states map[string]SectionState, mediaRootVisible bool) bool {
 	for _, name := range []string{"javdb", "qbittorrent", "jellyfin"} {
 		if !states[name].Configured {
 			return false
 		}
 	}
+	if !mediaRootVisible {
+		return false
+	}
+
 	entries, _ := states["list_registry"].Data["entries"].([]ListEntry)
 	for _, entry := range entries {
 		if entry.Purpose == "want_watch" {
@@ -212,6 +226,15 @@ func isInitialized(states map[string]SectionState) bool {
 		}
 	}
 	return false
+}
+
+// mediaRootOf 取 jellyfin 节里的媒体库目录（未配置或未填时是空串）。
+//
+// 去掉首尾空白：门禁与 Test/Refresh 必须看同一个值，粘贴带空格的路径不该出现
+// 「解释卡说目录不在盘、测试可写却是绿的」。
+func mediaRootOf(states map[string]SectionState) string {
+	mediaRoot, _ := states["jellyfin"].Data["media_root"].(string)
+	return strings.TrimSpace(mediaRoot)
 }
 
 // querier 是连接池与事务共有的那一小片面：本包只用得上这三句。

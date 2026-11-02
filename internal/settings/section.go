@@ -14,7 +14,7 @@ type Kind int
 const (
 	// KindIntegration 是六张集成表：单行 id=1，行存在＝已配置。
 	KindIntegration Kind = iota
-	// KindApp 是单行 app_config：间隔、重试、媒体库根目录、暂停开关。
+	// KindApp 是单行 app_config：间隔、重试、暂停开关。
 	KindApp
 	// KindLists 是 list_registry：按用途登记清单 id，可有多行。
 	KindLists
@@ -124,8 +124,11 @@ var sections = []Section{
 		Fields: []Field{
 			{Name: "url", Type: TypeText, URL: true},
 			{Name: "api_key", Type: TypeText},
+			// media_root 是「Jellyfin 可写」的一半（#22）：三容器同路径，刷新与硬链接都靠它。
+			// 它原来在 app_config，搬到本表是为了让向导的 Jellyfin 步一次存完。
+			{Name: "media_root", Type: TypeText, MaxLen: 1024},
 		},
-		Required: []string{"url", "api_key"},
+		Required: []string{"url", "api_key", "media_root"},
 	},
 	{
 		Name: "mteam",
@@ -169,7 +172,6 @@ var sections = []Section{
 			{Name: "reconcile_interval", Type: TypeDuration, Min: 30, Max: 24 * 3600},
 			{Name: "sidefx_interval", Type: TypeDuration, Min: 10, Max: 3600},
 			{Name: "max_attempts", Type: TypeInt, Min: 1, Max: 100},
-			{Name: "media_root", Type: TypeText},
 			{Name: "paused", Type: TypeBool},
 		},
 	},

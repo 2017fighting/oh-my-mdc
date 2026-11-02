@@ -12,10 +12,14 @@ import (
 const maxConfigBody = 1 << 20
 
 // configBody 是 GET /api/config：八节设置 + 门禁判据。
+//
+// media_root_visible 是门禁的第二半（P4-2）：向导的解释卡要靠它说清「Jellyfin
+// 已配置、但目录不在盘」这一种未初始化，不然三个绿勾配一句「还没初始化」没法读。
 type configBody struct {
-	OK          bool                             `json:"ok"`
-	Initialized bool                             `json:"initialized"`
-	Sections    map[string]settings.SectionState `json:"sections"`
+	OK               bool                             `json:"ok"`
+	Initialized      bool                             `json:"initialized"`
+	MediaRootVisible bool                             `json:"media_root_visible"`
+	Sections         map[string]settings.SectionState `json:"sections"`
 }
 
 // sectionBody 是单节读写与解除配置的回执。门禁状态从 GET /api/config 读，
@@ -51,9 +55,10 @@ func (s *server) configAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, configBody{
-		OK:          true,
-		Initialized: snapshot.Initialized,
-		Sections:    snapshot.Sections,
+		OK:               true,
+		Initialized:      snapshot.Initialized,
+		MediaRootVisible: snapshot.MediaRootVisible,
+		Sections:         snapshot.Sections,
 	})
 }
 
