@@ -31,9 +31,9 @@ jobs:
     env:
       MDC_TEST_DATABASE_URL: postgres://mdc:mdc@localhost:5432/mdc?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -52,13 +52,13 @@ jobs:
     name: 前端门（lint / typecheck / build + embed）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: web/package.json
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: pnpm
@@ -76,7 +76,7 @@ jobs:
       - name: 前端构建（embed 的输入）
         run: make web-build
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
