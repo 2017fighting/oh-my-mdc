@@ -18,6 +18,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/config"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
+	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/web"
@@ -58,13 +59,17 @@ func run(logger *slog.Logger) error {
 	var pinger server.Pinger
 	var settingsStore *settings.Store
 	var javdbIntegration *javdb.Integration
+	var qbtIntegration *qbittorrent.Integration
 	if database != nil {
 		pinger = database
 
 		// JavDB 集成门面：既是设置域的「测试读取」实现，也是向导探测/代建清单的客户端。
 		javdbIntegration = javdb.New(javdb.Options{})
+		// qBittorrent 集成门面：设置域的「测试连接」实现 + 向导的 autorun 对比/落地。
+		qbtIntegration = qbittorrent.New(qbittorrent.Options{})
 		settingsStore = settings.NewStore(database.Pool(),
-			settings.WithTester("javdb", javdbIntegration))
+			settings.WithTester("javdb", javdbIntegration),
+			settings.WithTester("qbittorrent", qbtIntegration))
 
 		// 读设置是启动顺序的一环（规格 §4.4）：这一次读失败说明设置域不可用，
 		// 与迁移失败同等对待——照常监听，但 /readyz 回 503 带原因。
@@ -86,6 +91,7 @@ func run(logger *slog.Logger) error {
 		Unready:  unready,
 		Settings: settingsStore,
 		JavDB:    javdbIntegration,
+		Qbt:      qbtIntegration,
 	})
 	if err != nil {
 		return err

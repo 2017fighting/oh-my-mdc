@@ -17,6 +17,7 @@ import {
 import {
   api,
   HttpError,
+  type AutorunPlan,
   type ConfigSnapshot,
   type JavDBList,
   type ListEntry,
@@ -352,6 +353,10 @@ export function Wizard({
             />
           ) : null}
 
+          {step.section === "qbittorrent" ? (
+            <AutorunAssist configured={section.configured} />
+          ) : null}
+
           {step.section === "list_registry" ? (
             <RegisteredListHint entries={entriesOf(section)} />
           ) : null}
@@ -528,6 +533,145 @@ function CheckLine({ ok, label }: { ok: boolean; label: string }) {
       </span>
       <span className={ok ? "" : "text-muted-foreground"}>{label}</span>
     </li>
+  );
+}
+
+/**
+ * AutorunAssist 是 qbt 步的 autorun 共存改写面板（ADR-0007、规格 §5.4）。
+ *
+ * 两段式：先「预览改写」拿完整的前后对比，人看过才允许「确认改写并写入」。
+ * 只写 autorun_program；`autorun_on_torrent_added_*` 与 autorun 开关都不碰，
+ * 开关关着时只给警告（命令写进去也不会执行）。
+ */
+function AutorunAssist({ configured }: { configured: boolean }) {
+  const [plan, setPlan] = React.useState<AutorunPlan | null>(null);
+  const [pending, setPending] = React.useState<"preview" | "apply" | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
+
+  const preview = async () => {
+    setPending("preview");
+    setError(null);
+    setNotice(null);
+    try {
+      setPlan(await api.qbtAutorunPlan());
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const apply = async () => {
+    setPending("apply");
+    setError(null);
+    setNotice(null);
+    try {
+      const applied = await api.qbtAutorunApply();
+      setPlan(applied);
+      setNotice(
+        applied.applied
+          ? "已写入 qBittorrent：autorun 现在是共存命令，moviepilot 的原有回调照旧。"
+          : "现值已含本项目回调，没有改写。",
+      );
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const canApply = Boolean(plan && !plan.skip && plan.changed);
+
+  return (
+    <div className="mt-3 rounded-lg border bg-muted/30 p-3">
+      <div className="text-[13px] font-medium">autorun 共存改写</div>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        qBittorrent 的 autorun 只能写一条命令，本项目用
+        <code className="mx-1 font-mono">/bin/sh -c</code>
+        把现有命令和回调拼在一起：外层双引号、payload 内单引号、
+        <code className="mx-1 font-mono">;</code>
+        让两条命令各自执行。只会写 autorun_program，不碰 autorun_on_torrent_added_*。
+      </p>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={preview}
+          disabled={pending !== null || !configured}
+          title={configured ? undefined : "先保存本步再预览"}
+        >
+          {pending === "preview" ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+          预览改写
+        </Button>
+        <Button
+          size="sm"
+          onClick={apply}
+          disabled={pending !== null || !canApply}
+          title={canApply ? undefined : "先预览，且现值需要改"}
+        >
+          {pending === "apply" ? <Loader2 className="animate-spin" aria-hidden /> : null}
+          确认改写并写入
+        </Button>
+        {plan ? (
+          <Badge variant="outline">
+            {plan.skip ? "已含本项目回调" : plan.changed ? "需要改写" : "无需改动"}
+          </Badge>
+        ) : null}
+      </div>
+
+      {plan ? (
+        <div className="mt-3 space-y-2">
+          {plan.warning ? (
+            <p className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-1.5 text-[11px] leading-relaxed text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+              {plan.warning}
+            </p>
+          ) : null}
+
+          <AutorunLine label="现在（Before）" value={plan.before || "（空）"} />
+          <AutorunLine label="改写后（After）" value={plan.after || "（空）"} highlight />
+
+          <p className="text-[11px] text-muted-foreground">
+            {plan.skip
+              ? "现值已经包含本项目回调：再保存也不会重复改写（幂等）。"
+              : "确认后只写 autorun_program 这一个偏好键；原来的 moviepilot 命令原样保留。"}
+          </p>
+        </div>
+      ) : null}
+
+      {notice ? (
+        <p className="mt-2 text-[11px] text-emerald-700 dark:text-emerald-400">{notice}</p>
+      ) : null}
+      {error ? <p className="mt-2 text-[11px] text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+/** AutorunLine 是一行完整命令：不截断、不换行折半，横向滚动让人看全。 */
+function AutorunLine({
+  label,
+  value,
+  highlight,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+}) {
+  return (
+    <div>
+      <div className="mb-1 text-[11px] text-muted-foreground">{label}</div>
+      <pre
+        className={cn(
+          "overflow-x-auto rounded-md border px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre",
+          highlight
+            ? "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-950/30"
+            : "bg-background",
+        )}
+      >
+        {value}
+      </pre>
+    </div>
   );
 }
 

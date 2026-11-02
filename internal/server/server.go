@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
+	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -40,6 +41,8 @@ type Options struct {
 	Settings *settings.Store
 	// JavDB 是 JavDB 集成门面（向导探测/代建清单）；nil 时 /api/javdb/* 回 503 db_unavailable。
 	JavDB *javdb.Integration
+	// Qbt 是 qBittorrent 集成门面（测试连接、autorun 改写）；nil 时 /api/qbittorrent/* 回 503。
+	Qbt *qbittorrent.Integration
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
 	// 非 nil 时 /readyz 恒 503 db_unavailable 并原样回出这句原因——启动不 abort。
 	Unready error
@@ -63,6 +66,7 @@ func New(opts Options) (http.Handler, error) {
 		unready:  opts.Unready,
 		settings: opts.Settings,
 		javdb:    opts.JavDB,
+		qbt:      opts.Qbt,
 	}
 
 	shell, err := fs.ReadFile(opts.Assets, "index.html")
@@ -83,6 +87,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/config/{section}/test", s.testSection)
 	mux.HandleFunc("GET /api/javdb/lists", s.javdbLists)
 	mux.HandleFunc("POST /api/javdb/lists", s.javdbCreateList)
+	mux.HandleFunc("GET /api/qbittorrent/autorun", s.qbtAutorunPlan)
+	mux.HandleFunc("POST /api/qbittorrent/autorun", s.qbtAutorunApply)
 	mux.Handle("/", s.spa())
 	return mux, nil
 }
@@ -95,6 +101,7 @@ type server struct {
 	unready  error
 	settings *settings.Store
 	javdb    *javdb.Integration
+	qbt      *qbittorrent.Integration
 }
 
 // healthz 只看进程活不活：数据库或上游挂了也不该让编排器重启容器。

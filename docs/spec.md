@@ -302,7 +302,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `DELETE /api/config/{section}` | 删行＝解除配置；主线三件套被删 → `initialized` 变 false 回到向导 |
 | `POST /api/config/{section}/test` | 跑测试连接，写 `last_test_*`，返回 `{ok, code, detail, duration_ms}` |
 
-`revision` = 该节当前内容的规范 JSON sha256 短指纹，读写往返检测并发编辑（open-mdcng 先例）。`list_registry` PATCH = `{list_id, purpose:'want_watch', name}` upsert；向导辅助端点 `GET /api/javdb/lists`（探测）、`POST /api/javdb/lists {name, description?}`（代建，同名拒原样透出）。
+`revision` = 该节当前内容的规范 JSON sha256 短指纹，读写往返检测并发编辑（open-mdcng 先例）。`list_registry` PATCH = `{list_id, purpose:'want_watch', name}` upsert；向导辅助端点 `GET /api/javdb/lists`（探测）、`POST /api/javdb/lists {name, description?}`（代建，同名拒原样透出）。 qBittorrent 的 autorun 共存改写同样走向导辅助端点：`GET /api/qbittorrent/autorun` 只读预览 `{before, after, skip, changed, enabled, warning}`（前后**完整**命令串），`POST /api/qbittorrent/autorun` 是人工确认后的落地，只写 `autorun_program`（ADR-0007）。
 
 **向导辅助端点的错误**（`GET/POST /api/javdb/lists`，与下面测试错误码同一套分类）：`auth`/`business` → `400`（要用户改凭据/输入），`protocol`/`network` → `502`（服务端行为异常或网络，查或重试）；`{ok:false, error:{code, message}}`，`business` 的 `message` 原样带上游文案（如「您已創建了同名清單」）。
 

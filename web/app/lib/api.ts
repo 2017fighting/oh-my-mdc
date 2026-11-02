@@ -80,6 +80,21 @@ export type Overview = {
   >;
 };
 
+/** autorun 改写的前后对比：GET 只读预览，POST 是人工确认后的落地。 */
+export type AutorunPlan = {
+  ok: boolean;
+  /** 完整命令串，不截断：向导要原样给人对比。 */
+  before: string;
+  after: string;
+  /** 现值已含本项目回调 → 跳过不改（幂等）。 */
+  skip: boolean;
+  changed: boolean;
+  /** qbt 的 autorun 开关现值：关着的话命令写了也不会跑。 */
+  enabled: boolean;
+  warning?: string;
+  applied: boolean;
+};
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -132,6 +147,13 @@ export const api = {
 
   /** 探测用户自建的清单（向导「读取已有清单」）。 */
   javdbLists: () => request<{ ok: boolean; lists: JavDBList[] }>("/api/javdb/lists"),
+
+  /** 读 qbt 的 autorun 现值并算出共存改写（不改上游）。 */
+  qbtAutorunPlan: () => request<AutorunPlan>("/api/qbittorrent/autorun"),
+
+  /** 确认后把改写落到 qbt：只写 autorun_program。 */
+  qbtAutorunApply: () =>
+    request<AutorunPlan>("/api/qbittorrent/autorun", { method: "POST" }),
 
   /** 代建一张清单（向导「一键创建」），返回新清单 id。 */
   javdbCreateList: (name: string, description?: string) =>
