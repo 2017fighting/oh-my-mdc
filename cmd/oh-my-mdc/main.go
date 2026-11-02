@@ -17,6 +17,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/config"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
+	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/web"
@@ -56,9 +57,14 @@ func run(logger *slog.Logger) error {
 
 	var pinger server.Pinger
 	var settingsStore *settings.Store
+	var javdbIntegration *javdb.Integration
 	if database != nil {
 		pinger = database
-		settingsStore = settings.NewStore(database.Pool())
+
+		// JavDB 集成门面：既是设置域的「测试读取」实现，也是向导探测/代建清单的客户端。
+		javdbIntegration = javdb.New(javdb.Options{})
+		settingsStore = settings.NewStore(database.Pool(),
+			settings.WithTester("javdb", javdbIntegration))
 
 		// 读设置是启动顺序的一环（规格 §4.4）：这一次读失败说明设置域不可用，
 		// 与迁移失败同等对待——照常监听，但 /readyz 回 503 带原因。
@@ -79,6 +85,7 @@ func run(logger *slog.Logger) error {
 		Assets:   web.Assets(),
 		Unready:  unready,
 		Settings: settingsStore,
+		JavDB:    javdbIntegration,
 	})
 	if err != nil {
 		return err

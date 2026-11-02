@@ -57,7 +57,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 ### 4.1 任务域
 
-- **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id int NOT NULL REFERENCES list_registry`（首次发现来源）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`created_at`、`updated_at`。
+- **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id text NOT NULL REFERENCES list_registry`（首次发现来源；清单 id 是字符串，见 §4.3）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`created_at`、`updated_at`。
 - **`task_version`**：`infohash text PK`、`movie_id FK`、`source text CHECK ('javdb_magnet','mteam_torrent')`、`delivery text CHECK ('magnet','torrent')`、`label text`（普通/中文/破解，best-effort）、`status text CHECK ('downloading','processing','finished','failed')`、`error_phase text CHECK ('downloading','scrape','organize')`、`error_reason text`、`claimed_at timestamptz`、`claimed_by text`、`attempts int NOT NULL DEFAULT 0`、`next_attempt_at timestamptz`、`add_pending bool`、`list_removal_pending bool`、`payload text`（magnet 串或 .torrent 备份路径）、`created_at`、`updated_at`。
 - **`version_file`**：`id bigint identity PK`、`infohash FK`、`rel_path`、`size_bytes`、`part_index`、`is_primary bool`。（入库幂等与「已落盘」判定的永久记录。）
 - **`task_event`**（append-only）：`id identity PK`、`movie_id`、`infohash NULL`、`kind text CHECK ('state_change','side_effect','alert','manual_retry')`、`from_state`、`to_state`、`phase`、`reason`、`at timestamptz`。承担告警「只发一次」判据、面板历史、失败追问。
@@ -71,7 +71,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 ### 4.3 设置域（ADR-0002）
 
-- **`list_registry`**：`list_id int PK`（JavDB 清单 id，判定永远靠 id）、`purpose text CHECK ('want_watch','want_watch_zh') UNIQUE`、`name text`（快照，仅展示）、`created_at`。
+- **`list_registry`**：`list_id text PK`（JavDB 清单 id，判定永远靠 id；**是字符串不是整数**——#16 实测清单 id 为 6 字符 nanoid，如 `e8r1OM`，建清单响应的 `data.id` 也是字符串，见 §5.1）、`purpose text CHECK ('want_watch','want_watch_zh') UNIQUE`、`name text`（快照，仅展示）、`created_at`。
 - **六张集成表**，统一契约：**行存在＝已配置**；可选表（mteam / ai_translation / telegram）另带 `enabled bool`；每表统一 `last_test_at timestamptz`、`last_test_ok bool`、`last_test_error text`：
   - `javdb`：`token`（敏感）、`last_test_*`。
   - `qbittorrent`：`url`、`username`、`password`（敏感）、`category text DEFAULT 'mdc'`、`download_root text`、`webhook_base_url text`、`last_test_*`。（#9 裁决：webhook base URL / 下载根目录 / category 落 qbt 表；#8 的 `app_config.base_url` 因此作废。）
@@ -303,6 +303,8 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `POST /api/config/{section}/test` | 跑测试连接，写 `last_test_*`，返回 `{ok, code, detail, duration_ms}` |
 
 `revision` = 该节当前内容的规范 JSON sha256 短指纹，读写往返检测并发编辑（open-mdcng 先例）。`list_registry` PATCH = `{list_id, purpose:'want_watch', name}` upsert；向导辅助端点 `GET /api/javdb/lists`（探测）、`POST /api/javdb/lists {name, description?}`（代建，同名拒原样透出）。
+
+**向导辅助端点的错误**（`GET/POST /api/javdb/lists`，与下面测试错误码同一套分类）：`auth`/`business` → `400`（要用户改凭据/输入），`protocol`/`network` → `502`（服务端行为异常或网络，查或重试）；`{ok:false, error:{code, message}}`，`business` 的 `message` 原样带上游文案（如「您已創建了同名清單」）。
 
 **测试连接错误码**（稳定机器码；超时一律 **10s**）：`timeout`、`auth`（凭据无效/被踢/API key 拒）、`network`、`protocol`（非预期响应/信封）、`business`（业务校验错，如 JavDB `success:0`+`action:null`、清单同名拒）、`token_invalid` / `chat_unavailable`（Telegram 两步测试专用）。各节测试内容：javdb = 用户域读 + 登记清单读；qbittorrent = 登录 + 版本读 + autorun 现值读（供 diff）；jellyfin = `GET /System/Info` 鉴权 + `media_root` 存在；mteam = pageSize=1 单行搜索；ai_translation = 1 token 补全；telegram = getMe → sendMessage。
 

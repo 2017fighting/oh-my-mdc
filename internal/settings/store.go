@@ -354,26 +354,43 @@ type boundColumn struct {
 // saveList 把 {list_id, purpose, name} upsert 进 list_registry。
 //
 // 一个用途只许占一张清单（唯一索引）；换清单要先 DELETE 旧的，这里给的是能读懂的
-// 冲突文案而不是 Postgres 的约束名。
+// 冲突文案而不是 Postgres 的约束名。list_id 是字符串（JavDB 的 6 字符 nanoid）。
 func saveList(ctx context.Context, q querier, sec Section, patch Patch) error {
-	listID, _ := patch.Values["list_id"].(int)
+	listID, _ := patch.Values["list_id"].(string)
+	listID = strings.TrimSpace(listID)
 	purpose, _ := patch.Values["purpose"].(string)
-	if listID == 0 || purpose == "" {
+	if listID == "" || purpose == "" {
 		// 两个都没给：和 saveSingle 一样，不写库。
 		return nil
 	}
 
-	var holder int
+	var holder string
 	err := q.QueryRow(ctx,
 		"SELECT list_id FROM list_registry WHERE purpose = $1 AND list_id <> $2", purpose, listID).Scan(&holder)
 	switch {
 	case err == nil:
 		return ValidationError{
 			Field:   "purpose",
-			Message: fmt.Sprintf("%s 已登记清单 #%d，先解除再换", purpose, holder),
+			Message: fmt.Sprintf("%s 已登记清单 %s，先解除再换", purpose, holder),
 		}
 	case !errors.Is(err, pgx.ErrNoRows):
 		return fmt.Errorf("settings: 查 %s 用途占用: %w", purpose, err)
+	}
+
+	// 同一个 id 换用途也是换清单：ON CONFLICT 直接改 purpose 会把另一用途的登记
+	// 静默顶掉（丢一行）。这里先查这张 id 现在是不是挂在**别的**用途上。
+	var existingPurpose string
+	err = q.QueryRow(ctx, "SELECT purpose FROM list_registry WHERE list_id = $1", listID).Scan(&existingPurpose)
+	switch {
+	case err == nil:
+		if existingPurpose != purpose {
+			return ValidationError{
+				Field:   "purpose",
+				Message: fmt.Sprintf("清单 %s 已登记为 %s，先解除再换用途", listID, existingPurpose),
+			}
+		}
+	case !errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("settings: 查清单 %s 现有用途: %w", listID, err)
 	}
 
 	columns := []string{"list_id", "purpose"}
@@ -441,4 +458,15 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// registeredLists 读全部已登记的清单（list_registry 的行）。
+//
+// 给「测试读取」用：JavDB 的测试要连登记清单一起验，但清单是另一节。
+func (s *Store) registeredLists(ctx context.Context) ([]ListEntry, error) {
+	loaded, err := loadLists(ctx, s.pool, false)
+	if err != nil {
+		return nil, err
+	}
+	return loaded.lists, nil
 }

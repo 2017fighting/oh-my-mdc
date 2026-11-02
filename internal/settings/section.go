@@ -8,8 +8,6 @@
 //     last_test_* 只是测试账本，不进指纹（否则测试一次就把别的标签页判成冲突）。
 package settings
 
-import "math"
-
 // Kind 是一节设置落在哪种表里。
 type Kind int
 
@@ -100,7 +98,8 @@ var sections = []Section{
 		Name: "list_registry",
 		Kind: KindLists,
 		Fields: []Field{
-			{Name: "list_id", Type: TypeInt, Min: 1, Max: math.MaxInt32},
+			// list_id 是 JavDB 的清单 id，实测是 6 字符 nanoid 字符串（#16），不是整数。
+			{Name: "list_id", Type: TypeText, MaxLen: 64},
 			{Name: "purpose", Type: TypeText, Enum: []string{"want_watch", "want_watch_zh"}},
 			{Name: "name", Type: TypeText, MaxLen: 64},
 		},

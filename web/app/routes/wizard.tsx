@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronLeft, ChevronRight, CircleHelp, Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleHelp, Loader2, Plus, RefreshCw } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
@@ -18,6 +18,7 @@ import {
   api,
   HttpError,
   type ConfigSnapshot,
+  type JavDBList,
   type ListEntry,
   type Masked,
   type SectionName,
@@ -81,7 +82,7 @@ const steps: StepSpec[] = [
     // 真实的测试内容就是「用户域读 + 登记清单读」（规格 §8.4）。
     test: { label: "测试读取", section: "javdb" },
     fields: [
-      { key: "list_id", label: "清单 id", hint: "JavDB 清单页地址里的数字", kind: "number", mono: true },
+      { key: "list_id", label: "清单 id", hint: "JavDB 清单 id（6 位，如 k4EVE4）；也可用下面的探测/代建自动填入", kind: "text", mono: true },
       { key: "name", label: "清单名字", hint: "只用于展示", kind: "text", placeholder: "想看清单" },
     ],
     fixed: { purpose: "want_watch" },
@@ -340,6 +341,16 @@ export function Wizard({
               />
             ))}
           </div>
+
+          {step.section === "list_registry" ? (
+            <ListAssist
+              tokenConfigured={snapshot.sections.javdb.configured}
+              onPick={(id, name) => {
+                setField("list_id", id);
+                if (name) setField("name", name);
+              }}
+            />
+          ) : null}
 
           {step.section === "list_registry" ? (
             <RegisteredListHint entries={entriesOf(section)} />
@@ -629,6 +640,129 @@ function formatWhen(iso: string): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return iso;
   return at.toLocaleString("zh-CN", { hour12: false });
+}
+
+/**
+ * ListAssist 是清单步的助手：探测已有清单 → 按 id 选中，或一键代建，或手动填 id 兜底。
+ *
+ * 三条路都汇到同一个结果：往上面的 list_id（与 name）填值。判定永远靠 id，
+ * 名字只是快照（规格 §5.1/P2-4）。探测/代建都需要已保存的 JavDB token。
+ */
+function ListAssist({
+  tokenConfigured,
+  onPick,
+}: {
+  tokenConfigured: boolean;
+  onPick: (id: string, name?: string) => void;
+}) {
+  const [lists, setLists] = React.useState<JavDBList[] | null>(null);
+  const [pending, setPending] = React.useState<"probe" | "create" | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
+
+  const probe = async () => {
+    setPending("probe");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.javdbLists();
+      setLists(result.lists);
+      if (result.lists.length === 0) {
+        setNotice("你的账户还没有清单，可以一键创建「想看清单」。");
+      }
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const create = async () => {
+    setPending("create");
+    setError(null);
+    setNotice(null);
+    try {
+      // 名字/描述留空：默认值由服务端单点提供（「想看清单」/「oh-my-mdc 自动创建」），
+      // 前端不再各存一份字面量。
+      const created = await api.javdbCreateList("", "");
+      onPick(created.id, created.name);
+      setNotice(`已创建清单「${created.name}」（id ${created.id}），确认后保存本步。`);
+    } catch (err) {
+      // 同名拒等业务错原样透出：用户需要看到服务端的原话才知道改什么名字。
+      setError(messageOf(err));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  // 只把「名字里带想看」的那张作为**推荐**（不自动选中）：判定永远靠 id，名字只是快照
+  // （规格 §5.1/P2-4）。没有匹配时不给推荐，绝不拿默认清单冒充「想看清单」。
+  const suggested = lists?.find((list) => list.name.includes("想看"));
+
+  return (
+    <div className="mt-3 rounded-lg border bg-muted/30 p-3">
+      <div className="text-[13px] font-medium">从 JavDB 选清单</div>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        探测会列出你自建的清单，按 id 选中登记；也可以一键创建「想看清单」，或手动填 id 兜底。
+      </p>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={probe}
+          disabled={pending !== null || !tokenConfigured}
+          title={tokenConfigured ? undefined : "先在 JavDB 步保存 token"}
+        >
+          {pending === "probe" ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+          探测已有清单
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={create}
+          disabled={pending !== null || !tokenConfigured}
+          title={tokenConfigured ? undefined : "先在 JavDB 步保存 token"}
+        >
+          {pending === "create" ? <Loader2 className="animate-spin" aria-hidden /> : <Plus aria-hidden />}
+          一键创建「想看清单」
+        </Button>
+        {suggested ? (
+          <Button variant="ghost" size="sm" onClick={() => onPick(suggested.id, suggested.name)}>
+            推荐「{suggested.name}」
+          </Button>
+        ) : null}
+      </div>
+
+      {lists && lists.length > 0 ? (
+        <ul className="mt-2 divide-y rounded-md border bg-background">
+          {lists.map((list) => (
+            <li key={list.id}>
+              <button
+                type="button"
+                onClick={() => onPick(list.id, list.name)}
+                className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-[12px] hover:bg-accent/50"
+              >
+                <span className="min-w-0 truncate">
+                  <span className="font-mono text-[11px] text-muted-foreground">{list.id}</span>{" "}
+                  {list.name}
+                  {list.is_default ? <span className="ml-1 opacity-60">默认</span> : null}
+                </span>
+                <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                  {list.movies_count} 项
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {notice ? (
+        <p className="mt-2 text-[11px] text-emerald-700 dark:text-emerald-400">{notice}</p>
+      ) : null}
+      {error ? <p className="mt-2 text-[11px] text-destructive">{error}</p> : null}
+    </div>
+  );
 }
 
 function RegisteredListHint({ entries }: { entries: ListEntry[] }) {

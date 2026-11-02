@@ -26,8 +26,10 @@ type LastTest struct {
 }
 
 // ListEntry 是 list_registry 的一行：一张清单的 id 与用途，名字只是快照。
+//
+// ListID 是字符串：实测 JavDB 的清单 id 是 6 字符 nanoid（#16），不是整数。
 type ListEntry struct {
-	ListID  int    `json:"list_id"`
+	ListID  string `json:"list_id"`
 	Purpose string `json:"purpose"`
 	Name    string `json:"name"`
 }

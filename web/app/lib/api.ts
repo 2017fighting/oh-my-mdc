@@ -28,7 +28,8 @@ export type LastTest = {
 };
 
 export type ListEntry = {
-  list_id: number;
+  /** JavDB 清单 id：实测是 6 字符 nanoid 字符串（#16），不是整数。 */
+  list_id: string;
   purpose: "want_watch" | "want_watch_zh";
   name: string;
 };
@@ -53,6 +54,14 @@ export type TestResult = {
   code?: string;
   detail?: string;
   duration_ms: number;
+};
+
+/** JavDB 清单探测结果里的一张清单：id 是身份，name 只是快照。 */
+export type JavDBList = {
+  id: string;
+  name: string;
+  is_default: boolean;
+  movies_count: number;
 };
 
 export type Overview = {
@@ -120,4 +129,14 @@ export const api = {
     request<TestResult>(`/api/config/${name}/test`, { method: "POST" }),
 
   overview: () => request<Overview>("/api/overview"),
+
+  /** 探测用户自建的清单（向导「读取已有清单」）。 */
+  javdbLists: () => request<{ ok: boolean; lists: JavDBList[] }>("/api/javdb/lists"),
+
+  /** 代建一张清单（向导「一键创建」），返回新清单 id。 */
+  javdbCreateList: (name: string, description?: string) =>
+    request<{ ok: boolean; id: string; name: string }>("/api/javdb/lists", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    }),
 };

@@ -51,6 +51,19 @@ type TestInput struct {
 	Values map[string]any
 	// Enabled 是可选集成的开关（节上没有 enabled 时为 false）。
 	Enabled bool
+	// Lists 是已登记的清单（list_registry 的全部行）。JavDB 的测试要读登记清单，
+	// 但那是另一节，所以由 Store 读好一并交过来。
+	Lists []ListEntry
+}
+
+// ListFor 按用途取一张已登记的清单。
+func (in TestInput) ListFor(purpose string) (ListEntry, bool) {
+	for _, entry := range in.Lists {
+		if entry.Purpose == purpose {
+			return entry, true
+		}
+	}
+	return ListEntry{}, false
 }
 
 // Text 取一个文本字段的原文。
@@ -128,14 +141,17 @@ func (s *Store) Test(ctx context.Context, name string) (TestResult, error) {
 	if !loaded.configured {
 		return TestResult{}, ErrNotConfigured
 	}
-	enabled, _ := loaded.values["enabled"].(bool)
+	input, err := s.inputFrom(ctx, loaded)
+	if err != nil {
+		return TestResult{}, err
+	}
 
 	tester, ok := s.testers[name]
 	if !ok {
 		return TestResult{}, fmt.Errorf("settings: %s 没有注册测试实现", name)
 	}
 
-	tested := runTest(ctx, tester, section, TestInput{Values: loaded.values, Enabled: enabled}, s.testTimeout)
+	tested := runTest(ctx, tester, section, input, s.testTimeout)
 
 	if tested.Code == CodeNotImplemented {
 		return tested, nil
@@ -170,4 +186,36 @@ func runTest(ctx context.Context, tester Tester, section Section, input TestInpu
 
 	result.Duration = time.Since(started)
 	return result
+}
+
+// Input 读一节的原文（含凭据）与已登记清单，供集成层装配客户端。
+//
+// 它是**内部接线点**，不是 HTTP 面：返回值里有凭据原文，只许在进程内流转。
+// 对外的读写一律走 Section/Patch（敏感列只出掩码）。
+func (s *Store) Input(ctx context.Context, name string) (TestInput, error) {
+	section, ok := Lookup(name)
+	if !ok {
+		return TestInput{}, ErrUnknownSection
+	}
+	loaded, err := loadRow(ctx, s.pool, section, false)
+	if err != nil {
+		return TestInput{}, err
+	}
+	if !loaded.configured {
+		return TestInput{}, ErrNotConfigured
+	}
+	return s.inputFrom(ctx, loaded)
+}
+
+// inputFrom 把一行原文装成 TestInput（含已登记清单）。
+//
+// Test 与 Input 共用它：两处装配必须一致，否则测试看到的输入会和实际连上游时的不一样。
+// 清单登记是另一节，JavDB 的「测试读取」要连它一起验，所以这里一并读好。
+func (s *Store) inputFrom(ctx context.Context, loaded row) (TestInput, error) {
+	enabled, _ := loaded.values["enabled"].(bool)
+	lists, err := s.registeredLists(ctx)
+	if err != nil {
+		return TestInput{}, err
+	}
+	return TestInput{Values: loaded.values, Enabled: enabled, Lists: lists}, nil
 }

@@ -116,7 +116,7 @@ func configureMainline(t *testing.T, h http.Handler) {
 	t.Helper()
 
 	save(t, h, "javdb", `"token": "eyJhbGciOiJIUzI1NiJ9.phone-token"`)
-	save(t, h, "list_registry", `"list_id": 48213, "purpose": "want_watch", "name": "想看清单"`)
+	save(t, h, "list_registry", `"list_id": "k4EVE4", "purpose": "want_watch", "name": "想看清单"`)
 	save(t, h, "qbittorrent", `"url": "http://qbittorrent.media.svc:8080", "download_root": "/media/downloads/completed/av"`)
 	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "0123456789abcdef"`)
 }
@@ -173,7 +173,7 @@ func TestSavingTheMainlineTrioOpensTheGate(t *testing.T) {
 		t.Error("initialized = true：只有 token 还不能开循环")
 	}
 
-	save(t, h, "list_registry", `"list_id": 48213, "purpose": "want_watch", "name": "想看清单"`)
+	save(t, h, "list_registry", `"list_id": "k4EVE4", "purpose": "want_watch", "name": "想看清单"`)
 	save(t, h, "qbittorrent", `"url": "http://qbittorrent.media.svc:8080"`)
 
 	if got := initialized(t, h); got {
@@ -367,10 +367,10 @@ func TestDeletingAMainlineSectionClosesTheGate(t *testing.T) {
 func TestRegistryTakesOneListPerPurpose(t *testing.T) {
 	h := newSettingsHandler(t)
 
-	save(t, h, "list_registry", `"list_id": 48213, "purpose": "want_watch", "name": "想看清单"`)
+	save(t, h, "list_registry", `"list_id": "k4EVE4", "purpose": "want_watch", "name": "想看清单"`)
 
 	rec := send(t, h, http.MethodPatch, "/api/config/list_registry",
-		`{"revision": "`+currentRevision(t, h, "list_registry")+`", "list_id": 999, "purpose": "want_watch", "name": "另一张"}`)
+		`{"revision": "`+currentRevision(t, h, "list_registry")+`", "list_id": "e8r1OM", "purpose": "want_watch", "name": "另一张"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400（一个用途只许一张清单）: %s", rec.Code, rec.Body)
 	}
@@ -379,7 +379,7 @@ func TestRegistryTakesOneListPerPurpose(t *testing.T) {
 		t.Fatalf("DELETE status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 	if rec := send(t, h, http.MethodPatch, "/api/config/list_registry",
-		`{"revision": "`+currentRevision(t, h, "list_registry")+`", "list_id": 999, "purpose": "want_watch", "name": "另一张"}`); rec.Code != http.StatusOK {
+		`{"revision": "`+currentRevision(t, h, "list_registry")+`", "list_id": "e8r1OM", "purpose": "want_watch", "name": "另一张"}`); rec.Code != http.StatusOK {
 		t.Fatalf("解除后重新登记 status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 
@@ -388,8 +388,8 @@ func TestRegistryTakesOneListPerPurpose(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("entries = %v, want 1 张", entries)
 	}
-	if entry := entries[0].(map[string]any); entry["list_id"] != float64(999) {
-		t.Errorf("list_id = %v, want 999", entry["list_id"])
+	if entry := entries[0].(map[string]any); entry["list_id"] != "e8r1OM" {
+		t.Errorf("list_id = %v, want e8r1OM", entry["list_id"])
 	}
 }
 
