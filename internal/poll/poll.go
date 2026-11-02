@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -117,7 +116,7 @@ func New(opts Options) *Runner {
 	}
 	owner := strings.TrimSpace(opts.Owner)
 	if owner == "" {
-		owner = defaultOwner()
+		owner = task.DefaultOwner()
 	}
 	now := opts.Now
 	if now == nil {
@@ -192,31 +191,14 @@ func (r *Runner) Run(ctx context.Context) {
 
 // RunOnce 跑一轮。它自己抢 advisory lock、自己记健康位。
 func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
-	if r.pool != nil {
-		conn, err := r.pool.Acquire(ctx)
-		if err != nil {
-			return Result{}, fmt.Errorf("poll: 取单飞连接: %w", err)
-		}
-
-		var locked bool
-		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", LockIDPoll).Scan(&locked); err != nil {
-			conn.Release()
-			return Result{}, fmt.Errorf("poll: 抢 advisory lock: %w", err)
-		}
-		if !locked {
-			conn.Release()
-			return Result{Locked: true, Reason: "另一实例正在跑 poll"}, nil
-		}
-		defer func() {
-			// 收尾用独立 ctx：进程被终止时也要把锁还回去，别让下一轮空等。
-			unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if _, err := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", LockIDPoll); err != nil {
-				r.logger.Error("poll: 释放 advisory lock 失败", "err", err)
-			}
-			conn.Release()
-		}()
+	release, locked, err := loops.Guard(ctx, r.pool, LockIDPoll, "poll", r.logger)
+	if err != nil {
+		return Result{}, err
 	}
+	if !locked {
+		return Result{Locked: true, Reason: "另一实例正在跑 poll"}, nil
+	}
+	defer release()
 
 	started := r.now()
 	result, err := r.run(ctx)
@@ -238,11 +220,8 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("poll: 读设置: %w", err)
 	}
-	if !snapshot.Initialized {
-		return Result{Gated: true, Reason: "主线三件套不齐"}, nil
-	}
-	if snapshot.Paused {
-		return Result{Gated: true, Reason: "循环已暂停"}, nil
+	if reason := snapshot.GateReason(); reason != "" {
+		return Result{Gated: true, Reason: reason}, nil
 	}
 
 	list, ok := wantWatchList(snapshot)
@@ -571,13 +550,7 @@ func (r *Runner) interval(ctx context.Context) time.Duration {
 	if err != nil {
 		return DefaultInterval
 	}
-
-	raw, _ := snapshot.Sections["app"].Data["poll_interval"].(string)
-	parsed, err := time.ParseDuration(raw)
-	if err != nil || parsed <= 0 {
-		return DefaultInterval
-	}
-	return parsed
+	return snapshot.Interval("poll_interval", DefaultInterval)
 }
 
 // wantWatchList 从设置快照里取「想看」清单。
@@ -599,12 +572,4 @@ func labelFor(magnet appapi.Magnet) string {
 		return mteam.LabelChinese
 	}
 	return ""
-}
-
-func defaultOwner() string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		host = "oh-my-mdc"
-	}
-	return fmt.Sprintf("%s-%d", host, os.Getpid())
 }

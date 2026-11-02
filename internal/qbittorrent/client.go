@@ -78,19 +78,26 @@ func (p Preferences) Autorun() Autorun {
 	return Autorun{Enabled: p.AutorunEnabled, Program: p.AutorunProgram}
 }
 
-// Properties 是 `torrents/properties` 里本项目判重与收编要用的字段。
+// Properties 是 `torrents/properties` 里本项目判重、收编与完成判定要用的字段。
 type Properties struct {
 	Hash     string `json:"hash"`
 	Name     string `json:"name"`
 	SavePath string `json:"save_path"`
-	Category string `json:"category"`
+	// ContentPath 是种子落盘后的真实路径（文件或目录），完成判定读它。
+	ContentPath string `json:"content_path"`
+	Category    string `json:"category"`
 	// Tags 是 qbt 原样的逗号分隔串（如 "mdc:in-progress, ABP-123"）。
 	Tags string `json:"tags"`
 }
 
 // HasProjectTag 报告这个种子是不是已经在本项目手里（有任一项目 tag）。
 func (p Properties) HasProjectTag() bool {
-	for _, tag := range splitTags(p.Tags) {
+	return hasProjectTag(p.Tags)
+}
+
+// hasProjectTag 是 tag 串判据的单点实现：properties 与 info 两条读法共用。
+func hasProjectTag(raw string) bool {
+	for _, tag := range splitTags(raw) {
 		if tag == TagInProgress || tag == TagFinished {
 			return true
 		}

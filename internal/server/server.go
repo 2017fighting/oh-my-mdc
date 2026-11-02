@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -32,6 +33,14 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+// Hooks 是 qBittorrent autorun 回调的接缝（真实实现是 reconcile.Runner）。
+//
+// 只有一件事：拿到 infohash，回读 qbt 的权威值并判定。它的返回值只进日志——
+// 回调恒回 200（规格 §5.4），所以这里不按错误码分叉。
+type Hooks interface {
+	HandleWebhook(ctx context.Context, infohash string) error
+}
+
 // Options 是构造 HTTP 面所需的全部输入。
 type Options struct {
 	// Version 由 -ldflags -X 注入，空则记作 dev。
@@ -52,6 +61,10 @@ type Options struct {
 	Sidefx *sidefx.Outbox
 	// Loops 是三条循环的进程内健康位；nil 时 overview 的 loops 全空。
 	Loops *loops.Registry
+	// Hooks 是 qbt autorun 回调（GET /api/hooks/qbt）；nil 时端点仍回 200 但不做事。
+	Hooks Hooks
+	// Logger 空则用 slog.Default()。
+	Logger *slog.Logger
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
 	// 非 nil 时 /readyz 恒 503 db_unavailable 并原样回出这句原因——启动不 abort。
 	Unready error
@@ -67,6 +80,10 @@ func New(opts Options) (http.Handler, error) {
 	if version == "" {
 		version = defaultVersion
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	s := &server{
 		version:  version,
@@ -79,6 +96,8 @@ func New(opts Options) (http.Handler, error) {
 		tasks:    opts.Tasks,
 		sidefx:   opts.Sidefx,
 		loops:    opts.Loops,
+		hooks:    opts.Hooks,
+		logger:   logger,
 	}
 
 	shell, err := fs.ReadFile(opts.Assets, "index.html")
@@ -93,6 +112,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /version", s.versionHandler)
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/config", s.configAll)
+	mux.HandleFunc("GET /api/hooks/qbt", s.qbtHook)
 	mux.HandleFunc("GET /api/tasks", s.tasksList)
 	mux.HandleFunc("GET /api/tasks/{movie_id}", s.taskDetail)
 	mux.HandleFunc("GET /api/config/{section}", s.configSection)
@@ -119,6 +139,8 @@ type server struct {
 	tasks    *task.Store
 	sidefx   *sidefx.Outbox
 	loops    *loops.Registry
+	hooks    Hooks
+	logger   *slog.Logger
 }
 
 // healthz 只看进程活不活：数据库或上游挂了也不该让编排器重启容器。
@@ -145,6 +167,19 @@ func (s *server) readyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// qbtHook 是 qbt autorun 的回调（规格 §5.4）：恒 200，载荷只有 infohash。
+//
+// 未知/非本项目 infohash 的静默 no-op 由引擎保证（零写入）；这里只负责把错误记进日志，
+// 绝不把它变成非 2xx——qbt 的 `curl -fsS` 会把那次失败当成下载流程的一部分。
+func (s *server) qbtHook(w http.ResponseWriter, r *http.Request) {
+	if s.hooks != nil {
+		if err := s.hooks.HandleWebhook(r.Context(), r.URL.Query().Get("ih")); err != nil {
+			s.logger.Error("qbt 回调处理失败", "err", err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

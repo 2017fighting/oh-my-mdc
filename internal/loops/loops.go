@@ -5,8 +5,13 @@
 package loops
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // 三条循环的名字（规格 §6.2）。
@@ -53,4 +58,45 @@ func (r *Registry) Health(name string) Status {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.status[name]
+}
+
+// Guard 抢一条循环的 pg advisory lock，返回释放函数与是否抢到。
+//
+// 单飞是三条循环共有的不变式（规格 §4.4）：防 Flux 滚动更新时新旧 pod 重叠跑同一轮。
+// 它用一条专用连接持有锁，释放时先 unlock 再还连接；释放本身用独立 ctx，
+// 进程被终止时也要把锁还回去，别让下一轮空等。
+//
+// pool 为 nil 时不设锁（测试或单进程场景）：返回 no-op 释放函数与 locked=true。
+func Guard(ctx context.Context, pool *pgxpool.Pool, key int64, name string, logger *slog.Logger) (func(), bool, error) {
+	if pool == nil {
+		return func() {}, true, nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s: 取单飞连接: %w", name, err)
+	}
+
+	var locked bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&locked); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("%s: 抢 advisory lock: %w", name, err)
+	}
+	if !locked {
+		conn.Release()
+		return func() {}, false, nil
+	}
+
+	release := func() {
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", key); err != nil {
+			logger.Error(name+": 释放 advisory lock 失败", "err", err)
+		}
+		conn.Release()
+	}
+	return release, true, nil
 }

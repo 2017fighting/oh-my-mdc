@@ -13,6 +13,8 @@ package task
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"time"
 )
 
@@ -68,9 +70,10 @@ const LeaseDuration = 10 * time.Minute
 //   - ErrNoPendingTask 是本轮没活（ClaimPending 找不到待加种的版本）；
 //   - ErrClaimLost 是抢输（别人拿着租约），调用方不该把它当失败。
 var (
-	ErrNoPendingTask = errors.New("task: 没有待处理的版本")
-	ErrClaimLost     = errors.New("task: 没抢到版本租约（别人正处理）")
-	ErrTaskNotFound  = errors.New("task: 任务不存在")
+	ErrNoPendingTask   = errors.New("task: 没有待处理的版本")
+	ErrClaimLost       = errors.New("task: 没抢到版本租约（别人正处理）")
+	ErrTaskNotFound    = errors.New("task: 任务不存在")
+	ErrVersionNotFound = errors.New("task: 版本不存在")
 )
 
 // Candidate 是 poll 定源后要落库的一条候选：任务种子 + 版本种子。
@@ -165,7 +168,19 @@ const (
 	MaxPageSize = 200
 )
 
-// ValidState 报告一个 ?state= 值是不是聚合状态名（空串合法，表示不筛）。
+// DefaultOwner 是 claim 持有者的默认标识（hostname-pid）。
+//
+// 三条触发通道（poll / webhook / 对账）都用它：租约上记的是谁拿的，
+// 排查「谁在跑这条版本」时一眼能对上进程。
+func DefaultOwner() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "oh-my-mdc"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
+}
+
+// ValidState 报告一个 ?state= 是不是聚合状态名（空串合法，表示不筛）。
 func ValidState(state string) bool {
 	switch state {
 	case "", string(StatusDownloading), string(StatusProcessing), string(StatusFinished), string(StatusFailed):

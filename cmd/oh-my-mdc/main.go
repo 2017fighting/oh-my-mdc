@@ -23,6 +23,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
+	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
@@ -71,8 +72,9 @@ func run(logger *slog.Logger) error {
 	var taskStore *task.Store
 	var sidefxOutbox *sidefx.Outbox
 	var loopsRegistry *loops.Registry
-	// pollDone 在循环退出时关闭：关连接池之前要先等它，别把在途查询踩掉。
-	var pollDone chan struct{}
+	var reconcileRunner *reconcile.Runner
+	// loopDone 是循环退出的信号：关连接池之前要先等它们，别把在途查询踩掉。
+	var loopDone []chan struct{}
 	if database != nil {
 		pinger = database
 
@@ -104,6 +106,24 @@ func run(logger *slog.Logger) error {
 			} else {
 				logger.Info("设置已读取", "initialized", snapshot.Initialized, "paused", snapshot.Paused)
 
+				// 下载完成的第二条通道：qbt 回调（即时）+ 对账循环（5 分钟）。
+				// 两者共用一个推进引擎，互斥靠版本行租约（规格 §4.4）。
+				reconcileRunner = reconcile.New(reconcile.Options{
+					Store:    taskStore,
+					Outbox:   sidefxOutbox,
+					Settings: settingsStore,
+					Qbt:      qbtIntegration,
+					Pool:     database.Pool(),
+					Loops:    loopsRegistry,
+					Logger:   logger,
+				})
+				// 重启复位（规格 §6.1 重启行）：只复位 processing，其它状态一概不动。
+				if reset, err := reconcileRunner.ResetOnStartup(ctx); err != nil {
+					logger.Error("重启复位加工阶段失败", "err", err)
+				} else if reset > 0 {
+					logger.Info("重启复位加工阶段", "count", reset)
+				}
+
 				// 循环随进程起，每轮自己看门禁（未初始化/已暂停就零动作）：
 				// 向导配完三件套后不必重启，下一个探路周期就会开始轮询。
 				pollRunner := poll.New(poll.Options{
@@ -118,25 +138,44 @@ func run(logger *slog.Logger) error {
 					Loops:    loopsRegistry,
 					Logger:   logger,
 				})
-				pollDone = make(chan struct{})
+				pollDone := make(chan struct{})
 				go func() {
 					defer close(pollDone)
 					pollRunner.Run(ctx)
 				}()
+				loopDone = append(loopDone, pollDone)
 				logger.Info("poll 循环已启动")
+
+				reconcileDone := make(chan struct{})
+				go func() {
+					defer close(reconcileDone)
+					reconcileRunner.Run(ctx)
+				}()
+				loopDone = append(loopDone, reconcileDone)
+				logger.Info("reconcile 循环已启动")
 
 				// defer 顺序：这里注册的最先执行——先取消 ctx，等循环退出，
 				// 之后才是 database.Close（它在更早处注册）。
 				defer func() {
 					stop()
-					select {
-					case <-pollDone:
-					case <-time.After(shutdownGrace):
-						logger.Warn("poll 循环未在宽限内退出")
+					deadline := time.After(shutdownGrace)
+					for _, done := range loopDone {
+						select {
+						case <-done:
+						case <-deadline:
+							logger.Warn("循环未在宽限内退出")
+							return
+						}
 					}
 				}()
 			}
 		}
+	}
+
+	// nil 指针装进接口会变成非 nil 接口：引擎没起来时明确传 nil。
+	var hooks server.Hooks
+	if reconcileRunner != nil {
+		hooks = reconcileRunner
 	}
 
 	handler, err := server.New(server.Options{
@@ -150,6 +189,8 @@ func run(logger *slog.Logger) error {
 		Tasks:    taskStore,
 		Sidefx:   sidefxOutbox,
 		Loops:    loopsRegistry,
+		Hooks:    hooks,
+		Logger:   logger,
 	})
 	if err != nil {
 		return err

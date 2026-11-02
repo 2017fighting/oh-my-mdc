@@ -493,3 +493,30 @@ func (s *Store) registeredLists(ctx context.Context) ([]ListEntry, error) {
 	}
 	return loaded.lists, nil
 }
+
+// GateReason 回答「这一轮循环该不该跑」：空串表示可以跑。
+//
+// 三条循环的门禁判词只有这一处（规格 §4.4/§8.3）：主线三件套齐了、没暂停。
+// 把它放在设置域是因为判据全在 Snapshot 上——散在各循环里会让同一句话各写一遍。
+func (s Snapshot) GateReason() string {
+	switch {
+	case !s.Initialized:
+		return "主线三件套不齐"
+	case s.Paused:
+		return "循环已暂停"
+	}
+	return ""
+}
+
+// Interval 读 app_config 里的一条间隔（poll_interval / reconcile_interval / sidefx_interval）。
+//
+// fallback 是读不到时的兜底：调用方给的默认值与表默认值一致（规格 §4.3）。
+// 解析也在这里，免得每条循环各写一遍 Sections["app"].Data[...] 的类型断言。
+func (s Snapshot) Interval(name string, fallback time.Duration) time.Duration {
+	raw, _ := s.Sections["app"].Data[name].(string)
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
