@@ -571,9 +571,11 @@ func (r *Runner) alertStall(ctx context.Context, version task.Version, progress 
 		return false, err
 	}
 
-	// 通知只是待办：执行（含四个开关与重试）归旁路引擎（#26/#28）。
+	// 通知只是待办：执行（含四个开关与重试）归旁路引擎（#26），模板与发送归 Telegram 集成（#28）。
 	if r.outbox != nil {
 		payload := map[string]any{
+			"movie_id":        version.MovieID,
+			"infohash":        version.Infohash,
 			"number":          version.Number,
 			"label":           version.Label,
 			"source":          string(version.Source),

@@ -9,6 +9,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 )
 
 // TestPolicyLimitsAreKindDriven 钉住「上限由 kind 驱动」（规格 §5.6 / §4.3）：
@@ -83,6 +84,11 @@ func TestPermanentIsDrivenByErrorClass(t *testing.T) {
 		{"jellyfin 超时", &jellyfin.Error{Code: settings.CodeTimeout, Op: "Library/Media/Updated"}, false},
 		{"jellyfin 网络", &jellyfin.Error{Code: settings.CodeNetwork, Op: "Library/Media/Updated"}, false},
 		{"引擎本地校验错", ValidationError{Message: "待办缺 movie_id"}, true},
+		{"telegram token 被拒", &telegram.Error{Code: settings.CodeAuth, Status: 401}, true},
+		{"telegram chat 未激活", &telegram.Error{Code: settings.CodeBusiness, Status: 400}, true},
+		{"telegram 429 限流", &telegram.Error{Code: settings.CodeProtocol, Status: 429}, false},
+		{"telegram 502", &telegram.Error{Code: settings.CodeProtocol, Status: 502}, false},
+		{"telegram 本地缺 chat_id", telegram.ValidationError{Code: settings.CodeChatUnavailable}, true},
 		{"普通错误", fmt.Errorf("数据库连不上"), false},
 	}
 

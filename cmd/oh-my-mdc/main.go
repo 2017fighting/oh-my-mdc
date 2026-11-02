@@ -30,6 +30,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
+	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 	"github.com/2017fighting/oh-my-mdc/internal/web"
 )
 
@@ -71,6 +72,7 @@ func run(logger *slog.Logger) error {
 	var mteamIntegration *mteam.Integration
 	var qbtIntegration *qbittorrent.Integration
 	var jellyfinIntegration *jellyfin.Integration
+	var telegramIntegration *telegram.Integration
 	var taskStore *task.Store
 	var sidefxOutbox *sidefx.Outbox
 	var loopsRegistry *loops.Registry
@@ -88,6 +90,8 @@ func run(logger *slog.Logger) error {
 		qbtIntegration = qbittorrent.New(qbittorrent.Options{})
 		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（由 sidefx 引擎消费）。
 		jellyfinIntegration = jellyfin.New(jellyfin.Options{})
+		// Telegram 集成门面：设置域的「两步测试」实现 + sidefx 的通知执行者。
+		telegramIntegration = telegram.New(telegram.Options{})
 		// 任务域读模型与副作用出箱：面板与 poll 循环共用。
 		taskStore = task.NewStore(database.Pool())
 		sidefxOutbox = sidefx.New(database.Pool())
@@ -96,7 +100,8 @@ func run(logger *slog.Logger) error {
 			settings.WithTester("javdb", javdbIntegration),
 			settings.WithTester("qbittorrent", qbtIntegration),
 			settings.WithTester("jellyfin", jellyfinIntegration),
-			settings.WithTester("mteam", mteamIntegration))
+			settings.WithTester("mteam", mteamIntegration),
+			settings.WithTester("telegram", telegramIntegration))
 
 		// 读设置是启动顺序的一环（规格 §4.4）：这一次读失败说明设置域不可用，
 		// 与迁移失败同等对待——照常监听，但 /readyz 回 503 带原因。
@@ -175,6 +180,7 @@ func run(logger *slog.Logger) error {
 					Settings:  settingsStore,
 					Remover:   javdbIntegration,
 					Refresher: jellyfinIntegration,
+					Notifier:  telegramIntegration,
 					Tasks:     taskStore,
 					Pool:      database.Pool(),
 					Loops:     loopsRegistry,

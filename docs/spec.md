@@ -185,6 +185,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 - 发送失败分流：**瞬时**（网络/429/5xx）sidefx 指数退避最多 5 次后驻留；**永久**（400/401/403）不重试立即驻留。驻留 = 面板需人工区置顶 + 抽屉逐条「重发」；**绝不自动禁用集成**。告警兜底不依赖 Telegram 自身：UI 事件流 + `/metrics`（§9）。
 - 测试连接：**getMe（验 token）→ sendMessage 测试消息（验 chat_id）**，两步都过才绿；错误区分「token 无效」/「chat 未激活」；chat_id 获取提示：先跟 bot 说句话 / @userinfobot。
+- 入箱 payload 契约（#28 落定，整理票 #29 按此入箱）：公共键 `movie_id`、`infohash`、`number`、`label`、`source`（`javdb_magnet`/`mteam_torrent`）、`size_mib`（前两个是驻留时事件流兜底的锚点：没有它们，一条发不出的通知在时间线上留不下任何痕迹）；`filed` 另带 `title`（有中文译名用译名）与 `new_version`（任务重开再入库 = true，走「新版本已入库」文案分支）；`processing_failed` 带 `phase`/`reason`；`download_stalled` 带 `progress`（0..1）/`stalled_minutes`。缺 `number` 或事件名不认识 = 本地校验错，**驻留等人工**而不是静默丢。被执行半段按成功收尾的两种「不发」：telegram 节不存在（可选集成没配，告警兜底是事件流 + `/metrics`）、集成 disabled 或该事件开关关着（关掉即不发，之后补发旧事件没有意义）。
 
 ### 5.7 AI 翻译（可选）
 

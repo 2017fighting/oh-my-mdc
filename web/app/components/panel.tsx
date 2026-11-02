@@ -8,6 +8,8 @@ import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
 import {
   api,
+  notifyEventLabels,
+  notifyEventOf,
   type Attention,
   type AttentionItem,
   type Overview,
@@ -412,20 +414,29 @@ const MiniActionClass =
 /** 一条待办的人话标题：番号（有的话）+ 这一条在做什么。 */
 function sideEffectTitle(effect: SideEffect): string {
   const number = typeof effect.payload.number === "string" ? effect.payload.number : "";
-  const label = sideEffectKindLabel(effect.kind);
+  const label = sideEffectKindLabel(effect);
   return number ? `${number} · ${label}` : label;
 }
 
-function sideEffectKindLabel(kind: SideEffect["kind"]): string {
-  switch (kind) {
+/**
+ * 待办的动作名。
+ *
+ * 通知的三种死法要能分辨（规格 §5.6）：token 无效、chat 未激活、其余发送失败——
+ * 因为驻留的通知**不会**自动禁用集成，人要看着这一行去改哪一格。
+ */
+function sideEffectKindLabel(effect: SideEffect): string {
+  switch (effect.kind) {
     case "list_removal":
       return "删清单项";
     case "jellyfin_refresh":
       return "刷新 Jellyfin";
-    case "notify":
-      return "发 Telegram";
+    case "notify": {
+      const event = notifyEventOf(effect.target_key);
+      if (!event) return "发 Telegram";
+      return `发 Telegram · ${notifyEventLabels[event]}`;
+    }
     default:
-      return kind;
+      return effect.kind;
   }
 }
 

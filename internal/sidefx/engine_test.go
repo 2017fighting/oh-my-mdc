@@ -107,6 +107,12 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, nil)
+}
+
+// newFixtureWith 让通知用例换上一个假 Notifier；其余装配与 newFixture 完全一致。
+func newFixtureWith(t *testing.T, notifier sidefx.Notifier) *fixture {
+	t.Helper()
 
 	database := dbtest.Migrated(t)
 	if _, err := database.Pool().Exec(context.Background(),
@@ -128,6 +134,7 @@ func newFixture(t *testing.T) *fixture {
 		Settings:  f.settings,
 		Remover:   f.remover,
 		Refresher: f.refresher,
+		Notifier:  notifier,
 		Tasks:     f.store,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -148,6 +155,15 @@ func readySettings() *fakeSettings {
 		inputs: map[string]settings.TestInput{
 			"javdb":    {Values: map[string]any{"token": "tk"}},
 			"jellyfin": {Values: map[string]any{"url": "http://jellyfin:8096", "api_key": "key", "media_root": "/media/jellyfin/jav"}},
+			"telegram": {Values: map[string]any{
+				"bot_token":                "123456:token",
+				"chat_id":                  "-100200300",
+				"enabled":                  true,
+				"notify_download_started":  true,
+				"notify_filed":             true,
+				"notify_processing_failed": true,
+				"notify_download_stalled":  true,
+			}},
 		},
 	}
 }
@@ -301,9 +317,12 @@ func TestEngineSticksOnPermanentFailureImmediately(t *testing.T) {
 	if len(stuck) != 1 || stuck[0].Attempts != 1 {
 		t.Fatalf("驻留 = %+v, want attempts=1（一次就够）", stuck)
 	}
-	// 集成绝不被禁用：设置原样还在，行驻留而已。
-	if len(f.settings.inputs) != 2 {
+	// 集成绝不被禁用：设置原样还在（三节都在、telegram.enabled 仍是 true），行驻留而已。
+	if len(f.settings.inputs) != 3 {
 		t.Errorf("设置被改动了: %+v", f.settings.inputs)
+	}
+	if input, ok := f.settings.inputs["telegram"]; !ok || !input.Bool("enabled") {
+		t.Errorf("Telegram 集成被改动了: %+v", f.settings.inputs)
 	}
 }
 

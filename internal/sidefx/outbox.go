@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 )
 
 // Kind 是 side_effect.kind 的取值（规格 §4.2）。
@@ -34,12 +36,13 @@ const (
 
 // 通知事件名（规格 §5.6）。target_key 是 "<event>:<infohash>"，靠它做「同事件只发一次」。
 //
-// 它们同时是 Telegram 模板的选择键，四个事件各有独立开关；模板本身由 #28 落地。
+// 真正的定义在 telegram 包（模板与四个开关列都在那边）：这里只是给入箱方
+// （poll / reconcile / 整理票）一个稳定别名，免得同一个事件名在两边各写一遍。
 const (
-	EventDownloadStarted  = "download_started"
-	EventFiled            = "filed"
-	EventProcessingFailed = "processing_failed"
-	EventDownloadStalled  = "download_stalled"
+	EventDownloadStarted  = telegram.EventDownloadStarted
+	EventFiled            = telegram.EventFiled
+	EventProcessingFailed = telegram.EventProcessingFailed
+	EventDownloadStalled  = telegram.EventDownloadStalled
 )
 
 // Outbox 是副作用出箱的入箱口。

@@ -407,9 +407,11 @@ func (r *Runner) addOne(ctx context.Context, version task.Version, cfg qbittorre
 	// 崩在这两步之间时下一轮会重新 Ensure（此时是 AlreadyTracked）并重试一次入箱
 	// （no-op），所以通知不会丢；反过来先清 pending 就会永久丢掉这条通知。
 	payload := map[string]any{
-		"number": version.Number,
-		"label":  version.Label,
-		"source": string(version.Source),
+		"movie_id": version.MovieID,
+		"infohash": version.Infohash,
+		"number":   version.Number,
+		"label":    version.Label,
+		"source":   string(version.Source),
 	}
 	if size, ok := sizes[version.Infohash]; ok {
 		payload["size_mib"] = size

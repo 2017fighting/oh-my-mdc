@@ -36,6 +36,21 @@ var ErrNotTestable = errors.New("settings: 这一节不能测试连接")
 // ErrNotConfigured 说明这一节还没保存过，谈不上测试。
 var ErrNotConfigured = errors.New("settings: 这一节还没保存过")
 
+// IsPermanentCode 报告一个分类码是否**永久**（重试无用，要人介入）。
+//
+// 它是规格 §9「permanent 指标分类」的唯一真相：各集成把自己的 Classify 结果喂进来，
+// 并且它的判据与测试连接的处置同源——凭据要人换（auth / token_invalid）、
+// 请求本身不合规或 chat 没激活（business / chat_unavailable）。
+// 瞬时（network / timeout / protocol，含 429/5xx）重试就好。
+func IsPermanentCode(code TestCode) bool {
+	switch code {
+	case CodeAuth, CodeBusiness, CodeTokenInvalid, CodeChatUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
 // TestResult 是一次测试连接的判词。
 type TestResult struct {
 	OK       bool
@@ -157,7 +172,10 @@ func (s *Store) Test(ctx context.Context, name string) (TestResult, error) {
 		return tested, nil
 	}
 
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.testTimeout)
+	// 账本用固定预算而不是 s.testTimeout：后者是给上游调用的（测试里会被压到 20ms），
+	// 拿它去写一次 UPDATE 会把「上游超时」的判词改写成「数据库超时」（规格 §8.4 要求
+	// 这个端点写 last_test_*，写不进去就该如实报 db 类错误）。
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TestTimeout)
 	defer cancel()
 	if err := s.RecordTest(recordCtx, name, tested); err != nil {
 		return tested, err

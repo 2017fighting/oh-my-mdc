@@ -7,6 +7,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 )
 
 // 重试节奏的默认值（规格 §4.2 退避 / §5.6 五个上限 / §4.3 max_attempts）。
@@ -24,7 +25,8 @@ const (
 // kindSpec 是一类待办的 kind 差异：面板/时间线的称呼、执行成功的说法、重试上限覆盖。
 //
 // 这些差异只有这一份定义（词汇以 GLOSSARY.md 为准：删清单项 / 刷新 Jellyfin /
-// 发 Telegram）：执行器、时间线与前端都从这里取词，免得同一个概念三处三种写法。
+// 发 Telegram）：执行器与时间线都从这里取词。前端的侧效应队列有自己的 UI 词表
+// （web/app/lib/api.ts 的 notifyEventLabels），事件名与这里的事件常量同一套字符串。
 type kindSpec struct {
 	// label 是人话名字：面板的队列行与「驻留等人工」的时间线都用它。
 	label string
@@ -37,7 +39,7 @@ type kindSpec struct {
 var kindSpecs = map[Kind]kindSpec{
 	KindListRemoval:     {label: "删清单项", done: "已从清单删除"},
 	KindJellyfinRefresh: {label: "刷新 Jellyfin", done: "Jellyfin 已受理刷新"},
-	KindNotify:          {label: "发 Telegram", maxAttempts: NotifyMaxAttempts},
+	KindNotify:          {label: "发 Telegram", done: "Telegram 通知已发送", maxAttempts: NotifyMaxAttempts},
 }
 
 // specFor 取一类待办的 kind 差异。未知 kind 给一份中性的：库里可能有更新的 kind，
@@ -117,14 +119,10 @@ func (p Policy) exhausted(attempts int) bool {
 //   - network / timeout / protocol：瞬时，按指数退避重试到上限（规格 §5.6 分流）。
 //
 // 分类本身不在本包重写：JavDB 用 appapi.Classify，Jellyfin 用 jellyfin.Classify，
-// 两边都产出规格 §8.4 的同一套机器码。
+// Telegram 用 telegram.Classify，都产出规格 §8.4 的同一套机器码；「哪些码算永久」
+// 也只有 settings.IsPermanentCode 一处定义（规格 §9 的 permanent 分类钩子）。
 func permanent(err error) bool {
-	switch errorClass(err) {
-	case settings.CodeAuth, settings.CodeBusiness:
-		return true
-	default:
-		return false
-	}
+	return settings.IsPermanentCode(errorClass(err))
 }
 
 // errorClass 把一次失败归成规格 §8.4 的分类码（统一成 settings.TestCode 一种词汇）。
@@ -137,6 +135,11 @@ func errorClass(err error) settings.TestCode {
 	var jellyfinInvalid jellyfin.ValidationError
 	if errors.As(err, &jellyfinErr) || errors.As(err, &jellyfinInvalid) {
 		return jellyfin.Classify(err)
+	}
+	var telegramErr *telegram.Error
+	var telegramInvalid telegram.ValidationError
+	if errors.As(err, &telegramErr) || errors.As(err, &telegramInvalid) {
+		return telegram.Classify(err)
 	}
 	return settings.TestCode(appapi.Classify(err))
 }

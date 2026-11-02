@@ -143,9 +143,26 @@ function chipLook(state: Exclude<TestChipState, { kind: "idle" } | { kind: "test
     case "fail":
       return {
         tone: "border-destructive/30 bg-destructive/10 text-destructive",
-        label: `失败 · ${state.code}${state.durationMs !== undefined ? ` · ${state.durationMs}ms` : ""}`,
+        label: `失败 · ${errorCodeLabel(state.code)}${state.durationMs !== undefined ? ` · ${state.durationMs}ms` : ""}`,
         icon: <X className="size-3 shrink-0" aria-hidden />,
       };
+  }
+}
+
+/**
+ * errorCodeLabel 把测试错误码翻成向导里的人话（原码仍留在 title 的明细里）。
+ *
+ * Telegram 的两步测试专用码要说清是「哪一关没过」：token 无效 → 去换 bot token；
+ * chat 未激活 → 先跟 bot 说句话再测。其余码保持原样，方便对照规格 §8.4 排查。
+ */
+function errorCodeLabel(code: string): string {
+  switch (code) {
+    case "token_invalid":
+      return "token 无效";
+    case "chat_unavailable":
+      return "chat 未激活";
+    default:
+      return code;
   }
 }
 

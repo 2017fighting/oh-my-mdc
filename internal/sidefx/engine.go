@@ -20,6 +20,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
+	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 )
 
 // LockIDSidefx 是 sidefx 的 advisory lock key。三条循环各持一把（规格 §4.4）。
@@ -50,6 +51,13 @@ type Refresher interface {
 	Refresh(ctx context.Context, cfg jellyfin.Config, number string) (jellyfin.RefreshResult, error)
 }
 
+// Notifier 是发通知的接缝（真实实现是 telegram.Integration）。
+//
+// 引擎只做三件事：读开关、解 payload、决定这条待办该不该发；模板与转义归 telegram 包。
+type Notifier interface {
+	Notify(ctx context.Context, cfg telegram.Config, event string, payload map[string]any) error
+}
+
 // Tasks 是引擎对任务域的读写面：番号兜底与时间线。
 //
 // 时间线是「副作用发生过」的唯一留痕：面板的最近事件与告警追问都读它（规格 §4.1）。
@@ -64,6 +72,7 @@ type Options struct {
 	Settings  Settings
 	Remover   ListRemover
 	Refresher Refresher
+	Notifier  Notifier
 	Tasks     Tasks
 	// Pool 只用于 advisory lock 的专用连接；nil 时不做单飞（测试或单进程场景）。
 	Pool *pgxpool.Pool
@@ -81,6 +90,7 @@ type Engine struct {
 	settings  Settings
 	remover   ListRemover
 	refresher Refresher
+	notifier  Notifier
 	tasks     Tasks
 	pool      *pgxpool.Pool
 	loops     *loops.Registry
@@ -106,6 +116,7 @@ func NewEngine(opts Options) *Engine {
 		settings:  opts.Settings,
 		remover:   opts.Remover,
 		refresher: opts.Refresher,
+		notifier:  opts.Notifier,
 		tasks:     opts.Tasks,
 		pool:      opts.Pool,
 		loops:     opts.Loops,
@@ -242,7 +253,7 @@ const (
 func (e *Engine) execute(ctx context.Context, job Job, maxAttempts int) (action, error) {
 	consumer := e.consumer(job.Kind)
 	if consumer == nil {
-		// 这一类还没有执行者（notify 归 Telegram 票）：不动它、不烧预算。
+		// 这一类还没有执行者（例如进程没接上 Telegram 门面）：不动它、不烧预算。
 		e.logger.Debug("sidefx: 这一类还没有执行者，本轮跳过", "kind", job.Kind, "target_key", job.TargetKey)
 		return actionSkipped, nil
 	}
@@ -292,11 +303,51 @@ func (e *Engine) consumer(kind Kind) func(context.Context, Job) error {
 			return nil
 		}
 		return e.refresh
+	case KindNotify:
+		if e.notifier == nil {
+			return nil
+		}
+		return e.notify
 	default:
-		// notify 的执行者是 Telegram 集成票（#28）。在它就位前这里没有执行者：
-		// 待办留在箱里（不烧预算），面板的副作用队列看得见它。
+		// 未知 kind：不动它、不烧预算（库里可能有更新的 kind，旧进程不该乱猜）。
 		return nil
 	}
+}
+
+// notify 执行一条通知待办：开关 → 模板 → sendMessage（规格 §5.6）。
+//
+// 三种「不发」都按成功收尾，而不是把待办留在箱里：
+//
+//   - Telegram 没配置：通知不是门禁，事件流（task_event）与指标已经记下了事实；
+//   - 集成 disabled 或该事件开关关着：关掉即不发（P12-1），开关之后再回来也不该补发旧事件；
+//   - 本地校验错（事件名写错、payload 缺番号）：那是代码/数据错，报错让它驻留等人工。
+//
+// 发送失败原样上抛：永久错（400/401/403）由 permanent 判据立即驻留，瞬时错按
+// NotifyMaxAttempts（5 次）退避。绝不把集成 enabled 改成 false（P12-3）。
+func (e *Engine) notify(ctx context.Context, job Job) error {
+	event, _, _ := strings.Cut(job.TargetKey, ":")
+	if !telegram.KnownEvent(event) {
+		return ValidationError{Message: fmt.Sprintf(
+			"notify 待办的事件名不认识（target_key=%s）", job.TargetKey)}
+	}
+
+	input, err := e.settings.Input(ctx, "telegram")
+	if errors.Is(err, settings.ErrNotConfigured) {
+		// 没人接手通知：这条待办按「无需发送」完成（不驻留、不重试）。
+		e.logger.Debug("sidefx: Telegram 还没配置，通知跳过", "target_key", job.TargetKey)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("读 Telegram 设置: %w", err)
+	}
+
+	cfg := telegram.ConfigFrom(input)
+	if !cfg.EnabledFor(event) {
+		e.logger.Debug("sidefx: 通知开关关着，跳过", "event", event, "target_key", job.TargetKey)
+		return nil
+	}
+
+	return e.notifier.Notify(ctx, cfg, event, payloadMap(job.Payload))
 }
 
 // removeFromList 执行一条 list_removal：movie_actions 的 remove（规格 §5.1/§6.2）。
@@ -408,6 +459,18 @@ func successReason(job Job) string {
 // stuckReason 是驻留那一句：说清「什么没成」与「第几次」，人工重发才有的放矢。
 func stuckReason(job Job, attempts int, cause error) string {
 	return fmt.Sprintf("%s 驻留等人工（已尝试 %d 次）：%v", specFor(job.Kind).label, attempts, cause)
+}
+
+// payloadMap 把 payload 解成模板要的键值表（坏 JSON 当空表：模板自己会报缺番号）。
+func payloadMap(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	return payload
 }
 
 // payloadString 从 payload 里取一个字符串字段（缺字段/类型不对都回空串）。

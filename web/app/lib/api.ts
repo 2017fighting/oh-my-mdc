@@ -58,6 +58,32 @@ export type TestResult = {
   duration_ms: number;
 };
 
+/**
+ * 通知事件的键（规格 §5.6）。设置里的四个布尔开关与它对上：
+ * 事件名同时是 side_effect 的 target_key 前缀（"<event>:<infohash>"）。
+ */
+export type NotifyEvent =
+  | "download_started"
+  | "filed"
+  | "processing_failed"
+  | "download_stalled";
+
+/** 事件 → 开关列：侧效应队列与「需要人工」区据此说清「哪个通知没发出去」。 */
+export const notifyEventLabels: Record<NotifyEvent, string> = {
+  download_started: "下载开始",
+  filed: "入库完成",
+  processing_failed: "加工失败",
+  download_stalled: "下载停滞",
+};
+
+/** target_key 的第一段就是事件名（filed:<infohash>）；不认识的事件名回空串。 */
+export function notifyEventOf(targetKey: string): NotifyEvent | "" {
+  const event = targetKey.split(":")[0];
+  // Object.hasOwn 而不是 `in`：后者会认 "constructor" / "toString" 这类原型键，
+  // 于是一个脏 target_key 会渲染成「发 Telegram · undefined」。
+  return Object.hasOwn(notifyEventLabels, event) ? (event as NotifyEvent) : "";
+}
+
 /** JavDB 清单探测结果里的一张清单：id 是身份，name 只是快照。 */
 export type JavDBList = {
   id: string;

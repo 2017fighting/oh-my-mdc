@@ -3,15 +3,19 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 )
 
 // 设置域的测试都在「HTTP 契约 + 真 Postgres」这个接缝上：
@@ -639,4 +643,112 @@ func TestConfigEndpointsAreUnavailableWithoutADatabase(t *testing.T) {
 			t.Errorf("GET %s error.code = %q, want db_unavailable", path, code)
 		}
 	}
+}
+
+// TestTelegramTestEndpointTwoSteps 是向导 Telegram 步的端到端（规格 §5.6 / P12-1）：
+// 保存 token+chat_id → 「测试」走 getMe → sendMessage 两步 → 写 last_test_*；
+// 坏 token 停在第一步并报 token_invalid，凭据原文永不回显。
+func TestTelegramTestEndpointTwoSteps(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		paths []string
+	)
+	bot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"id":1,"is_bot":true,"username":"mdc_bot"}}`)
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":404,"description":"Not Found"}`)
+		}
+	}))
+	t.Cleanup(bot.Close)
+
+	h := newSettingsHandler(t, settings.WithTester("telegram", telegram.New(telegram.Options{Host: bot.URL})))
+	save(t, h, "telegram", `"bot_token": "123456:secret-token", "chat_id": "-100200300", "enabled": true`)
+
+	rec := send(t, h, http.MethodPost, "/api/config/telegram/test", "")
+	body := jsonOf(t, rec)
+	if body["ok"] != true {
+		t.Fatalf("测试 Telegram = %v, want 两步都过", body)
+	}
+	if strings.Contains(rec.Body.String(), "secret-token") {
+		t.Errorf("响应泄露了 bot token: %s", rec.Body)
+	}
+
+	section := jsonOf(t, send(t, h, http.MethodGet, "/api/config/telegram", ""))
+	lastTest, ok := section["last_test"].(map[string]any)
+	if !ok || lastTest["ok"] != true {
+		t.Fatalf("last_test = %v, want ok=true 的账本", section["last_test"])
+	}
+
+	mu.Lock()
+	got := append([]string(nil), paths...)
+	mu.Unlock()
+	if len(got) != 2 || !strings.HasSuffix(got[0], "/getMe") || !strings.HasSuffix(got[1], "/sendMessage") {
+		t.Errorf("请求 = %v, want getMe → sendMessage", got)
+	}
+
+	// 坏 token：停在第一步，账本记 token_invalid（chip 据此说「token 无效」）。
+	badBot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":401,"description":"Unauthorized"}`)
+	}))
+	t.Cleanup(badBot.Close)
+
+	bad := newSettingsHandler(t, settings.WithTester("telegram", telegram.New(telegram.Options{Host: badBot.URL})))
+	save(t, bad, "telegram", `"bot_token": "123456:secret-token", "chat_id": "-100200300", "enabled": true`)
+	badBody := jsonOf(t, send(t, bad, http.MethodPost, "/api/config/telegram/test", ""))
+	if badBody["ok"] != false || badBody["code"] != "token_invalid" {
+		t.Errorf("坏 token = %v, want {ok:false, code:token_invalid}", badBody)
+	}
+	badSection := jsonOf(t, send(t, bad, http.MethodGet, "/api/config/telegram", ""))
+	if lastTest, _ := badSection["last_test"].(map[string]any); lastTest["ok"] != false {
+		t.Errorf("last_test = %v, want ok=false", badSection["last_test"])
+	}
+}
+
+// TestTelegramEventSwitchesDefaultOn 钉住「四布尔开关列默认全开」（规格 §4.3 / P12-1）：
+// 只保存 token+chat_id 时，四个事件开关读到 true——向导不勾任何东西也不会静音。
+func TestTelegramEventSwitchesDefaultOn(t *testing.T) {
+	h := newSettingsHandler(t)
+	saved := save(t, h, "telegram", `"bot_token": "123456:secret-token", "chat_id": "-100200300"`)
+
+	data, ok := saved["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data = %v, want 一节字段", saved["data"])
+	}
+	for _, key := range []string{
+		"notify_download_started", "notify_filed",
+		"notify_processing_failed", "notify_download_stalled",
+	} {
+		if data[key] != true {
+			t.Errorf("%s = %v, want true（默认全开）", key, data[key])
+		}
+	}
+	// enabled 提到节一级（规格 §8.4 的 {revision, configured, enabled?, data}），不在 data 里。
+	if saved["enabled"] != false {
+		t.Errorf("enabled = %v, want false（可选集成默认关着，配好再由人打开）", saved["enabled"])
+	}
+	if strings.Contains(strings.ToLower(toString(data["bot_token"])), "secret-token") {
+		t.Errorf("data.bot_token = %v, want 只出掩码", data["bot_token"])
+	}
+}
+
+// toString 把任意 JSON 值压成字符串，供「响应里有没有泄露原文」这类断言用。
+func toString(value any) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprintf("%v", value)
 }
