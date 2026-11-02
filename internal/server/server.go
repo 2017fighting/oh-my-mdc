@@ -12,6 +12,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
 // defaultVersion 是没被 -ldflags -X 注入时的版本，与镜像构建前的本地运行一致。
@@ -33,6 +35,8 @@ type Options struct {
 	DB Pinger
 	// Assets 是前端构建产物，根目录需含 index.html。
 	Assets fs.FS
+	// Settings 是设置域（/api/config、/api/overview）；nil 时这些端点回 503 db_unavailable。
+	Settings *settings.Store
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
 	// 非 nil 时 /readyz 恒 503 db_unavailable 并原样回出这句原因——启动不 abort。
 	Unready error
@@ -50,10 +54,11 @@ func New(opts Options) (http.Handler, error) {
 	}
 
 	s := &server{
-		version: version,
-		db:      opts.DB,
-		assets:  opts.Assets,
-		unready: opts.Unready,
+		version:  version,
+		db:       opts.DB,
+		assets:   opts.Assets,
+		unready:  opts.Unready,
+		settings: opts.Settings,
 	}
 
 	shell, err := fs.ReadFile(opts.Assets, "index.html")
@@ -66,16 +71,23 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.versionHandler)
+	mux.HandleFunc("GET /api/overview", s.overview)
+	mux.HandleFunc("GET /api/config", s.configAll)
+	mux.HandleFunc("GET /api/config/{section}", s.configSection)
+	mux.HandleFunc("PATCH /api/config/{section}", s.patchSection)
+	mux.HandleFunc("DELETE /api/config/{section}", s.deleteSection)
+	mux.HandleFunc("POST /api/config/{section}/test", s.testSection)
 	mux.Handle("/", s.spa())
 	return mux, nil
 }
 
 type server struct {
-	version string
-	db      Pinger
-	assets  fs.FS
-	shell   []byte
-	unready error
+	version  string
+	db       Pinger
+	assets   fs.FS
+	shell    []byte
+	unready  error
+	settings *settings.Store
 }
 
 // healthz 只看进程活不活：数据库或上游挂了也不该让编排器重启容器。

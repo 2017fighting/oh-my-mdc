@@ -460,4 +460,4 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ## 附录：ADR 索引
 
-`docs/adr/`：0001 Postgres-only；0002 设置在 DB、env 只 bootstrap；0003 两级聚合、DB 为真相；0004 先落库再加种；0005 side_effect 出箱表；0006 任务级状态用视图；0007 autorun 以 sh -c 共存；0008 固定目录布局无模板。
+`docs/adr/`：0001 Postgres-only；0002 设置在 DB、env 只 bootstrap；0003 两级聚合、DB 为真相；0004 先落库再加种；0005 side_effect 出箱表；0006 任务级状态用视图；0007 autorun 以 sh -c 共存；0008 固定目录布局无模板；0009 已初始化看配置就位、不看测试通过。

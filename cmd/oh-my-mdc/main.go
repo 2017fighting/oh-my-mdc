@@ -1,7 +1,7 @@
 // Command oh-my-mdc 是单二进制服务：内嵌前端 + Postgres。
 //
-// 启动顺序照规格 §4.4：迁移（goose Up，advisory lock）→ 起监听。
-// 迁移失败不 abort：页面照开，/readyz 回 503 db_unavailable 并带原因。
+// 启动顺序照规格 §4.4：迁移（goose Up，advisory lock）→ 读设置 → 起监听。
+// 迁移或读设置失败都不 abort：页面照开，/readyz 回 503 db_unavailable 并带原因。
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/config"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
+	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/web"
 )
 
@@ -54,15 +55,30 @@ func run(logger *slog.Logger) error {
 	}
 
 	var pinger server.Pinger
+	var settingsStore *settings.Store
 	if database != nil {
 		pinger = database
+		settingsStore = settings.NewStore(database.Pool())
+
+		// 读设置是启动顺序的一环（规格 §4.4）：这一次读失败说明设置域不可用，
+		// 与迁移失败同等对待——照常监听，但 /readyz 回 503 带原因。
+		if unready == nil {
+			snapshot, err := settingsStore.Load(ctx)
+			if err != nil {
+				logger.Error("读取设置失败", "err", err)
+				unready = fmt.Errorf("读取设置失败: %w", err)
+			} else {
+				logger.Info("设置已读取", "initialized", snapshot.Initialized, "paused", snapshot.Paused)
+			}
+		}
 	}
 
 	handler, err := server.New(server.Options{
-		Version: version,
-		DB:      pinger,
-		Assets:  web.Assets(),
-		Unready: unready,
+		Version:  version,
+		DB:       pinger,
+		Assets:   web.Assets(),
+		Unready:  unready,
+		Settings: settingsStore,
 	})
 	if err != nil {
 		return err
