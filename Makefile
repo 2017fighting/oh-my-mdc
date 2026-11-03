@@ -9,6 +9,15 @@ LDFLAGS := -X main.version=$(VERSION)
 GO      ?= go
 PNPM    ?= pnpm
 COMPOSE ?= docker compose
+DOCKER  ?= docker
+
+# 镜像坐标与 javdb-rss 先例对齐：仓库名带下划线，镜像名带连字符。
+IMAGE     ?= oh-my-mdc
+IMAGE_TAG ?= dev
+
+# 镜像冒烟用的版本哨兵。**不能是 dev**：编译期默认值就是 dev，
+# 拿 dev 去断言等于「ldflags 掉了也能通过」——这条冒烟的全部意义就在这里。
+SMOKE_VERSION ?= v0.0.0-smoke
 
 BIN_DIR   := bin
 BINARY    := $(BIN_DIR)/oh-my-mdc
@@ -67,6 +76,36 @@ web-typecheck: web-install ## 前端类型检查
 .PHONY: web-build
 web-build: web-install ## vite build → internal/web/dist（embed 的输入）
 	cd $(WEB_DIR) && $(PNPM) build
+
+# ---------------------------------------------------------------- 镜像
+
+.PHONY: docker-build
+docker-build: ## 构建镜像（仅 linux/amd64，VERSION 注入 /version）
+	$(DOCKER) build \
+		--platform linux/amd64 \
+		--build-arg VERSION=$(VERSION) \
+		--provenance=false \
+		-t $(IMAGE):$(IMAGE_TAG) \
+		.
+
+# provenance=false 不只是为了与 release 对齐（那边也必须关，理由见 workflow）：
+# 开着它本地会多出一层 attestation manifest，镜像变成 manifest list，
+# 后面 grep / 检查平台时看到的东西与推送后的单 manifest 不是同一形状。
+
+.PHONY: docker-run
+docker-run: db-up docker-build ## 起容器接 compose Postgres（http://localhost:8080/）
+	@echo "→ 打开 http://localhost:8080/（Ctrl-C 停容器）"
+	$(DOCKER) run --rm --name $(IMAGE) \
+		--add-host host.docker.internal:host-gateway \
+		-p 8080:8080 \
+		-e MDC_DATABASE_URL='postgres://mdc:mdc@host.docker.internal:5432/mdc?sslmode=disable' \
+		$(IMAGE):$(IMAGE_TAG)
+
+.PHONY: image-smoke
+image-smoke: db-up ## 冒烟：以版本哨兵构建并起容器断言 /readyz、版本注入、壳页、非 root
+	@# 版本用 SMOKE_VERSION 而不是 VERSION：构建与断言必须是同一个非 dev 值。
+	$(MAKE) docker-build VERSION=$(SMOKE_VERSION)
+	IMAGE=$(IMAGE):$(IMAGE_TAG) VERSION=$(SMOKE_VERSION) ./scripts/image-smoke.sh
 
 # ---------------------------------------------------------------- 检查
 

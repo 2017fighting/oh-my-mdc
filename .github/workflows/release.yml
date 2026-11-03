@@ -1,0 +1,124 @@
+name: Release
+
+# 目标：把「推一个 vX.Y.Z tag」变成「一个验过、已发布的镜像」，而不是变成一个假设。
+#
+# 这里不是单纯的 build+push：tag 推送不会触发 ci.yml（它只挂在 main 的 push 与 PR 上）。
+# 若这里只构建与推送，一个从未绿过的提交也能被发成镜像，且发出去之后没有便宜的办法收回。
+# 所以先 verify —— 调的就是 ci.yml 用的那份 verify.yml，两边不可能不同款。
+#
+# 发版动作 = 人工推 git tag（规格 §10）；升级由下游 Renovate 按房规做，仓内不配 Renovate。
+#
+# ⚠️ 本文件里 metadata-action 的 `tags` 块是**逐行解析的数据**，不是 YAML 注释区。
+# 要写解释请写在块外面 —— 块里的 `#` 会作为一行数据喂给解析器。
+
+on:
+  push:
+    tags:
+      # 严格 semver。不用 `v*.*.*` —— 那个 pattern 会放过 `vfoo.bar.baz`。
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      # 预发布同样出镜像（tag 就是 v1.2.3-rc1），但**不打 latest**：
+      # latest 只指正式版，否则一次候选发布就会悄悄改掉所有人的 latest。
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+# 同一个 tag 重推是**有意的恢复路径**（发坏了就 `git tag -f` 再推一次），
+# 因此不取消进行中的那一次：排队重跑比中途杀掉更安全。
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read # checkout
+  packages: write # 推 ghcr
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/oh-my-mdc
+
+jobs:
+  # tag 上的提交本身先过全门（go + 前端 + 镜像冒烟），且冒烟注入的正是这个 tag。
+  # 换的是「镜像里的提交一定绿过、版本一定对得上」这句话可以当真。
+  verify:
+    name: 提交先过 CI 同款检查
+    uses: ./.github/workflows/verify.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  publish:
+    name: 构建并推送镜像
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 只有 linux/amd64（规格 §10），所以**不需要** QEMU：
+      # 没有第二个架构要模拟，铝层与 Go 编译都在 runner 原生跑。
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # tags 块（写在块外面，见文件头那条警告）：
+      #   1. type=semver,pattern={{version}} —— 精确 X.Y.Z，唯一该被人钉住的形状。
+      #   2. type=raw,value=latest —— 只对正式版生效（预发布的 tag 里带 `-`）。
+      #      浮动的小版本 tag（1.2 / 1）刻意不推：单用户场景里它们唯一的作用
+      #      是让 `docker pull` 静默换版本。要升级请改 tag。
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=oh-my-mdc
+            org.opencontainers.image.description=JavDB 清单 → Jellyfin 媒体库的自动化管道
+
+      # build-args 传 tag 原文（v1.2.3）而不是去掉 v 的形状：本地
+      # `make docker-build VERSION=v1.2.3` 与镜像冒烟都按这个形状断言，
+      # 两种形状会让「镜像里的版本」无法逐字比对。
+      #
+      # provenance: false —— 它会给镜像额外加一个 attestation manifest，
+      # 老一些的 docker/containerd 拉到会看到 multi-manifest 的怪象，而这里
+      # 没有任何下游去验签名。可拉取性 > 供应链仪式（javdb-rss 先例）。
+      - id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 推送之后唯一还值得做的一件事：把「推上去的到底是什么」写进 run 摘要。
+      # 它拦不住坏推送（已经推完了），但它是事后唯一能复核的凭据。
+      - name: 把镜像坐标与平台写进 run 摘要
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          SEMVER: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## 已发布 \`${IMAGE}:${SEMVER}\`"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo "digest ${DIGEST}"
+            echo '```'
+            echo
+            echo "manifest 里实际列出的平台："
+            echo
+            echo '```'
+            docker buildx imagetools inspect "${IMAGE}:${SEMVER}" | sed -n '/Manifests:/,$p'
+            echo '```'
+            echo
+            echo "拉取：\`docker pull ${IMAGE}:${SEMVER}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

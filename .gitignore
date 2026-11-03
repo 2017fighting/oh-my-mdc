@@ -13,6 +13,9 @@
 !/web/scripts/copy-dist.mjs
 !/web/app/lib/
 !/web/app/lib/utils.ts
+# 冒烟脚本同属可交付源码：少了它 `make image-smoke`（CI 的镜像门）就跑不了。
+!/scripts/
+!/scripts/image-smoke.sh
 
 # 本地环境
 .env

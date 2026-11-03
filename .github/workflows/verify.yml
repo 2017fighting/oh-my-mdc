@@ -1,0 +1,106 @@
+name: Verify
+
+# 「一个提交要过的关」只在这里定义一次：日常 CI 与发版前的 verify 都调它。
+#
+# 这样「发版先过与 CI 同款的检查」就不是一句承诺，而是同一份文件 ——
+# 加一条检查只改这里，两条流水线同时生效。
+#
+# 所有步骤只点名 make 的 target：Makefile 是构建门的唯一真源（规格 §10）。
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 镜像冒烟时注入的版本。默认哨兵值；发版传 tag 原文（v1.2.3）。
+        required: false
+        type: string
+        default: v0.0.0-smoke
+
+jobs:
+  go:
+    name: Go 门（gofmt / vet / test -race + Postgres 集成）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mdc
+          POSTGRES_PASSWORD: mdc
+          POSTGRES_DB: mdc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mdc -d mdc"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 60
+    env:
+      MDC_TEST_DATABASE_URL: postgres://mdc:mdc@localhost:5432/mdc?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt 校验
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      # 集成测试会自己建一次性库做 goose Up，再删库。
+      - name: 测试（含迁移与 HTTP 面）
+        run: make test
+
+  frontend:
+    name: 前端门（lint / typecheck / build + embed）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          # 与镜像里钉的 node 同号：这条门绿了，就代表镜像里的 node 也能构建。
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 安装前端依赖
+        run: make web-install
+
+      - name: 前端 lint
+        run: make web-lint
+
+      - name: 前端类型检查
+        run: make web-typecheck
+
+      - name: 前端构建（embed 的输入）
+        run: make web-build
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 真实 vite 产物进 embed 后再编一次，证明打包链路完整。
+      - name: 编译单二进制（embed 真实产物）
+        run: make build
+
+  image:
+    name: 镜像门（docker build + 起容器冒烟）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 冒烟连的是 compose 里那套 Postgres（make db-up 负责起它），
+      # 也就是开发机上的同一套库 —— 镜像里连不上的问题在这里就暴露。
+      # 注入的版本默认是哨兵（非 dev）：编译期默认值就是 dev，用 dev 断言等于不验注入。
+      - name: 镜像冒烟（/readyz、版本注入、壳页、非 root、ca-certificates/tzdata）
+        env:
+          MDC_SMOKE_VERSION: ${{ inputs.version }}
+        run: make image-smoke SMOKE_VERSION="$MDC_SMOKE_VERSION"

@@ -1,0 +1,28 @@
+# 构建上下文里不需要的东西。
+#
+# 目标：构建快，且不会把本机状态拷进镜像。**不要**排掉 LICENSE ——
+# 运行层会把它拷进 /usr/share/licenses/oh-my-mdc/（见 Dockerfile 最后一段）。
+
+# 版本控制与协作元数据
+.git
+.github
+.gitignore
+
+# 构建产物：镜像里现做（前端 dist、Go 二进制），别拿本机的那份
+/bin/
+/internal/web/dist/
+/web/build/
+/web/node_modules/
+
+# 本地栈与工具配置：与镜像无关
+compose.yaml
+.editorconfig
+.env
+.env.*
+*.local
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
