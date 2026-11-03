@@ -139,7 +139,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 （来源：#9；事实基线 qBittorrent 4.6.5 生产 + 5.3 分支源码）
 
-- 登录 cookie SID；4.6.5 纯文本 `Ok.`/`Fails.` 响应 vs 5.x JSON 的双解析随客户端移植（实现配方非决策）。加种 `POST /api/v2/torrents/add`：磁力 `urls=`，私有种子 multipart `torrents=`（`Content-Type: application/x-bittorrent`）；**每次显式 `savepath`=download_root、固定 category（默认 `mdc`，`createCategories` 显式）、不设 autoTMM、contentLayout 原样**。
+- 登录拿会话 cookie（4.6.5 / 5.0–5.1 叫 `SID`，5.2.0 起改名 `QBT_SID_<port>` 且成功回 204 空体，名字与值都要原样回发）；登录回执三解析（4.6.5 纯文本 `Ok.`/`Fails.`、5.x JSON、5.2 起空体 + 会话 cookie）随客户端移植（实现配方非决策）。加种 `POST /api/v2/torrents/add`：磁力 `urls=`，私有种子 multipart `torrents=`（`Content-Type` 是 `application/x-bittorrent`）；**每次显式 `savepath`=download_root、固定 category（默认 `mdc`，`createCategories` 显式）、不设 autoTMM、contentLayout 原样**。
 - **回调**：`GET http://<svc>.<ns>.svc.cluster.local:<port>/api/hooks/qbt?ih=%I`，载荷只带 infohash（**qbt 是事实源**，本项目回调 `torrents/properties` 读权威值）；未知/非本项目 infohash → 200 静默 no-op。
 - **autorun 共存**（ADR-0007）：向导把 `autorun_program` 重写为
 

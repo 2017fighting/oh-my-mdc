@@ -139,12 +139,14 @@ func splitTags(raw string) []string {
 
 // client 是一个已登录（或即将登录）的 qbt WebUI API v2 客户端。
 //
-// 只放实测确认过的传输事实：登录拿 SID cookie、请求带 Referer（qbt 的 CSRF 检查）、
-// 4.6.5 的纯文本与 5.x 的 JSON 双解析都在这里。
+// 只放实测确认过的传输事实：登录拿会话 cookie、请求带 Referer（qbt 的 CSRF 检查）、
+// 4.6.5 的纯文本 / 5.0–5.1 的 JSON / 5.2 起的空体三解析都在这里。
 type client struct {
-	base    *url.URL
-	http    *http.Client
-	sid     string
+	base *url.URL
+	http *http.Client
+	// session 是登录下发的会话 cookie，连名字一起留着：5.2.0 起它从 SID 改名成
+	// QBT_SID_<port>，回发时必须原样，不能自己拼 "SID="。
+	session *http.Cookie
 	metrics metrics.Recorder
 }
 
@@ -168,7 +170,7 @@ func (c *client) origin() string {
 	return c.base.Scheme + "://" + c.base.Host
 }
 
-// login 完成一次登录并留住 SID cookie。
+// login 完成一次登录并留住会话 cookie。
 func (c *client) login(ctx context.Context, cfg Config) error {
 	form := url.Values{}
 	form.Set("username", cfg.Username)
@@ -182,33 +184,45 @@ func (c *client) login(ctx context.Context, cfg Config) error {
 		c.observe(status, err)
 		return err
 	}
-	if parseErr := parseLoginResponse(status, body); parseErr != nil {
+	session := sessionCookie(header)
+	if parseErr := parseLoginResponse(status, body, session != nil); parseErr != nil {
 		c.observe(status, parseErr)
 		return parseErr
 	}
+	c.session = session
 	c.observe(status, nil)
+	return nil
+}
 
-	for _, cookieHeader := range header.Values("Set-Cookie") {
-		header := http.Header{"Cookie": {cookieHeader}}
-		if cookie, err := (&http.Request{Header: header}).Cookie("SID"); err == nil {
-			c.sid = cookie.Value
+// sessionCookie 从登录回执里挑出会话 cookie。
+//
+// 4.6.5 与 5.0–5.1 叫 SID，5.2.0 起叫 QBT_SID_<port>（名字里带端口，多实例才不串），
+// 所以按前缀认而不是写死名字；认出来的整个 cookie 留着，回发时原样带上。
+func sessionCookie(header http.Header) *http.Cookie {
+	for _, raw := range header.Values("Set-Cookie") {
+		cookie, err := http.ParseSetCookie(raw)
+		if err != nil {
+			continue
+		}
+		if cookie.Name == "SID" || strings.HasPrefix(cookie.Name, "QBT_SID") {
+			return cookie
 		}
 	}
-
 	return nil
 }
 
 // loginPath 是登录端点：它是唯一由调用方（而不是状态码）判结局的请求。
 const loginPath = "/api/v2/auth/login"
 
-// parseLoginResponse 双解析登录回执（规格 §5.4）：
+// parseLoginResponse 三解析登录回执（规格 §5.4）：
 //
-//	4.6.5 → 200 纯文本 "Ok." / "Fails."，失败累计还可能 403 封 IP
-//	5.x   → 200 JSON {"success":true} / {"success":false,"error":"…"}
+//	4.6.5        → 200 纯文本 "Ok." / "Fails."，失败累计还可能 403 封 IP
+//	5.0–5.1      → 200 JSON {"success":true} / {"success":false,"error":"…"}
+//	5.2.0 起     → 204 空体（WebAPI 无内容统一回 204），成功只体现在会话 cookie 上
 //
-// 判据先看状态码再看 body 形态：两种形态都要认，否则一次小版本升级就会把
+// 判据先看状态码再看 body 形态：几种形态都要认，否则一次小版本升级就会把
 // 「密码错了」显示成「协议不对」。
-func parseLoginResponse(status int, body []byte) error {
+func parseLoginResponse(status int, body []byte, hasSession bool) error {
 	text := strings.TrimSpace(string(body))
 
 	if status == http.StatusForbidden {
@@ -236,6 +250,16 @@ func parseLoginResponse(status int, body []byte) error {
 	if text == "Fails." {
 		return authError("auth/login", "qBittorrent 拒绝了登录：用户名或密码不对", nil)
 	}
+
+	// 5.2.0 起登录成功是 204 + 空体：body 本身分不清成功与失败（"Fails." 是纯文本失败），
+	// 唯一的凭据是「有没有下发会话 cookie」，没有就是没登进去。
+	if text == "" && status >= 200 && status < 300 {
+		if hasSession {
+			return nil
+		}
+		return protocolError("auth/login", "登录回执是空体，也没有下发会话 cookie（SID / QBT_SID_*）：无法确认这次登录", nil)
+	}
+
 	if status < 200 || status >= 300 {
 		return protocolError("auth/login", fmt.Sprintf("登录回执不是预期的形态（HTTP %d）: %s", status, truncate(text, 120)), nil)
 	}
@@ -491,7 +515,7 @@ func (c *client) get(ctx context.Context, path string, query url.Values) (int, [
 	return c.do(ctx, http.MethodGet, target, nil, "")
 }
 
-// do 是一次 qbt 调用的公共部分：URL、Referer、SID cookie、响应体读完。
+// do 是一次 qbt 调用的公共部分：URL、Referer、会话 cookie、响应体读完。
 //
 // 它只负责「请求有没有发出去、回没回来」，非 2xx 的含义留给调用方
 // （404 在 properties 里是「不在」，在别处是错）。
@@ -542,8 +566,9 @@ func (c *client) send(ctx context.Context, method, path string, body io.Reader, 
 	}
 	// qbt 的 CSRF 检查看 Referer 是否与 WebUI 同源；不带就 403。
 	req.Header.Set("Referer", c.origin())
-	if c.sid != "" {
-		req.Header.Set("Cookie", "SID="+c.sid)
+	if c.session != nil {
+		// 原样回发（名字 + 值）：5.2.0 起 cookie 叫 QBT_SID_<port>，拼死 "SID=" 会被拒。
+		req.AddCookie(c.session)
 	}
 
 	response, err := c.http.Do(req)

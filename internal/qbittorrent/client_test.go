@@ -232,6 +232,53 @@ func TestConnectionReadsVersionAndAutorun(t *testing.T) {
 	}
 }
 
+// TestLoginAcceptsEmpty204AndKeepsRenamedSessionCookie 钉住 5.2.0 起的形态：
+// 登录成功是 204 空体，会话 cookie 改名成 QBT_SID_<port>——两者必须一起处理，
+// 只放过 204 不够：cookie 名字没跟着换，紧接着的 version 读就是 403。
+func TestLoginAcceptsEmpty204AndKeepsRenamedSessionCookie(t *testing.T) {
+	fake := newFakeQbt(t, map[string]http.HandlerFunc{
+		"POST /api/v2/auth/login": func(w http.ResponseWriter, _ *http.Request) {
+			http.SetCookie(w, &http.Cookie{Name: "QBT_SID_8082", Value: "sid-52", Path: "/"})
+			w.WriteHeader(http.StatusNoContent)
+		},
+		"GET /api/v2/app/version": versionHandler("v5.2.0"),
+		"GET /api/v2/app/preferences": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{}`))
+		},
+	})
+
+	result := New(Options{}).Test(context.Background(), settings.Section{Name: "qbittorrent"}, inputOf(fake.config()))
+	if !result.OK {
+		t.Fatalf("result = %+v, want 绿（5.2 的 204 空体登录）", result)
+	}
+
+	version := fake.requestsTo(http.MethodGet, "/api/v2/app/version")
+	if len(version) != 1 {
+		t.Fatalf("version 请求 %d 次, want 1", len(version))
+	}
+	if cookie := version[0].Header.Get("Cookie"); cookie != "QBT_SID_8082=sid-52" {
+		t.Errorf("Cookie = %q, want QBT_SID_8082=sid-52（名字要原样回发）", cookie)
+	}
+}
+
+// TestLoginRejectsEmptyBodyWithoutSessionCookie 确认空体 + 没 cookie 不算登录成功：
+// 那说明对面不是我们认识的 qbt，直接判 protocol 比让它变成后面一串 403 好查。
+func TestLoginRejectsEmptyBodyWithoutSessionCookie(t *testing.T) {
+	fake := newFakeQbt(t, map[string]http.HandlerFunc{
+		"POST /api/v2/auth/login": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		},
+	})
+
+	result := New(Options{}).Test(context.Background(), settings.Section{Name: "qbittorrent"}, inputOf(fake.config()))
+	if result.OK {
+		t.Fatal("空体且没有会话 cookie 不该绿")
+	}
+	if result.Code != settings.CodeProtocol {
+		t.Errorf("code = %q, want protocol（%s）", result.Code, result.Detail)
+	}
+}
+
 // TestTestClassifiesProtocolOnUnexpectedLoginBody 确认认不出的登录回执归 protocol：
 // 那是版本行为不一致，要查代码，不是改密码。
 func TestConnectionClassifiesProtocolOnUnexpectedLoginBody(t *testing.T) {
