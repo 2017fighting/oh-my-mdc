@@ -12,6 +12,10 @@
 // 上游失败（地区阻断、schema 错、连不上）走退避重试并留一条告警事件：
 // 「DMM 地区阻断」不是「DMM 没收录」，所以绝不在失败时降级成 JavDB 元数据。
 // 「失败三次落 failed」的裁决归聚合的整理票（#29），这里只记 attempts 与下一次时间。
+//
+// AI 翻译（#30）是取数之后的一步**可选**加工：启用时把日文 title/outline 译成中文，
+// 写进 task 的 title_zh/outline_zh；译文由整理段（#29）的 NFO 槽位消费。
+// 翻译失败只降级日文原文 + 一条告警事件，绝不阻塞入库，也绝不烧取数的重试预算。
 package scrape
 
 import (
@@ -28,6 +32,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
+	"github.com/2017fighting/oh-my-mdc/internal/translate"
 )
 
 // maxScrapesPerRound 挡住异常积压把一轮对账拖成无尽循环。
@@ -49,6 +54,13 @@ type JavDB interface {
 	Detail(ctx context.Context, token, movieID string) (appapi.DetailResult, error)
 }
 
+// Translator 是 AI 翻译接缝（真实实现是 translate.Integration）。
+//
+// 它是可选接缝：nil、未配置或 disabled 时刮削一次都不问上游（P6-3）。
+type Translator interface {
+	Translate(ctx context.Context, cfg translate.Config, in translate.Text) (translate.Text, error)
+}
+
 // Options 装配一个取数引擎。
 type Options struct {
 	Store    *task.Store
@@ -57,6 +69,8 @@ type Options struct {
 	Outbox *sidefx.Outbox
 	DMM    DMM
 	JavDB  JavDB
+	// Translator 是 AI 翻译（可选集成）；nil 表示这一跑没接翻译。
+	Translator Translator
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Owner 是 claim 的持有者标识；空则用 hostname-pid。
@@ -67,13 +81,14 @@ type Options struct {
 
 // Runner 是取数引擎。
 type Runner struct {
-	store    *task.Store
-	settings Settings
-	dmm      DMM
-	javdb    JavDB
-	logger   *slog.Logger
-	owner    string
-	now      func() time.Time
+	store      *task.Store
+	settings   Settings
+	dmm        DMM
+	javdb      JavDB
+	translator Translator
+	logger     *slog.Logger
+	owner      string
+	now        func() time.Time
 	// recorder 是加工失败记账的单点（与整理段共用，见 internal/processing）。
 	recorder *processing.Recorder
 }
@@ -93,13 +108,14 @@ func New(opts Options) *Runner {
 		now = time.Now
 	}
 	return &Runner{
-		store:    opts.Store,
-		settings: opts.Settings,
-		dmm:      opts.DMM,
-		javdb:    opts.JavDB,
-		logger:   logger,
-		owner:    owner,
-		now:      now,
+		store:      opts.Store,
+		settings:   opts.Settings,
+		dmm:        opts.DMM,
+		javdb:      opts.JavDB,
+		translator: opts.Translator,
+		logger:     logger,
+		owner:      owner,
+		now:        now,
 		recorder: processing.NewRecorder(processing.Options{
 			Store:  opts.Store,
 			Outbox: opts.Outbox,
@@ -153,6 +169,7 @@ func (r *Runner) ProcessPending(ctx context.Context) (Progress, error) {
 	}
 	// 加工失败的自动重试上限与旁路引擎同一个设置（规格 §4.3 max_attempts）。
 	maxAttempts := snapshot.MaxAttempts(processing.DefaultMaxAttempts)
+	translation := r.newTranslationAccess(ctx, snapshot)
 
 	progress := Progress{}
 	var errs []error
@@ -161,7 +178,7 @@ func (r *Runner) ProcessPending(ctx context.Context) (Progress, error) {
 			break
 		}
 		progress.Scanned++
-		outcome, err := r.processVersion(ctx, version, token, maxAttempts)
+		outcome, err := r.processVersion(ctx, version, token, maxAttempts, translation)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -203,13 +220,15 @@ const (
 //
 // 复用判据刻意放在**抢租约之前**：命中复用的版本不需要取数，也就不该占着租约
 // 让整理票（#29）等它。抢到租约后再查一次——两次查询之间别的进程可能已经刮完了。
-func (r *Runner) processVersion(ctx context.Context, version task.Version, token string, maxAttempts int) (outcome, error) {
+func (r *Runner) processVersion(ctx context.Context, version task.Version, token string, maxAttempts int, translation *translationAccess) (outcome, error) {
 	reused, err := r.store.HasMetadata(ctx, version.MovieID)
 	if err != nil {
 		return outcomeSkipped, err
 	}
 	if reused {
-		// P9-2：元数据存在 → 0 次上游调用，只留在 processing 等整理。
+		// P9-2：元数据存在 → 0 次取数。翻译不是取数：启用而译文缺失时补一次翻译请求，
+		// 不碰 JavDB/DMM（用户可能在任务刮完以后才启用翻译）。
+		r.backfillTranslation(ctx, version, translation)
 		return outcomeReused, nil
 	}
 
@@ -235,6 +254,7 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 		return outcomeSkipped, errors.Join(err, r.store.Release(ctx, claimed.Infohash, r.owner))
 	}
 	if reused {
+		r.backfillTranslation(ctx, claimed, translation)
 		return outcomeReused, r.store.Release(ctx, claimed.Infohash, r.owner)
 	}
 
@@ -242,6 +262,8 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 	if err != nil {
 		return outcomeFailed, r.fail(ctx, claimed, maxAttempts, err)
 	}
+	// 翻译是取数之后的一步可选加工：失败只降级日文原文 + 一条告警（P6-2）。
+	fetched = r.translate(ctx, claimed, translation, fetched)
 	metadata, err := fetched.TaskMetadata()
 	if err != nil {
 		return outcomeFailed, errors.Join(fmt.Errorf("scrape: 序列化元数据 %s: %w", claimed.MovieID, err),
@@ -253,7 +275,12 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 	if err := r.store.SaveMetadata(ctx, claimed.MovieID, lease, metadata, fetched.Values.Actors); err != nil {
 		return outcomeFailed, errors.Join(err, r.store.Release(ctx, claimed.Infohash, r.owner))
 	}
-	r.logger.Info("元数据已取齐", "movie_id", claimed.MovieID, "number", claimed.Number)
+	// 译文单独写：重刮不抹掉它，翻译失败也不挡取数的成果（规格 §7.2）。
+	if err := r.store.SaveTranslation(ctx, claimed.MovieID, fetched.TaskTranslation()); err != nil {
+		return outcomeFailed, errors.Join(err, r.store.Release(ctx, claimed.Infohash, r.owner))
+	}
+	r.logger.Info("元数据已取齐", "movie_id", claimed.MovieID, "number", claimed.Number,
+		"translated", !fetched.TaskTranslation().Empty())
 	return outcomeFetched, nil
 }
 

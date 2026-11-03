@@ -9,6 +9,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/dmm"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
+	"github.com/2017fighting/oh-my-mdc/internal/translate"
 )
 
 // 字段图：规格 §7.1 的唯一实现。
@@ -81,14 +82,26 @@ type Values struct {
 	TrailerURL     string
 }
 
-// Fetched 是一次刮削取数的产物：值 + 两个 JSON 面。
+// Fetched 是一次刮削取数的产物：值 + 两个 JSON 面 + 译文。
 type Fetched struct {
 	Values     Values
 	Provenance map[string]Provenance
 	Raw        map[string]json.RawMessage
+	// Translation 是 AI 翻译的产物（可选集成，规格 §5.7）：没启用、没原文或失败时为零值。
+	// 它不在字段图里 —— 译文的输入就是 Values 的 title_ja/outline。
+	Translation translate.Text
+}
+
+// TaskTranslation 是译文那一面的落库形态（translate.Text → task.Translated 的唯一转换）。
+//
+// 译文单独落库（task.SaveTranslation）：取数重刮不该抹掉已有译文。
+func (f Fetched) TaskTranslation() task.Translated {
+	return task.Translated{TitleZH: f.Translation.Title, OutlineZH: f.Translation.Outline}
 }
 
 // TaskMetadata 把取数结果翻成落库形态（两个 JSON 面序列化）。
+//
+// 两个 zh 列**不在这里**：译文走 TaskMetadata 之外的 SaveTranslation（见 Translation）。
 func (f Fetched) TaskMetadata() (task.Metadata, error) {
 	provenance, err := json.Marshal(f.Provenance)
 	if err != nil {

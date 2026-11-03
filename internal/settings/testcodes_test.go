@@ -26,3 +26,26 @@ func TestIsPermanentCodeIsTheSpec9Classification(t *testing.T) {
 		}
 	}
 }
+
+// TestOptionalEnabledIsTheSingleEnableRule 钉住可选集成的启用判据：
+// 未配置、没启用、enabled 还没写过（nil）都算关着；只有「已配置 + true」才开着。
+//
+// 它是 mteam / ai_translation / telegram 三个执行半段共用的唯一判据。
+func TestOptionalEnabledIsTheSingleEnableRule(t *testing.T) {
+	yes, no := true, false
+	cases := map[string]struct {
+		snapshot Snapshot
+		want     bool
+	}{
+		"节不存在":       {Snapshot{Sections: map[string]SectionState{}}, false},
+		"未配置":        {Snapshot{Sections: map[string]SectionState{"ai_translation": {Enabled: &yes}}}, false},
+		"enabled 为空": {Snapshot{Sections: map[string]SectionState{"ai_translation": {Configured: true}}}, false},
+		"已配置但禁用":     {Snapshot{Sections: map[string]SectionState{"ai_translation": {Configured: true, Enabled: &no}}}, false},
+		"已配置且启用":     {Snapshot{Sections: map[string]SectionState{"ai_translation": {Configured: true, Enabled: &yes}}}, true},
+	}
+	for name, c := range cases {
+		if got := c.snapshot.OptionalEnabled("ai_translation"); got != c.want {
+			t.Errorf("%s: OptionalEnabled = %v, want %v", name, got, c.want)
+		}
+	}
+}

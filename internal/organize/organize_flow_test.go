@@ -557,7 +557,7 @@ func TestTranslationMissingIsAnAlertNotABlocker(t *testing.T) {
 
 	found := false
 	for _, event := range f.events(t, movieID) {
-		if event.Kind == task.EventAlert && strings.Contains(event.Reason, organize.TranslationMissingPrefix) {
+		if event.Kind == task.EventAlert && strings.Contains(event.Reason, task.TranslationMissingPrefix) {
 			found = true
 		}
 	}
@@ -659,4 +659,70 @@ func callsContain(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestTranslationFailureAlertIsNotDuplicated 钉住两段告警的分工：取数段已经记了
+// 「AI 翻译失败：<原因>」（#30），整理段不再补一条「翻译缺席」——一次事故只留一行字。
+func TestTranslationFailureAlertIsNotDuplicated(t *testing.T) {
+	f := newFixture(t)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	enabled := true
+	f.settings.snapshot.Sections["ai_translation"] = settings.SectionState{
+		Configured: true, Enabled: &enabled, Data: map[string]any{"model": "gpt"},
+	}
+
+	writeDownloads(t, f.downloads, map[string]string{"ABP-123.mkv": "video"})
+	f.addProcessingVersion(t, movieID, number, hashA, "", metadata(fetchedAt, nil, nil))
+	if err := f.store.AppendEvent(context.Background(), task.Event{
+		MovieID: movieID, Infohash: hashA, Kind: task.EventAlert,
+		Phase:  string(task.PhaseScrape),
+		Reason: task.TranslationFailurePrefix + "：回包没有 choices（title/plot 用日文原文入库）",
+	}); err != nil {
+		t.Fatalf("种翻译失败告警: %v", err)
+	}
+
+	if _, err := f.runner.ProcessPending(context.Background()); err != nil {
+		t.Fatalf("ProcessPending: %v", err)
+	}
+
+	var missing, failed int
+	for _, event := range f.events(t, movieID) {
+		switch {
+		case event.Kind != task.EventAlert:
+		case strings.HasPrefix(event.Reason, task.TranslationMissingPrefix):
+			missing++
+		case strings.HasPrefix(event.Reason, task.TranslationFailurePrefix):
+			failed++
+		}
+	}
+	if missing != 0 {
+		t.Errorf("「翻译缺席」告警 = %d 条, want 0（已有失败告警就不再补）", missing)
+	}
+	if failed != 1 {
+		t.Errorf("「翻译失败」告警 = %d 条, want 1", failed)
+	}
+}
+
+// TestDisabledTranslationFilesWithJapanese 是 P6-3 的第二半：翻译禁用时 NFO 的
+// title/plot 全用日文原文 —— 哪怕库里还留着上一次启用时译好的中文（数据留着，不参与排版）。
+func TestDisabledTranslationFilesWithJapanese(t *testing.T) {
+	f := newFixture(t)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	writeDownloads(t, f.downloads, map[string]string{"ABP-123.mkv": "video"})
+	f.addProcessingVersion(t, movieID, number, hashA, "", metadata(fetchedAt, nil, nil))
+
+	if _, err := f.runner.ProcessPending(context.Background()); err != nil {
+		t.Fatalf("ProcessPending: %v", err)
+	}
+
+	nfo := readFile(t, filepath.Join(f.mediaRoot, number, organize.NFOName))
+	if strings.Contains(nfo, "一个月禁欲的尽头") {
+		t.Errorf("翻译禁用却用了译文:\n%s", nfo)
+	}
+	if !strings.Contains(nfo, "<title>"+number+" 一ヶ月間の禁欲の果てに</title>") {
+		t.Errorf("title 没退回日文原文:\n%s", nfo)
+	}
+	if !strings.Contains(nfo, "<plot>S1スリム美女優の豪華共演</plot>") {
+		t.Errorf("plot 没退回日文原文:\n%s", nfo)
+	}
 }

@@ -78,12 +78,13 @@ func (f *fakeJavDB) hit() int { return len(f.calls) }
 // ------------------------------------------------------------------ fixture
 
 type fixture struct {
-	database *db.DB
-	store    *task.Store
-	settings *fakeSettings
-	dmm      *fakeDMM
-	javdb    *fakeJavDB
-	runner   *scrape.Runner
+	database   *db.DB
+	store      *task.Store
+	settings   *fakeSettings
+	dmm        *fakeDMM
+	javdb      *fakeJavDB
+	translator *fakeTranslator
+	runner     *scrape.Runner
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -97,20 +98,22 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	f := &fixture{
-		database: database,
-		store:    task.NewStore(database.Pool()),
-		settings: readySettings(),
-		dmm:      &fakeDMM{result: dmmFixture(t)},
-		javdb:    &fakeJavDB{result: javdbFixture(t)},
+		database:   database,
+		store:      task.NewStore(database.Pool()),
+		settings:   readySettings(),
+		dmm:        &fakeDMM{result: dmmFixture(t)},
+		javdb:      &fakeJavDB{result: javdbFixture(t)},
+		translator: &fakeTranslator{},
 	}
 	f.runner = scrape.New(scrape.Options{
-		Store:    f.store,
-		Outbox:   sidefx.New(database.Pool()),
-		Settings: f.settings,
-		DMM:      f.dmm,
-		JavDB:    f.javdb,
-		Owner:    "test-scrape",
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:      f.store,
+		Outbox:     sidefx.New(database.Pool()),
+		Settings:   f.settings,
+		DMM:        f.dmm,
+		JavDB:      f.javdb,
+		Translator: f.translator,
+		Owner:      "test-scrape",
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return f
 }

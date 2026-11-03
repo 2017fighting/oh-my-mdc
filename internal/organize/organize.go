@@ -32,8 +32,6 @@ const (
 const (
 	// ImageFailurePrefix 是图片落盘部分失败的告警开头（裁剪失败不失败任务）。
 	ImageFailurePrefix = "图片落盘部分失败"
-	// TranslationMissingPrefix 是 AI 翻译缺席的告警开头（title/plot 降级日文照常入库）。
-	TranslationMissingPrefix = "AI 翻译缺席"
 )
 
 // maxOrganizesPerRound 挡住异常积压把一轮对账拖成无尽循环。
@@ -260,6 +258,11 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, env e
 // 硬链同 inode、NFO 内容同、通知入箱唯一，重跑只会补上没做完的那一半。
 func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metadata, env environment) error {
 	clean := readMetadata(meta, version.Number)
+	if !env.translationExpected {
+		// P6-3：翻译禁用时 NFO/通知一律用日文原文。库里已存的译文不删（数据是数据），
+		// 只是不参与排版 —— 重新启用翻译后它们照旧可用，不必重译。
+		clean.TitleZH, clean.OutlineZH = "", ""
+	}
 
 	// 同番号异 movie_id：目录是「一番号一目录」，先到者（或已入库者）拥有它（规格 §7.2 碰撞行）。
 	owner, err := r.store.TaskOwningNumber(ctx, version.Number, version.MovieID)
@@ -548,24 +551,31 @@ func (r *Runner) recordWarnings(ctx context.Context, version task.Version, meta 
 		r.recordOnce(ctx, version, ImageFailurePrefix,
 			fmt.Sprintf("%s：%s（任务照常入库）", ImageFailurePrefix, strings.Join(imageWarnings, "；")))
 	}
-	// AI 翻译是本票之外的一段（#30）：译文本该有却没有时才告警，缺席不阻塞入库。
-	if translationExpected && !meta.translated() {
-		r.recordOnce(ctx, version, TranslationMissingPrefix,
-			fmt.Sprintf("%s：title/plot 用日文原文入库", TranslationMissingPrefix))
+	// AI 翻译（#30）：译文本该有却没有时才告警，缺席不阻塞入库。
+	// 取数段已经记过失败原因（TranslationFailurePrefix）的不再重复——两段共用 task 的词表。
+	if translationExpected && !meta.translated() && !r.hasAlert(ctx, version, task.TranslationFailurePrefix) {
+		r.recordOnce(ctx, version, task.TranslationMissingPrefix,
+			fmt.Sprintf("%s：title/plot 用日文原文入库", task.TranslationMissingPrefix))
 	}
 }
 
 // recordOnce 只在还没有同类告警时写一条（判据在 task_event）。
 func (r *Runner) recordOnce(ctx context.Context, version task.Version, prefix, reason string) {
-	alerted, err := r.store.HasAlert(ctx, version.Infohash, prefix)
-	if err != nil {
-		r.logger.Error("organize: 查告警去重失败", "infohash", version.Infohash, "err", err)
-		return
-	}
-	if alerted {
+	if r.hasAlert(ctx, version, prefix) {
 		return
 	}
 	r.record(ctx, version, task.EventAlert, "", "", reason)
+}
+
+// hasAlert 报告这条版本的时间线上有没有某一类告警（查不到一律当「没有」：
+// 宁可多一条告警，也不要因为一次读失败把告警整个丢掉）。
+func (r *Runner) hasAlert(ctx context.Context, version task.Version, prefix string) bool {
+	alerted, err := r.store.HasAlert(ctx, version.Infohash, prefix)
+	if err != nil {
+		r.logger.Error("organize: 查告警去重失败", "infohash", version.Infohash, "err", err)
+		return false
+	}
+	return alerted
 }
 
 // record 往任务时间线追加一条事件（写不进去不该让一次已经成功的入库变成失败）。
@@ -619,9 +629,8 @@ func (r *Runner) environment(ctx context.Context) (environment, string, error) {
 		mediaRoot:   mediaRoot,
 		maxAttempts: snapshot.MaxAttempts(processing.DefaultMaxAttempts),
 	}
-	if ai, ok := snapshot.Sections["ai_translation"]; ok && ai.Configured && ai.Enabled != nil && *ai.Enabled {
-		env.translationExpected = true
-	}
+	// AI 翻译是可选集成：已配置且启用才算「译文本该有」。
+	env.translationExpected = snapshot.OptionalEnabled("ai_translation")
 	return env, "", nil
 }
 

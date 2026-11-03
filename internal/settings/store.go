@@ -519,6 +519,19 @@ func (s Snapshot) MaxAttempts(fallback int) int {
 	return fallback
 }
 
+// OptionalEnabled 报告一个可选集成是否「已配置且启用」。
+//
+// 可选集成（mteam / ai_translation / telegram）的执行半段都靠这条判据决定要不要打上游：
+// 未配置、没启用、或连 enabled 都没写过（NULL）都算关着。判据集中在这里，
+// 免得每个消费方各写一遍 `section.Enabled != nil && *section.Enabled`。
+func (s Snapshot) OptionalEnabled(name string) bool {
+	section, ok := s.Sections[name]
+	if !ok || !section.Configured || section.Enabled == nil {
+		return false
+	}
+	return *section.Enabled
+}
+
 // Interval 读 app_config 里的一条间隔（poll_interval / reconcile_interval / sidefx_interval）。
 //
 // fallback 是读不到时的兜底：调用方给的默认值与表默认值一致（规格 §4.3）。

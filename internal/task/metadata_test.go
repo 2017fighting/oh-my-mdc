@@ -297,3 +297,108 @@ func TestProcessingVersionsOnlyListsProcessingOnes(t *testing.T) {
 		t.Fatalf("versions = %+v, want 只有 %s", versions, ready)
 	}
 }
+
+// TestSaveTranslationWritesTheTranslationFace 是 AI 翻译的落库面（规格 §7.1 的
+// title_zh/outline_zh 行）：两个 zh 列进值，provenance 多出两条 source=ai_translation，
+// 日文原文（title_ja/outline）与取数留下的其它 provenance 一概不动。
+func TestSaveTranslationWritesTheTranslationFace(t *testing.T) {
+	store, _ := metadataFixture(t)
+	infohash := "1111111111111111111111111111111111111111"
+	processingVersion(t, store, "YwrO3B", "ABP-123", infohash)
+	if err := store.SaveMetadata(context.Background(), "YwrO3B", task.Lease{}, sampleMetadata(t), nil); err != nil {
+		t.Fatalf("SaveMetadata: %v", err)
+	}
+
+	translated := task.Translated{TitleZH: "禁欲一月的尽头", OutlineZH: "S1 苗条女优的豪华共演"}
+	if err := store.SaveTranslation(context.Background(), "YwrO3B", translated); err != nil {
+		t.Fatalf("SaveTranslation: %v", err)
+	}
+
+	metadata, _, err := store.Metadata(context.Background(), "YwrO3B")
+	if err != nil {
+		t.Fatalf("Metadata: %v", err)
+	}
+	if metadata.TitleZH != translated.TitleZH || metadata.OutlineZH != translated.OutlineZH {
+		t.Errorf("title_zh/outline_zh = %q/%q, want %q/%q",
+			metadata.TitleZH, metadata.OutlineZH, translated.TitleZH, translated.OutlineZH)
+	}
+	// 日文原文不动：译文是**加上去**的一面，不是替换。
+	if metadata.TitleJA != "一ヶ月間の禁欲の果てに" || metadata.Outline != "S1スリム美女優の豪華共演" {
+		t.Errorf("title_ja/outline = %q/%q, want 原样保留", metadata.TitleJA, metadata.Outline)
+	}
+
+	var provenance map[string]struct {
+		Source   string `json:"source"`
+		RawValue string `json:"raw_value"`
+	}
+	if err := json.Unmarshal(metadata.Provenance, &provenance); err != nil {
+		t.Fatalf("provenance 不是 JSON: %v", err)
+	}
+	if got := provenance[task.FieldTitleZH]; got.Source != task.TranslationSource || got.RawValue != translated.TitleZH {
+		t.Errorf("provenance.title_zh = %+v, want 来源 %q 与译文原文", got, task.TranslationSource)
+	}
+	if got := provenance[task.FieldOutlineZH]; got.Source != task.TranslationSource || got.RawValue != translated.OutlineZH {
+		t.Errorf("provenance.outline_zh = %+v, want 来源 %q 与译文原文", got, task.TranslationSource)
+	}
+	if provenance["title_ja"].Source != "dmm" {
+		t.Errorf("取数留下的 provenance 被覆盖了: %+v", provenance)
+	}
+}
+
+// TestSaveTranslationAlsoMakesReuseCriterionUnchanged 钉住一处边界：译文落库不该
+// 改变复用判据（判据仍是 provenance 非空），否则下次来新版本会被当成「没刮过」重刮。
+func TestSaveTranslationAlsoMakesReuseCriterionUnchanged(t *testing.T) {
+	store, _ := metadataFixture(t)
+	save(t, store, candidate("YwrO3B", "ABP-123", "1111111111111111111111111111111111111111"))
+
+	if err := store.SaveTranslation(context.Background(), "YwrO3B",
+		task.Translated{TitleZH: "译名"}); err != nil {
+		t.Fatalf("SaveTranslation: %v", err)
+	}
+	// 一条只有译文的行不算「刮过」：复用判据由取数段的 provenance 决定。
+	if has, err := store.HasMetadata(context.Background(), "YwrO3B"); err != nil || has {
+		t.Errorf("HasMetadata = %v err=%v, want false（取数还没跑过）", has, err)
+	}
+}
+
+// TestSaveMetadataKeepsTheTranslationProvenance 确认重刮不丢译文的来源记录：
+// 取数面的 provenance 整体换新，title_zh/outline_zh 两条跟着两个 zh 列一起活下来。
+func TestSaveMetadataKeepsTheTranslationProvenance(t *testing.T) {
+	store, _ := metadataFixture(t)
+	save(t, store, candidate("YwrO3B", "ABP-123", "1111111111111111111111111111111111111111"))
+	if err := store.SaveMetadata(context.Background(), "YwrO3B", task.Lease{}, sampleMetadata(t), nil); err != nil {
+		t.Fatalf("SaveMetadata（首次）: %v", err)
+	}
+	if err := store.SaveTranslation(context.Background(), "YwrO3B",
+		task.Translated{TitleZH: "禁欲一月的尽头", OutlineZH: "译文简介"}); err != nil {
+		t.Fatalf("SaveTranslation: %v", err)
+	}
+
+	// 强制重刮：取数面重写。
+	rescrape := sampleMetadata(t)
+	rescrape.TitleJA = "一ヶ月間の禁欲の果てに（新）"
+	rescrape.Provenance = json.RawMessage(`{"title_ja":{"source":"dmm"}}`)
+	if err := store.SaveMetadata(context.Background(), "YwrO3B", task.Lease{}, rescrape, nil); err != nil {
+		t.Fatalf("SaveMetadata（重刮）: %v", err)
+	}
+
+	metadata, _, err := store.Metadata(context.Background(), "YwrO3B")
+	if err != nil {
+		t.Fatalf("Metadata: %v", err)
+	}
+	var provenance map[string]struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(metadata.Provenance, &provenance); err != nil {
+		t.Fatalf("provenance 不是 JSON: %v", err)
+	}
+	if provenance[task.FieldTitleZH].Source != task.TranslationSource {
+		t.Errorf("重刮把 title_zh 的来源记录抹掉了: %+v", provenance)
+	}
+	if provenance[task.FieldOutlineZH].Source != task.TranslationSource {
+		t.Errorf("重刮把 outline_zh 的来源记录抹掉了: %+v", provenance)
+	}
+	if metadata.TitleZH != "禁欲一月的尽头" {
+		t.Errorf("title_zh = %q, want 原样保留", metadata.TitleZH)
+	}
+}

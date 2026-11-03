@@ -191,7 +191,9 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 （来源：#6 移植 `plugins/translate.go` + 地图 Notes）
 
-OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）。刮削时译 `title_ja → title_zh` 与 `outline → outline_zh`（一次请求可合并，实现自由度）。**失败 → title/plot 降级日文原题照常入库** + `task_event` 告警，不阻塞入库。测试连接 = 1 token 极小请求。
+OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）。刮削时译 `title_ja → title_zh` 与 `outline → outline_zh`（一次请求可合并，实现自由度）。**失败 → title/plot 降级日文原题照常入库** + `task_event` 告警（一条，带分类与原因），不阻塞入库。测试连接 = 1 token 极小请求。
+
+**翻译不是取数**：复用判据命中的版本仍是 0 次 JavDB/DMM 调用，但 AI 翻译启用而译文缺失时会补一次翻译请求（用户常在任务刮完以后才启用翻译）；补译失败与正式翻译同一处置。实测落定（#30）：一次请求回 JSON `{title, outline}`，`temperature=0`；错误分类 `auth`（401/403，或没填 `api_key`——缺凭据与 mteam/telegram 同一判词）/`business`（本地缺 `base_url`/`model`、上游 400/404/422）/`network`（429/5xx）/`timeout`/`protocol`（非 JSON、无 choices、译文不是 JSON 对象；容忍 markdown 代码围栏与 JSON 前后的一句客套）。失败告警带分类与原因（`AI 翻译失败（<code>）：…`），同一版本只留一条。
 
 ## 6. 状态机与循环
 
@@ -399,7 +401,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 **9 刮削** —— 裁决：#7 全章。
 - P9-1 固定归属 + 字段级回退按 §7.1；`provenance` 逐字段、`raw_snapshot` 逐源在位。
-- P9-2 元数据已存在的任务来新版本 → 0 次网络，只硬链视频文件（复用判据 = 元数据存在，与标签无关）。
+- P9-2 元数据已存在的任务来新版本 → 0 次网络，只硬链视频文件（复用判据 = 元数据存在，与标签无关；AI 翻译的补译请求不计入「取数」，见 §5.7）。
 - P9-3 NFO/图片/布局全按 §7.1–7.2（sorttitle=纯番号、tag 不写 genre、右裁 2:3、原子写、hash 跳过）。
 - P9-4 入库成功 → tag 换 `mdc:finished`；失败不新增第三 tag。
 - P9-5 三次重试耗尽 → `failed(phase,reason)` 驻留，Telegram ×1，需人工区可见。

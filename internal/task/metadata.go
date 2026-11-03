@@ -28,6 +28,39 @@ import (
 // processing.Recorder 统一写「加工失败」，所以这个前缀只标「还在重试的那几次」。
 const ScrapeFailurePrefix = "刮削取数失败"
 
+// 两类 AI 翻译告警的前缀（规格 §5.7/§7.2）。
+//
+// 翻译失败由取数段记一条（带分类与原因），「译文本该有却缺席」由整理段兜底；
+// 同一版本已有失败告警时整理段不再重复写——一次事故只留一行字。
+const (
+	// TranslationFailurePrefix 是「翻译试过但失败了」的告警开头。
+	TranslationFailurePrefix = "AI 翻译失败"
+	// TranslationMissingPrefix 是「启用了翻译但译文缺席」的告警开头。
+	TranslationMissingPrefix = "AI 翻译缺席"
+)
+
+// TranslationSource 是 provenance 里译文（title_zh/outline_zh）的来源名。
+const TranslationSource = "ai_translation"
+
+// provenance 里两个译文列的键（与 task 的列同名）。
+const (
+	FieldTitleZH   = "title_zh"
+	FieldOutlineZH = "outline_zh"
+)
+
+// Translated 是 AI 翻译的产物：两个可选的 zh 列（规格 §7.1）。
+//
+// 空串表示「这次没译出来」——落库时只写非空的字段，绝不拿空串覆盖上一次的译文。
+type Translated struct {
+	TitleZH   string
+	OutlineZH string
+}
+
+// Empty 报告这次有没有译文可落。
+func (t Translated) Empty() bool {
+	return strings.TrimSpace(t.TitleZH) == "" && strings.TrimSpace(t.OutlineZH) == ""
+}
+
 // Lease 是加工段持有的一份版本租约：成功后由 SaveMetadata 放回。
 //
 // 零值表示「不放回」（fixture / 后台修数据）。**按 infohash 而非 movie_id**：
@@ -68,7 +101,13 @@ type Actor struct {
 	AvatarURL string
 }
 
-// Metadata 读一个任务的元数据三面；exists 是复用判据（provenance 非空）。
+// metadataCriterion 是复用判据（P9-2）：取数段留下的 provenance 非空。
+//
+// 减掉 title_zh/outline_zh 两条：它们是 AI 翻译的产物（#30），不是「刮过」的证据。
+// 一份只有译文的任务仍然需要取数 —— 否则一个先翻译、后取数的顺序会把整段刮削跳过。
+const metadataCriterion = `((provenance - 'title_zh' - 'outline_zh') <> '{}'::jsonb)`
+
+// Metadata 读一个任务的元数据三面；exists 是复用判据（见 metadataCriterion）。
 func (s *Store) Metadata(ctx context.Context, movieID string) (Metadata, bool, error) {
 	var (
 		metadata        Metadata
@@ -79,7 +118,7 @@ func (s *Store) Metadata(ctx context.Context, movieID string) (Metadata, bool, e
 		`SELECT title_ja, title_zh, outline, outline_zh, release_date, runtime_minutes,
 		        studio, publisher, series, director, trailer_url, rating, tags,
 		        provenance, raw_snapshot,
-		        (provenance <> '{}'::jsonb) AS has_metadata
+		        `+metadataCriterion+` AS has_metadata
 		 FROM task WHERE movie_id = $1`,
 		movieID,
 	).Scan(
@@ -99,11 +138,11 @@ func (s *Store) Metadata(ctx context.Context, movieID string) (Metadata, bool, e
 	return metadata, exists, nil
 }
 
-// HasMetadata 报告任务有没有刮过：复用判据（P9-2），判据是 provenance 非空。
+// HasMetadata 报告任务有没有刮过：复用判据（P9-2），判据见 metadataCriterion。
 func (s *Store) HasMetadata(ctx context.Context, movieID string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT (provenance <> '{}'::jsonb) FROM task WHERE movie_id = $1`, movieID,
+		`SELECT `+metadataCriterion+` FROM task WHERE movie_id = $1`, movieID,
 	).Scan(&exists)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -141,7 +180,12 @@ func (s *Store) SaveMetadata(ctx context.Context, movieID string, lease Lease, m
 		`UPDATE task
 		 SET title_ja = $2, outline = $3, release_date = $4, runtime_minutes = $5,
 		     studio = $6, publisher = $7, series = $8, director = $9, trailer_url = $10,
-		     rating = $11, tags = $12, provenance = $13, raw_snapshot = $14, updated_at = now()
+		     rating = $11, tags = $12, raw_snapshot = $14, updated_at = now(),
+		     -- 取数面的 provenance 整体换新（重刮要能对比新旧），但译文的条目留着：
+		     -- 两个 zh 列在这次写里不动，它们的来源记录就该跟着一起活（#30）。
+		     provenance = $13::jsonb || (
+		         SELECT COALESCE(jsonb_object_agg(key, value), '{}'::jsonb)
+		         FROM jsonb_each(provenance) WHERE key IN ('title_zh', 'outline_zh'))
 		 WHERE movie_id = $1`,
 		movieID, metadata.TitleJA, metadata.Outline, metadata.ReleaseDate, metadata.RuntimeMinutes,
 		metadata.Studio, metadata.Publisher, metadata.Series, metadata.Director, metadata.TrailerURL,
@@ -174,6 +218,63 @@ func (s *Store) SaveMetadata(ctx context.Context, movieID string, lease Lease, m
 		return fmt.Errorf("task: 提交元数据: %w", err)
 	}
 	return nil
+}
+
+// SaveTranslation 落 AI 翻译的产物：title_zh/outline_zh 两列 + 两条 provenance。
+//
+// 它与 SaveMetadata 分开，是因为两件事的失败语义完全不同：取数失败要退避重试、
+// 翻译失败只降级日文原文（规格 §5.7）。分开之后，重刮不会抹掉已经译好的中文
+// （SaveMetadata 不写这两列），翻译失败也不会把取数的成果挡回去。
+//
+// 只写非空字段：模型给空的字段不该把上一次的译文清成空串。同时更新
+// provenance 的两条（source=ai_translation，raw_value 就是译文原文）。
+func (s *Store) SaveTranslation(ctx context.Context, movieID string, translated Translated) error {
+	if strings.TrimSpace(movieID) == "" {
+		return errors.New("task: 落译文缺 movie_id")
+	}
+	translated.TitleZH = strings.TrimSpace(translated.TitleZH)
+	translated.OutlineZH = strings.TrimSpace(translated.OutlineZH)
+	if translated.Empty() {
+		return nil
+	}
+
+	fetchedAt := time.Now().UTC()
+	entries := make(map[string]translationEntry, 2)
+	if translated.TitleZH != "" {
+		entries[FieldTitleZH] = translationEntry{Source: TranslationSource, FetchedAt: fetchedAt, RawValue: translated.TitleZH}
+	}
+	if translated.OutlineZH != "" {
+		entries[FieldOutlineZH] = translationEntry{Source: TranslationSource, FetchedAt: fetchedAt, RawValue: translated.OutlineZH}
+	}
+	provenance, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("task: 序列化译文 provenance: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE task
+		 SET title_zh = CASE WHEN $2 <> '' THEN $2 ELSE title_zh END,
+		     outline_zh = CASE WHEN $3 <> '' THEN $3 ELSE outline_zh END,
+		     provenance = provenance || $4::jsonb,
+		     updated_at = now()
+		 WHERE movie_id = $1`,
+		movieID, translated.TitleZH, translated.OutlineZH, provenance,
+	)
+	if err != nil {
+		return fmt.Errorf("task: 落任务 %s 的译文: %w", movieID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTaskNotFound
+	}
+	return nil
+}
+
+// translationEntry 是一条译文 provenance 的形状（与 scrape.Provenance 同构，
+// 但本包不能反向依赖取数段，所以单列一型）。
+type translationEntry struct {
+	Source    string    `json:"source"`
+	FetchedAt time.Time `json:"fetched_at"`
+	RawValue  string    `json:"raw_value"`
 }
 
 // saveActors 是演员落行的单点：actor 按 javdb_actor_id upsert，

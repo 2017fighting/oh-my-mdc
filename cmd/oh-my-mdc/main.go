@@ -32,6 +32,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 	"github.com/2017fighting/oh-my-mdc/internal/telegram"
+	"github.com/2017fighting/oh-my-mdc/internal/translate"
 	"github.com/2017fighting/oh-my-mdc/internal/web"
 )
 
@@ -74,6 +75,7 @@ func run(logger *slog.Logger) error {
 	var qbtIntegration *qbittorrent.Integration
 	var jellyfinIntegration *jellyfin.Integration
 	var telegramIntegration *telegram.Integration
+	var translateIntegration *translate.Integration
 	var taskStore *task.Store
 	var sidefxOutbox *sidefx.Outbox
 	var loopsRegistry *loops.Registry
@@ -93,6 +95,8 @@ func run(logger *slog.Logger) error {
 		jellyfinIntegration = jellyfin.New(jellyfin.Options{})
 		// Telegram 集成门面：设置域的「两步测试」实现 + sidefx 的通知执行者。
 		telegramIntegration = telegram.New(telegram.Options{})
+		// AI 翻译集成门面（可选集成）：设置域的「1 token 测试」实现 + 刮削的译文来源。
+		translateIntegration = translate.New(translate.Options{})
 		// 任务域读模型与副作用出箱：面板与 poll 循环共用。
 		taskStore = task.NewStore(database.Pool())
 		sidefxOutbox = sidefx.New(database.Pool())
@@ -102,6 +106,7 @@ func run(logger *slog.Logger) error {
 			settings.WithTester("qbittorrent", qbtIntegration),
 			settings.WithTester("jellyfin", jellyfinIntegration),
 			settings.WithTester("mteam", mteamIntegration),
+			settings.WithTester("ai_translation", translateIntegration),
 			settings.WithTester("telegram", telegramIntegration))
 
 		// 读设置是启动顺序的一环（规格 §4.4）：这一次读失败说明设置域不可用，
@@ -122,7 +127,9 @@ func run(logger *slog.Logger) error {
 					Settings: settingsStore,
 					DMM:      dmm.New(dmm.Options{}),
 					JavDB:    javdbIntegration,
-					Logger:   logger,
+					// 可选集成：未配置/禁用时刮削一次都不问它（P6-3）。
+					Translator: translateIntegration,
+					Logger:     logger,
 				})
 
 				// 整理入库（加工第二段）：硬链进媒体库 + NFO/图片 + 换 tag + 置刷库/通知待办。
