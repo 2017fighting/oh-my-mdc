@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clientFor 起一个 HTTP fake，返回一个指向它的 Client。
@@ -347,5 +348,114 @@ func TestClassifyAndPermanentLockTheMetricHook(t *testing.T) {
 				t.Errorf("IsPermanent = %v, want %v", got, tc.permanent)
 			}
 		})
+	}
+}
+
+// roundTripFunc 让一个函数当 Transport 用：测试要在「连接层」注入失败，
+// 而 httptest 的 handler 只能模拟「已经连上了之后」的失败。
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// okResponse 造一个标准信封的成功响应。
+func okResponse(data string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(envBody(data))),
+	}
+}
+
+// counter 数一次 Transport 被叫了几次，并按剧本决定前 N 次是传输错。
+func flakyTransport(t *testing.T, failFirst int) (*int, *http.Client) {
+	t.Helper()
+	calls := 0
+	return &calls, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls <= failFirst {
+			// 线上实测形态：握手期连接被断，一个响应字节都没有。
+			return nil, io.ErrUnexpectedEOF
+		}
+		return okResponse(`{"lists":[]}`), nil
+	})}
+}
+
+// TestClientSharesTransport 钉住「零值 Client 共用同一份 Transport」。
+//
+// 早先后每次请求 new 一个 http.Client，等于关掉连接复用：那条链路上握手有
+// 3–35% 的阵发失败率（docs/javdb-app-traffic.md），每个请求都重新握手就是把
+// 这个概率按请求数全额吃下。
+func TestClientSharesTransport(t *testing.T) {
+	a, b := &Client{}, &Client{}
+	if a.httpClient() != b.httpClient() {
+		t.Fatal("两个 Client 拿到了不同的 http.Client —— 连接池没共用")
+	}
+	if a.httpClient() != a.httpClient() {
+		t.Fatal("同一个 Client 两次调用返回了不同的 http.Client")
+	}
+	if a.httpClient().Transport != defaultTransport {
+		t.Error("零值 Client 没有用上 defaultTransport")
+	}
+}
+
+// TestGetRetriesTransportError 钉住传输错的有界重试：GET 在握手期断链后重打，
+// 第二次成功即返回成功，且只重打（不退化成无限重试）。
+func TestGetRetriesTransportError(t *testing.T) {
+	calls, hc := flakyTransport(t, 1)
+	c := &Client{Host: "http://javdb.test", Identity: DefaultIdentity(), Signer: NewSigner(), HTTP: hc, sleep: func(time.Duration) {}}
+
+	if _, err := c.Lists(context.Background()); err != nil {
+		t.Fatalf("Lists 应当靠重试成功: %v", err)
+	}
+	if *calls != 2 {
+		t.Errorf("Transport 被调用 %d 次, want 2（一次失败 + 一次重试）", *calls)
+	}
+}
+
+// TestGetGivesUpAfterMaxRetries 钉住重试上限：一直断链时只打 1+maxTransportRetries 次，
+// 然后把传输错原样交出去（由调用方按 network 分类等下一轮）。
+func TestGetGivesUpAfterMaxRetries(t *testing.T) {
+	calls, hc := flakyTransport(t, 1000)
+	c := &Client{Host: "http://javdb.test", Identity: DefaultIdentity(), Signer: NewSigner(), HTTP: hc, sleep: func(time.Duration) {}}
+
+	_, err := c.Lists(context.Background())
+	if err == nil {
+		t.Fatal("一直断链时应当报错")
+	}
+	if got := Classify(err); got != CodeNetwork {
+		t.Errorf("Classify = %q, want %q", got, CodeNetwork)
+	}
+	if *calls != 1+maxTransportRetries {
+		t.Errorf("Transport 被调用 %d 次, want %d", *calls, 1+maxTransportRetries)
+	}
+}
+
+// TestPostFormIsNotRetried 钉住「只有幂等 GET 重打」：建清单不幂等，
+// 传输层失败时不能悄悄再建一次。
+func TestPostFormIsNotRetried(t *testing.T) {
+	calls, hc := flakyTransport(t, 1000)
+	c := &Client{Host: "http://javdb.test", Identity: DefaultIdentity(), Signer: NewSigner(), HTTP: hc, sleep: func(time.Duration) {}}
+
+	if _, err := c.CreateList(context.Background(), "想看清单", ""); err == nil {
+		t.Fatal("建清单在传输层失败时应当报错")
+	}
+	if *calls != 1 {
+		t.Errorf("POST 被打了 %d 次, want 1（不重试不幂等的写）", *calls)
+	}
+}
+
+// TestCanceledContextIsNotRetried 钉住：ctx 已取消时重试没有意义，直接返回。
+func TestCanceledContextIsNotRetried(t *testing.T) {
+	calls, hc := flakyTransport(t, 1000)
+	c := &Client{Host: "http://javdb.test", Identity: DefaultIdentity(), Signer: NewSigner(), HTTP: hc, sleep: func(time.Duration) {}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := c.Lists(ctx); err == nil {
+		t.Fatal("取消的 ctx 应当报错")
+	}
+	if *calls != 1 {
+		t.Errorf("Transport 被调用 %d 次, want 1（取消后不重试）", *calls)
 	}
 }

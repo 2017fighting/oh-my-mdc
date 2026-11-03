@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -190,13 +191,59 @@ type Client struct {
 	HTTP *http.Client
 	// Metrics 记每次请求的结局（规格 §9 的 javdb 上游）；nil 时什么都不记。
 	Metrics metrics.Recorder
+
+	// sleep 是重试之间的等待，零值时用 time.Sleep。测试用它把退避压成 0。
+	sleep func(time.Duration)
 }
+
+// defaultTransport 是所有 Client 共用的一份 Transport。
+//
+// 为什么必须共用：早先 httpClient() 每次调用都 new 一个 http.Client，等于每个请求
+// 配一份空连接池 —— 于是每条 javdb 请求都得重新走一次 TLS 握手。实测（2026-11，
+// 见 docs/javdb-app-traffic.md）这台机器到上游各镜像域名的握手有 3–35% 的阵发失败率
+// （连接被断，一个响应字节都没有），共用连接池把这类失败从「每请求一次」摊成「每连接一次」，
+// 顺便拿到 net/http 对闲置连接被复用时的自动重试。
+var defaultTransport = &http.Transport{
+	Proxy:               http.ProxyFromEnvironment,
+	DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	ForceAttemptHTTP2:   true,
+	MaxIdleConns:        8,
+	MaxIdleConnsPerHost: 8,
+	IdleConnTimeout:     90 * time.Second,
+	TLSHandshakeTimeout: 10 * time.Second,
+}
+
+// defaultHTTPClient 与 defaultTransport 一起构成零值 Client 的默认出口。
+var defaultHTTPClient = &http.Client{Timeout: 20 * time.Second, Transport: defaultTransport}
+
+// 握手期断链期间（上文的 3–35% 窗口）重打两次能把一轮的失败概率压到 ~1%。
+// 上限刻意小：javdb 有并发自帽（规格 §5.1），重试不能变成放大流量。
+const (
+	maxTransportRetries = 2
+	retryBase           = 400 * time.Millisecond
+)
 
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 20 * time.Second}
+	return defaultHTTPClient
+}
+
+// retryable 报告这次失败值不值得重打：只有「幂等、无请求体的 GET」上的传输错
+// （连接被断、DNS、TLS 握手）才重打。
+//
+// 其余一律不重打：POST /api/v1/lists 建清单不幂等；业务错与协议错是「要改东西」，
+// 立刻返回原文比藏着掖着更有用；ctx 已经取消时重打只会白等。
+func retryable(req *http.Request, err error) bool {
+	if req.Method != http.MethodGet || req.Body != nil {
+		return false
+	}
+	if req.Context().Err() != nil {
+		return false
+	}
+	var te *TransportError
+	return errors.As(err, &te)
 }
 
 // envelope 是服务端的响应信封。
@@ -304,12 +351,38 @@ func (c *Client) newRequest(ctx context.Context, method, path string, params, fo
 
 // do 发请求并把响应体解析成信封，返回其中的 data。
 //
-// 上游计量挂在这一次出口上：每一次真正发出的请求都记一条，结局按 IsPermanent 分流
-// （auth = 凭据失效、protocol = 签名/信封不兼容都算永久；其余等一会儿就好）。
+// 上游计量挂在这一次出口上：一条逻辑请求记一条（重试算同一条），结局按 IsPermanent
+// 分流（auth = 凭据失效、protocol = 签名/信封不兼容都算永久；其余等一会儿就好）。
 func (c *Client) do(req *http.Request, path string) (json.RawMessage, error) {
-	raw, err := c.send(req, path)
+	raw, err := c.sendWithRetry(req, path)
 	metrics.ObserveUpstream(c.Metrics, metrics.UpstreamJavDB, err, IsPermanent)
 	return raw, err
+}
+
+// sendWithRetry 是 do 的重试外壳：传输错按 retryBase 翻倍退避后重打，最多两次。
+//
+// 重试只发生在「一个响应字节都没收到」的情况下（见 retryable），所以不会出现
+// 「上游其实已经处理了、我们又打一遍」的问题。返回的永远是最后一次的结局。
+func (c *Client) sendWithRetry(req *http.Request, path string) (json.RawMessage, error) {
+	raw, err := c.send(req, path)
+	for attempt := 1; retryable(req, err) && attempt <= maxTransportRetries; attempt++ {
+		c.wait(attempt)
+		raw, err = c.send(req, path)
+	}
+	return raw, err
+}
+
+// wait 睡一个重试间隔：retryBase、2·retryBase、…
+func (c *Client) wait(attempt int) {
+	d := retryBase
+	for i := 1; i < attempt; i++ {
+		d *= 2
+	}
+	if c.sleep != nil {
+		c.sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // send 是 do 去掉计量后的那一半。

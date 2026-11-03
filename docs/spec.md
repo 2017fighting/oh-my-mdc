@@ -112,6 +112,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 - 顺带实测可用（备用）：`PATCH`/`DELETE /api/v1/lists/{id}`（改名/删清单）。
 - 幂等（#16 实测）：重复 add、重复 remove、remove 不存在的 movie 全部 `success:1`；add 不存在的 movie → `success:0` + Rails 校验泄漏。成功响应 `data` 恒 null。
 - 并发自帽 8（javdb_rss 先例，~0.85s/req）；无已知 429。
+- **镜像与链路抖动**（2026-11 真机抓包，见 `docs/javdb-app-traffic.md`）：`jdforrepam.com` 只是镜像之一（App 侧看到 `apidd.spthgb.com` / `apidd.czssdgz.com`，形状一致）；到各镜像的 TLS 握手有 3–35% 的**阵发**断链（跨域名跨节点，握手期就断，一个响应字节都没有）。处置：传输层共用一份 Transport（连接复用）+ 幂等 GET 的有界重试（2 次、400ms 起翻倍），不是凭据问题，**不要**据此报凭据告警。
 - **清单名陷阱**：服务端要求 4–30 字符，「想看」二字不合规 → 向导新建默认名 **「想看清单」**（description 建议「oh-my-mdc 自动创建」），用户可改；探测匹配按 id，名字仅展示。
 
 ### 5.2 M-Team
