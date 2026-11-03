@@ -73,6 +73,10 @@ web-lint: web-install ## 前端 lint
 web-typecheck: web-install ## 前端类型检查
 	cd $(WEB_DIR) && $(PNPM) typecheck
 
+.PHONY: web-test
+web-test: web-install ## 前端单测（node --test，纯逻辑不跑浏览器）
+	cd $(WEB_DIR) && $(PNPM) test
+
 .PHONY: web-build
 web-build: web-install ## vite build → internal/web/dist（embed 的输入）
 	cd $(WEB_DIR) && $(PNPM) build
@@ -134,7 +138,7 @@ test-local: db-up ## 本地全量：先起 compose Postgres 再跑测试（含�
 check: fmt-check vet test ## CI 的 Go 门（数据库由 CI 的服务容器提供）
 
 .PHONY: check-local
-check-local: fmt-check vet web-lint web-typecheck test-local ## 本地全门
+check-local: fmt-check vet web-lint web-typecheck web-test test-local ## 本地全门
 
 .PHONY: web-reset
 web-reset: ## 把 internal/web/dist 恢复成仓库里的占位壳页

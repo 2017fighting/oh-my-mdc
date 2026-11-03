@@ -25,6 +25,7 @@ import {
   type SectionName,
   type SectionState,
 } from "~/lib/api";
+import { setFields, type Draft, type FormValues } from "~/lib/draft";
 
 /**
  * 八步向导壳（规格 §8.1）：一屏一步，一步一张表。
@@ -181,8 +182,6 @@ const steps: StepSpec[] = [
   },
 ];
 
-type FormValues = Record<string, string | boolean>;
-
 export function Wizard({
   snapshot,
   onRefresh,
@@ -209,14 +208,17 @@ export function Wizard({
   const formKey = `${step.section}:${section.revision}`;
   // chip 跟着**被测那一节**的账本走（清单步测的是 JavDB），所以它的钥匙里也要有那一节的指纹。
   const chipKey = `${formKey}:${testedSection.revision}`;
-  const [draft, setDraft] = React.useState<{ key: string; values: FormValues } | null>(null);
+  const [draft, setDraft] = React.useState<Draft | null>(null);
   const [chips, setChips] = React.useState<{ key: string; chip: TestChipState } | null>(null);
 
   const values = draft?.key === formKey ? draft.values : initialValues(step, section);
   const chip = chips?.key === chipKey ? chips.chip : chipFromLastTest(testedSection);
 
-  const setField = (key: string, value: string | boolean) =>
-    setDraft({ key: formKey, values: { ...values, [key]: value } });
+  // 写字段必须走函数式更新（setFields 见 lib/draft）：一次事件连着写两个字段
+  // （选清单 = id + name）时，各自展开这次渲染的旧快照会互相覆盖，只留下最后一个。
+  const setFieldsIn = (patch: FormValues) =>
+    setDraft((current) => setFields(current, formKey, () => initialValues(step, section), patch));
+  const setField = (key: string, value: string | boolean) => setFieldsIn({ [key]: value });
   const setChip = (next: TestChipState) => setChips({ key: chipKey, chip: next });
 
   const save = async () => {
@@ -353,10 +355,7 @@ export function Wizard({
           {step.section === "list_registry" ? (
             <ListAssist
               tokenConfigured={snapshot.sections.javdb.configured}
-              onPick={(id, name) => {
-                setField("list_id", id);
-                if (name) setField("name", name);
-              }}
+              onPick={(id, name) => setFieldsIn(name ? { list_id: id, name } : { list_id: id })}
             />
           ) : null}
 

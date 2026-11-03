@@ -6,6 +6,7 @@
     "dev": "react-router dev",
     "build": "react-router build && node scripts/copy-dist.mjs",
     "lint": "eslint .",
+    "test": "node --test 'app/**/*.test.ts'",
     "typecheck": "react-router typegen && tsc"
   },
   "dependencies": {

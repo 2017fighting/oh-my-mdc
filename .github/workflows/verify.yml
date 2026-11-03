@@ -54,7 +54,7 @@ jobs:
         run: make test
 
   frontend:
-    name: 前端门（lint / typecheck / build + embed）
+    name: 前端门（lint / typecheck / test / build + embed）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -78,6 +78,9 @@ jobs:
 
       - name: 前端类型检查
         run: make web-typecheck
+
+      - name: 前端单测
+        run: make web-test
 
       - name: 前端构建（embed 的输入）
         run: make web-build
