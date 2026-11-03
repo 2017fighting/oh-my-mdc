@@ -17,6 +17,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
+	"github.com/2017fighting/oh-my-mdc/internal/retry"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
@@ -31,6 +32,13 @@ const pingTimeout = 3 * time.Second
 // Pinger 是就绪检查对数据库的唯一要求。
 type Pinger interface {
 	Ping(ctx context.Context) error
+}
+
+// Retrier 是人工重试的接缝（真实实现是 retry.Runner）。
+//
+// 只有一件事：对一条任务的全部版本跑一次重试，逐条回结论（规格 §6.1 人工重试行）。
+type Retrier interface {
+	Retry(ctx context.Context, movieID string, force bool) (retry.Result, error)
 }
 
 // Hooks 是 qBittorrent autorun 回调的接缝（真实实现是 reconcile.Runner）。
@@ -64,6 +72,8 @@ type Options struct {
 	Loops *loops.Registry
 	// Hooks 是 qbt autorun 回调（GET /api/hooks/qbt）；nil 时端点仍回 200 但不做事。
 	Hooks Hooks
+	// Retrier 是人工重试（POST /api/tasks/{movie_id}/retry）；nil 时端点回 503 db_unavailable。
+	Retrier Retrier
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
@@ -98,6 +108,7 @@ func New(opts Options) (http.Handler, error) {
 		sidefx:   opts.Sidefx,
 		loops:    opts.Loops,
 		hooks:    opts.Hooks,
+		retrier:  opts.Retrier,
 		logger:   logger,
 	}
 
@@ -116,6 +127,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/hooks/qbt", s.qbtHook)
 	mux.HandleFunc("GET /api/tasks", s.tasksList)
 	mux.HandleFunc("GET /api/tasks/{movie_id}", s.taskDetail)
+	mux.HandleFunc("POST /api/tasks/{movie_id}/retry", s.taskRetry)
 	mux.HandleFunc("GET /api/attention", s.attention)
 	mux.HandleFunc("GET /api/side-effects", s.sideEffectsList)
 	mux.HandleFunc("POST /api/side-effects/{id}/retry", s.sideEffectRetry)
@@ -144,6 +156,7 @@ type server struct {
 	sidefx   *sidefx.Outbox
 	loops    *loops.Registry
 	hooks    Hooks
+	retrier  Retrier
 	logger   *slog.Logger
 }
 

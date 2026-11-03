@@ -216,6 +216,15 @@ const (
 	outcomeFailed
 )
 
+// reuseCriterion 回答「这一轮要不要复用元数据」：元数据在、且没被人工要求强制重刮。
+//
+// force_rescrape 只由人工重试置起（#31 / 规格 §6.1 人工重试行），取数成功后由
+// SaveMetadata 清掉。它是唯一能打破复用判据的东西：源改版、字段映射修了要重取时，
+// 人需要一个确定性的开关，而不是把 provenance 清掉再看运气。
+func reuseCriterion(reused bool, forceRescrape bool) bool {
+	return reused && !forceRescrape
+}
+
 // processVersion 处理一条加工版本：先看复用判据，再抢租约，最后才上网。
 //
 // 复用判据刻意放在**抢租约之前**：命中复用的版本不需要取数，也就不该占着租约
@@ -225,7 +234,7 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 	if err != nil {
 		return outcomeSkipped, err
 	}
-	if reused {
+	if reuseCriterion(reused, version.ForceRescrape) {
 		// P9-2：元数据存在 → 0 次取数。翻译不是取数：启用而译文缺失时补一次翻译请求，
 		// 不碰 JavDB/DMM（用户可能在任务刮完以后才启用翻译）。
 		r.backfillTranslation(ctx, version, translation)
@@ -253,7 +262,7 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 	if err != nil {
 		return outcomeSkipped, errors.Join(err, r.store.Release(ctx, claimed.Infohash, r.owner))
 	}
-	if reused {
+	if reuseCriterion(reused, claimed.ForceRescrape) {
 		r.backfillTranslation(ctx, claimed, translation)
 		return outcomeReused, r.store.Release(ctx, claimed.Infohash, r.owner)
 	}

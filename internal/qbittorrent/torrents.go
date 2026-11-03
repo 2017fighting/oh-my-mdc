@@ -21,6 +21,8 @@ type TorrentStatus struct {
 	Progress    float64 `json:"progress"`
 	State       string  `json:"state"`
 	ContentPath string  `json:"content_path"`
+	// SizeBytes 是种子总字节数：通知的「大小」槽位用它（人工重试没有候选列表可查）。
+	SizeBytes int64 `json:"size_bytes"`
 }
 
 // Lookup 回读一条种子的权威状态；第二个返回值是「在不在 qbt 里」。
@@ -45,7 +47,7 @@ func (i *Integration) Lookup(ctx context.Context, cfg Config, hash string) (Torr
 		return TorrentStatus{}, false, nil
 	}
 
-	status := TorrentStatus{Hash: props.Hash, ContentPath: props.ContentPath}
+	status := TorrentStatus{Hash: props.Hash, ContentPath: props.ContentPath, SizeBytes: props.TotalSize}
 	if status.Hash == "" {
 		status.Hash = hash
 	}

@@ -17,6 +17,7 @@ import {
   type TaskDetail,
   type TaskEvent,
   type TaskRow,
+  type TaskRetryOutcome,
   type TaskState,
   type TaskVersion,
 } from "~/lib/api";
@@ -196,7 +197,12 @@ export function Panel({
       </Card>
 
       {selected ? (
-        <TaskDrawer key={selected} movieID={selected} onClose={() => setSelected(null)} />
+        <TaskDrawer
+          key={selected}
+          movieID={selected}
+          onClose={() => setSelected(null)}
+          onRefresh={onRefresh}
+        />
       ) : null}
     </>
   );
@@ -205,7 +211,7 @@ export function Panel({
 /** NeedsAttention 是「需要人工」区（规格 §8.2：置顶，行内直接动手）。
  *
  * 三半拼在一起：失败的任务（phase + reason）、停滞的下载、驻留的副作用。
- * 前两半只能「看任务」（重试归人工重试票），驻留副作用可以当场「重发」。
+ * 任务侧两半可以当场「重试」（版本侧结局由接口逐条回），驻留副作用当场「重发」。
  */
 function NeedsAttention({
   attention,
@@ -223,6 +229,8 @@ function NeedsAttention({
   const total = failed.length + stalled.length + stuck.length;
 
   const { busy, error, retry } = useSideEffectRetry(onRefresh);
+  // 任务侧重试与副作用重发是两件事，各有自己的忙位与提示（规格 §8.2 的行内动作）。
+  const taskRetry = useTaskRetry(onRefresh);
 
   return (
     <Card className={cn(total > 0 && "ring-destructive/30")}>
@@ -246,6 +254,10 @@ function NeedsAttention({
       {total > 0 ? (
         <CardContent className="space-y-2">
           {error ? <Notice tone="bad">{error}</Notice> : null}
+          {taskRetry.error ? <Notice tone="bad">{taskRetry.error}</Notice> : null}
+          {taskRetry.notice ? (
+            <Notice tone={taskRetry.notice.tone}>{taskRetry.notice.text}</Notice>
+          ) : null}
 
           {failed.map((item) => (
             <AttentionRow
@@ -254,9 +266,12 @@ function NeedsAttention({
               badge={<Badge variant="destructive">{phaseLabel(item.phase)}失败</Badge>}
               detail={item.reason}
               action={
-                <button type="button" className={MiniActionClass} onClick={() => onOpenTask(item.movie_id)}>
-                  查看任务
-                </button>
+                <RetryActions
+                  movieID={item.movie_id}
+                  busy={taskRetry.busy === taskRetryKey(item.movie_id, false)}
+                  onRetry={() => void taskRetry.retry(item.movie_id, false)}
+                  onOpen={() => onOpenTask(item.movie_id)}
+                />
               }
             />
           ))}
@@ -266,11 +281,14 @@ function NeedsAttention({
               key={`stalled-${item.infohash}`}
               title={item.number}
               badge={<Badge variant="outline">下载停滞</Badge>}
-              detail={`${item.reason}（状态仍是下载中，确认后可就地处理）`}
+              detail={`${item.reason}（状态仍是下载中，qbt 里还在下就不会重下）`}
               action={
-                <button type="button" className={MiniActionClass} onClick={() => onOpenTask(item.movie_id)}>
-                  查看任务
-                </button>
+                <RetryActions
+                  movieID={item.movie_id}
+                  busy={taskRetry.busy === taskRetryKey(item.movie_id, false)}
+                  onRetry={() => void taskRetry.retry(item.movie_id, false)}
+                  onOpen={() => onOpenTask(item.movie_id)}
+                />
               }
             />
           ))}
@@ -324,6 +342,108 @@ function AttentionRow({
       {action}
     </div>
   );
+}
+
+/** RetryActions 是「需要人工」一行的行内动作：重试（任务侧）+ 查看任务。 */
+function RetryActions({
+  movieID,
+  busy,
+  onRetry,
+  onOpen,
+}: {
+  movieID: string;
+  busy: boolean;
+  onRetry: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1.5" data-movie-id={movieID}>
+      <button type="button" className={MiniActionClass} disabled={busy} onClick={onRetry}>
+        <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
+        重试
+      </button>
+      <button type="button" className={MiniActionClass} onClick={onOpen}>
+        查看任务
+      </button>
+    </div>
+  );
+}
+
+/** RetryNotice 是一次任务重试的结果提示：成功用 ok，被拒/失败用 warn。 */
+type RetryNotice = { tone: "ok" | "warn"; text: string };
+
+/**
+ * useTaskRetry 是人工重试（规格 §6.1 / P13）的共用逻辑：忙位、错误、逐版结论。
+ *
+ * 版本侧的结局是 200 里的逐版结果：被拒（qbt 仍在下载）与加种失败都不该当成
+ * 网络错误弹红字，但要原样告诉人为什么没动。
+ */
+function useTaskRetry(onRefresh: () => Promise<void>) {
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<RetryNotice | null>(null);
+
+  const retry = React.useCallback(
+    async (movieID: string, force: boolean) => {
+      setBusy(taskRetryKey(movieID, force));
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await api.retryTask(movieID, force);
+        setNotice(summarizeRetry(result.results));
+        await onRefresh();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [onRefresh],
+  );
+
+  return { busy, error, notice, retry };
+}
+
+/** taskRetryKey 是忙位的键：同一任务的「重试」与「强制重刮」互不复用。 */
+function taskRetryKey(movieID: string, force: boolean): string {
+  return `${movieID}:${force ? "force" : "retry"}`;
+}
+
+/** summarizeRetry 把逐版结果折成一句话：被拒/失败的排在前面，成功只说做了哪件事。 */
+function summarizeRetry(results: TaskRetryOutcome[]): RetryNotice {
+  if (results.length === 0) {
+    return { tone: "warn", text: "这条任务还没有版本，没有可重试的东西。" };
+  }
+
+  const blocked = results.filter((result) => result.action === "skipped" || result.action === "failed");
+  if (blocked.length > 0) {
+    return {
+      tone: "warn",
+      text: blocked.map((result) => `${shortHash(result.infohash)}：${result.reason}`).join("；"),
+    };
+  }
+
+  const done = results.map((result) => `${shortHash(result.infohash)} ${retryActionLabel(result.action)}`);
+  return { tone: "ok", text: `已下发：${done.join("；")}` };
+}
+
+function retryActionLabel(action: TaskRetryOutcome["action"]): string {
+  switch (action) {
+    case "reset_processing":
+      return "回到加工开头";
+    case "readded":
+      return "重新加种，回到下载中";
+    case "skipped":
+      return "已跳过";
+    case "failed":
+      return "这次没成";
+    default:
+      return action;
+  }
+}
+
+function shortHash(infohash: string): string {
+  return infohash.slice(0, 8);
 }
 
 /** useSideEffectRetry 是「重发 / 提前重试」的共用逻辑：忙位、错误、刷新面板。 */
@@ -493,17 +613,37 @@ function VersionChip({ version }: { version: TaskVersion }) {
   );
 }
 
-/** TaskDrawer 是只读抽屉：版本列表（infohash/来源/标签/失败原因）+ 事件时间线。 */
-function TaskDrawer({ movieID, onClose }: { movieID: string; onClose: () => void }) {
+/**
+ * TaskDrawer 是任务详情抽屉（规格 §8.2）：版本列表（infohash/来源/标签/失败原因）
+ * + 事件时间线 + 重试/强制重刮。只看刮削字段以外的状态面（v1 不做 provenance）。
+ */
+function TaskDrawer({
+  movieID,
+  onClose,
+  onRefresh,
+}: {
+  movieID: string;
+  onClose: () => void;
+  onRefresh: () => Promise<void>;
+}) {
   const [detail, setDetail] = React.useState<TaskDetail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const closeRef = React.useRef<HTMLButtonElement>(null);
+
+  // 点完重试要重读一次抽屉：版本列表与时间线是重试的产物，得当场看得见。
+  const [reloadKey, setReloadKey] = React.useState(0);
+  const reload = React.useCallback(async () => {
+    setReloadKey((key) => key + 1);
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
     api.task(movieID).then(
       (loaded) => {
-        if (!cancelled) setDetail(loaded);
+        if (!cancelled) {
+          setDetail(loaded);
+          setError(null);
+        }
       },
       (cause: unknown) => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -512,7 +652,7 @@ function TaskDrawer({ movieID, onClose }: { movieID: string; onClose: () => void
     return () => {
       cancelled = true;
     };
-  }, [movieID]);
+  }, [movieID, reloadKey]);
 
   React.useEffect(() => {
     closeRef.current?.focus();
@@ -595,13 +735,71 @@ function TaskDrawer({ movieID, onClose }: { movieID: string; onClose: () => void
           ) : null}
         </div>
 
-        <footer className="border-t px-4 py-2.5 text-[11px] text-muted-foreground">
-          v1 抽屉只读：重试 / 强制重刮在人工重试票落地；这里不看刮削字段与 provenance。
+        <footer className="space-y-2 border-t px-4 py-3">
+          <DrawerActions movieID={movieID} onRetried={reload} onRefresh={onRefresh} />
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            重试＝回加工开头或按存的 payload 重新加种；已入库的版本只有「强制重刮」才会重跑。
+          </p>
         </footer>
       </aside>
     </div>
   );
 }
+
+/**
+ * DrawerActions 是抽屉底部的两个按钮（规格 §8.3 文案：重试 / 强制重刮）。
+ *
+ * 点完先重读抽屉（版本列表与时间线要立刻反映新状态），再刷新面板（统计卡与需人工区）。
+ */
+function DrawerActions({
+  movieID,
+  onRetried,
+  onRefresh,
+}: {
+  movieID: string;
+  onRetried: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+}) {
+  const taskRetry = useTaskRetry(onRefresh);
+
+  const retry = async (force: boolean) => {
+    await taskRetry.retry(movieID, force);
+    await onRetried();
+  };
+
+  return (
+    <>
+      {taskRetry.error ? <Notice tone="bad">{taskRetry.error}</Notice> : null}
+      {taskRetry.notice ? (
+        <Notice tone={taskRetry.notice.tone}>{taskRetry.notice.text}</Notice>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className={PrimaryActionClass}
+          disabled={taskRetry.busy !== null}
+          onClick={() => void retry(false)}
+        >
+          <RotateCcw className={cn("size-3.5", taskRetry.busy === taskRetryKey(movieID, false) && "animate-spin")} aria-hidden />
+          重试
+        </button>
+        <button
+          type="button"
+          className={MiniActionClass}
+          disabled={taskRetry.busy !== null}
+          onClick={() => void retry(true)}
+        >
+          <RotateCcw className={cn("size-3.5", taskRetry.busy === taskRetryKey(movieID, true) && "animate-spin")} aria-hidden />
+          强制重刮
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** 抽屉主按钮的唯一 class（与行内小按钮区分主次）。 */
+const PrimaryActionClass =
+  "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60";
 
 function VersionCard({ version }: { version: TaskVersion }) {
   return (
@@ -624,6 +822,11 @@ function VersionCard({ version }: { version: TaskVersion }) {
         {version.list_removal_pending ? (
           <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
             待删清单项
+          </Badge>
+        ) : null}
+        {version.force_rescrape ? (
+          <Badge variant="outline" className="h-5 border-amber-300 font-normal text-amber-800 dark:border-amber-800 dark:text-amber-300">
+            待强制重刮
           </Badge>
         ) : null}
       </div>

@@ -85,7 +85,10 @@ type Properties struct {
 	SavePath string `json:"save_path"`
 	// ContentPath 是种子落盘后的真实路径（文件或目录），完成判定读它。
 	ContentPath string `json:"content_path"`
-	Category    string `json:"category"`
+	// TotalSize 是种子总字节数（properties 原样给）。通知里的「大小」用它：
+	// 人工重试没有磁力候选列表可查，只能回读 qbt。
+	TotalSize int64  `json:"total_size"`
+	Category  string `json:"category"`
 	// Tags 是 qbt 原样的逗号分隔串（如 "mdc:in-progress, ABP-123"）。
 	Tags string `json:"tags"`
 }

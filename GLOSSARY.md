@@ -71,6 +71,14 @@ _Avoid_: skip scrape、缓存命中
 加种时发现同 infohash 种子已在 qBittorrent 里但没有项目 tag，于是补 tag 与 category、把它当作本项目的版本继续走流程的动作。savepath 不动，当作不是抢来的。
 _Avoid_: 抢占、合并、认领（那指 Claim）
 
+**人工重试** (Manual retry)：
+在面板上让一条任务按版本重来一次的动作，三条分支：回加工开头重跑、按存的 payload 重新加种、或强制重刮已入库的版本。qBittorrent 里仍在下载的版本永不重下。
+_Avoid_: 手动重跑、重新刮削（那是强制重刮）
+
+**强制重刮** (Force rescrape)：
+人工重试的 force 变体：允许把已入库的版本拉回加工开头，并要求下一次取数不复用元数据；旧原始快照在覆盖前留进任务事件，作为新旧对比的基准。
+_Avoid_: 刷新元数据、重新刮削
+
 **旁路副作用** (Side effect)：
 入库之外的三件事：删清单项、刷新 Jellyfin、发 Telegram。各自带 pending 标记独立重试，失败不阻塞入库。
 _Avoid_: 后置任务、通知阶段

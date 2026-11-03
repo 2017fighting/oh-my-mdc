@@ -58,9 +58,9 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 ### 4.1 任务域
 
 - **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id text NOT NULL REFERENCES list_registry`（首次发现来源；清单 id 是字符串，见 §4.3）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`created_at`、`updated_at`。
-- **`task_version`**：`infohash text PK`、`movie_id FK`、`source text CHECK ('javdb_magnet','mteam_torrent')`、`delivery text CHECK ('magnet','torrent')`、`label text`（普通/中文/破解，best-effort）、`status text CHECK ('downloading','processing','finished','failed')`、`error_phase text CHECK ('downloading','scrape','organize')`、`error_reason text`、`claimed_at timestamptz`、`claimed_by text`、`attempts int NOT NULL DEFAULT 0`、`next_attempt_at timestamptz`、`add_pending bool`、`list_removal_pending bool`、`payload text`（magnet 串或 .torrent 备份路径）、`created_at`、`updated_at`。
+- **`task_version`**：`infohash text PK`、`movie_id FK`、`source text CHECK ('javdb_magnet','mteam_torrent')`、`delivery text CHECK ('magnet','torrent')`、`label text`（普通/中文/破解，best-effort）、`status text CHECK ('downloading','processing','finished','failed')`、`error_phase text CHECK ('downloading','scrape','organize')`、`error_reason text`、`claimed_at timestamptz`、`claimed_by text`、`attempts int NOT NULL DEFAULT 0`、`next_attempt_at timestamptz`、`add_pending bool`、`list_removal_pending bool`、`force_rescrape bool`（强制重刮：下一次取数不复用元数据，#31）、`payload text`（magnet 串或 .torrent 备份路径）、`created_at`、`updated_at`。
 - **`version_file`**：`id bigint identity PK`、`infohash FK`、`rel_path`、`size_bytes`、`part_index`、`is_primary bool`。（入库幂等与「已落盘」判定的永久记录。）
-- **`task_event`**（append-only）：`id identity PK`、`movie_id`、`infohash NULL`、`kind text CHECK ('state_change','side_effect','alert','manual_retry')`、`from_state`、`to_state`、`phase`、`reason`、`at timestamptz`。承担告警「只发一次」判据、面板历史、失败追问。
+- **`task_event`**（append-only）：`id identity PK`、`movie_id`、`infohash NULL`、`kind text CHECK ('state_change','side_effect','alert','manual_retry')`、`from_state`、`to_state`、`phase`、`reason`、`detail jsonb`（结构化附注；强制重刮把旧 `raw_snapshot` 存这里做对比基准，#31）、`at timestamptz`。承担告警「只发一次」判据、面板历史、失败追问。
 - **`actor`**：`javdb_actor_id text PK`、`name`、`gender NULL`、`avatar_url NULL`、`updated_at`；**`task_actor (movie_id, javdb_actor_id, role)`** 多对多。刮削时随 JavDB 数据全量落行（含性别）；v1 不抓演员详情页（PLAN 15 就位）。
 
 ### 4.2 副作用出箱
@@ -213,7 +213,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | → finished | 硬链接 + NFO/图片落盘后 | tag `mdc:in-progress` → `mdc:finished`；置 jellyfin_refresh / notify 待办 |
 | 失败 | 加工每一步 | 最多 3 次（`max_attempts`）指数退避，第 3 次落 `failed(phase, reason)` + Telegram ×1；此后不自动碰 |
 | 下载异常 | 对账 | 种子消失 → `failed(下载阶段, 种子已移除)`；完成但文件缺 → `failed(下载阶段, 文件丢失)`；**progress 持续不动（常量 60 分钟，非设置项）→ 只告警 ×1，保持 downloading** |
-| 人工重试 | 面板抽屉 | `retry(movie_id, force=false)`：非 finished 版本回 processing 开头；`failed(下载阶段)` 按存的 magnet/种子重加（允许重下）；`force=true` 才重刮已 finished 版本；**qbt 里仍在下载的永不重下** |
+| 人工重试 | 面板抽屉 | `retry(movie_id, force=false)`：非 finished 版本回 processing 开头；下载阶段的版本（含下载中但种子已不在 qbt 的）按存的 magnet/种子重加（允许重下）；`force=true` 才重刮已 finished 版本（旧 `raw_snapshot` 先落 `manual_retry` 事件的 `detail`），并对任何分支都置起 `force_rescrape`；**qbt 里仍在下载的永不重下**（该版本跳过并附原因） |
 | 重启 | 进程启动 | downloading 不动（真实进度在 qbt）；processing 阶段级复位重跑（幂等，无步骤游标）；finished/failed 不动 |
 | 互斥 | 全部 | 版本行条件 claim（§4.4）+ 进程内 per-version 锁 |
 
@@ -282,7 +282,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.2 面板（表格为主体，要动手的事置顶）
 
-区块顺序：统计卡（下载中/加工中/已入库/需人工）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。
+区块顺序：统计卡（下载中/加工中/已入库/需人工）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
 
 任务详情 = **右侧抽屉**，保持精简：版本列表（infohash、来源、标签、失败原因）+ 事件时间线 + 重试/强制重刮（force）。**不看刮削字段与 provenance**（v1 不做，不留占位）。
 
@@ -318,12 +318,14 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `GET /api/overview` | `{initialized, paused, counts:{downloading,processing,finished,needs_attention}, loops:{poll/reconcile/sidefx:{last_run_at,last_ok}}}` |
 | `GET /api/tasks?state=&q=&page=` | 任务行（`task_state` 视图 + 版本摘要 chip 数据） |
 | `GET /api/tasks/{movie_id}` | 任务 + 版本列表 + 最近事件（抽屉数据） |
-| `POST /api/tasks/{movie_id}/retry` | `{force: bool=false}`，语义照 §6.1 人工重试行 |
+| `POST /api/tasks/{movie_id}/retry` | `{force: bool=false}`，语义照 §6.1 人工重试行；回执 `{results:[{infohash, action, from_state, to_state, reason, force_rescrape}]}`——逐版结果，版本侧被拒/失败不是 HTTP 错误 |
 | `GET /api/events?movie_id=&limit=` | 事件时间线 |
 | `GET /api/attention` | 「需要人工」区的任务侧两半（#26 落地 §8.2 时新增）：`{failed:[{movie_id,number,infohash,phase,reason,at}], stalled:[…]}`；驻留副作用由下面那一条提供 |
 | `GET /api/side-effects?state=pending\|stuck` | 副作用队列（stuck = §4.2 驻留） |
 | `POST /api/side-effects/{id}/retry` | 人工重发（清驻留、重排 next_attempt_at） |
 | `GET /api/hooks/qbt?ih=<hex>` | qbt autorun 回调；恒 200；未知 ih 静默 no-op（§5.4） |
+
+任务事件行的 `detail` 原样回出（人工重试把旧 `raw_snapshot` 留在 `detail.raw_snapshot_before`、结局留在 `detail.action`）：对比基准只经接口可查，面板 v1 不渲染刮削字段（#31）。
 
 错误信封统一 `{ok:false, error:{code, message}}`。SPA 路由：Go handler 把所有未匹配 URL 导向 index.html（#5）。
 

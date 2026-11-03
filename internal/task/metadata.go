@@ -203,10 +203,12 @@ func (s *Store) SaveMetadata(ctx context.Context, movieID string, lease Lease, m
 	}
 
 	// 租约与重试计数：只清这一条版本、且只在租约还在自己手里时（条件写），清不到不是错。
+	// force_rescrape 也在这里清：取数成功了，「下一次不许复用」的标记就兑现完了（#31）。
 	if lease.Infohash != "" && lease.Owner != "" {
 		if _, err := tx.Exec(ctx,
 			`UPDATE task_version
-			 SET claimed_at = NULL, claimed_by = '', attempts = 0, next_attempt_at = NULL, updated_at = now()
+			 SET claimed_at = NULL, claimed_by = '', attempts = 0, next_attempt_at = NULL,
+			     force_rescrape = false, updated_at = now()
 			 WHERE infohash = $1 AND claimed_by = $2`,
 			lease.Infohash, lease.Owner,
 		); err != nil {

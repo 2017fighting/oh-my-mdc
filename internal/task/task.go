@@ -12,6 +12,7 @@
 package task
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -64,6 +65,18 @@ func (p Phase) Label() string {
 	}
 	return string(p)
 }
+
+// 人工重试事件的 detail.action 取值（规格 §6.1 人工重试行 / #31）。
+//
+// 写方是 retry 包（它给每条 manual_retry 事件附上机器可读的结局），读方是本包的
+// 「需要人工」停滞判据（重新加种之后旧停滞告警退场）。两边必须同一个字面量，
+// 所以定义放在这里，而不是任一侧的字符串字面量里。
+const (
+	RetryActionResetProcessing = "reset_processing"
+	RetryActionReadded         = "readded"
+	RetryActionSkipped         = "skipped"
+	RetryActionFailed          = "failed"
+)
 
 // EventKind 是 task_event.kind 的取值（规格 §4.1）。
 type EventKind string
@@ -119,9 +132,12 @@ type Version struct {
 	AddPending         bool
 	ListRemovalPending bool
 	Attempts           int
-	Payload            string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// ForceRescrape 是「下一次取数不许复用」的持久标记（人工重试的强制重刮，#31）。
+	// 置起它的是 ResetForRetry，清掉它的是取数成功（SaveMetadata）——不归进程内记忆。
+	ForceRescrape bool
+	Payload       string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // TaskRow 是面板的一行：任务 + 聚合状态 + 版本。
@@ -148,7 +164,11 @@ type Event struct {
 	ToState   string
 	Phase     string
 	Reason    string
-	At        time.Time
+	// Detail 是事件的结构化附注（jsonb）。人工重试用它留旧 raw_snapshot 的对比基准：
+	// raw_snapshot 一被重取就整体覆盖，旧的那份只能先落在这里（#31）。
+	// 空值落库成 {}，读出来永远是一份合法 JSON。
+	Detail json.RawMessage
+	At     time.Time
 }
 
 // Counts 是面板统计卡的四个数（规格 §8.2）。

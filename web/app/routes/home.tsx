@@ -131,7 +131,7 @@ export default function Home() {
             <p className="mt-1 text-sm text-muted-foreground">
               {view === "wizard"
                 ? "一步一张表：每步只 PATCH 这一节，敏感字段留空就是不改。"
-                : "表格为主体，要动手的事置顶；点一行任务打开只读抽屉。"}
+                : "表格为主体，要动手的事置顶；点一行任务打开抽屉（重试 / 强制重刮）。"}
             </p>
           </div>
           <div className="flex items-center gap-2">

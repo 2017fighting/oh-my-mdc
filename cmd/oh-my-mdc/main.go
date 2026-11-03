@@ -26,6 +26,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
+	"github.com/2017fighting/oh-my-mdc/internal/retry"
 	"github.com/2017fighting/oh-my-mdc/internal/scrape"
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -80,6 +81,7 @@ func run(logger *slog.Logger) error {
 	var sidefxOutbox *sidefx.Outbox
 	var loopsRegistry *loops.Registry
 	var reconcileRunner *reconcile.Runner
+	var retryRunner *retry.Runner
 	// loopDone 是循环退出的信号：关连接池之前要先等它们，别把在途查询踩掉。
 	var loopDone []chan struct{}
 	if database != nil {
@@ -141,6 +143,16 @@ func run(logger *slog.Logger) error {
 					Qbt:      qbtIntegration,
 					Tags:     qbtIntegration,
 					Images:   organize.NewHTTPImages(nil),
+					Logger:   logger,
+				})
+
+				// 人工重试（规格 §6.1 人工重试行）：面板的「重试 / 强制重刮」走它，
+				// 逐条版本分支——回加工开头、按 payload 重新加种、或强制重刮 finished。
+				retryRunner = retry.New(retry.Options{
+					Store:    taskStore,
+					Outbox:   sidefxOutbox,
+					Settings: settingsStore,
+					Qbt:      qbtIntegration,
 					Logger:   logger,
 				})
 
@@ -239,6 +251,10 @@ func run(logger *slog.Logger) error {
 	if reconcileRunner != nil {
 		hooks = reconcileRunner
 	}
+	var retrier server.Retrier
+	if retryRunner != nil {
+		retrier = retryRunner
+	}
 
 	handler, err := server.New(server.Options{
 		Version:  version,
@@ -252,6 +268,7 @@ func run(logger *slog.Logger) error {
 		Sidefx:   sidefxOutbox,
 		Loops:    loopsRegistry,
 		Hooks:    hooks,
+		Retrier:  retrier,
 		Logger:   logger,
 	})
 	if err != nil {

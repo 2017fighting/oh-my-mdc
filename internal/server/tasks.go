@@ -1,7 +1,9 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,6 +25,7 @@ type taskVersionBody struct {
 	ErrorReason        string    `json:"error_reason,omitempty"`
 	AddPending         bool      `json:"add_pending"`
 	ListRemovalPending bool      `json:"list_removal_pending"`
+	ForceRescrape      bool      `json:"force_rescrape"`
 	Attempts           int       `json:"attempts"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
@@ -40,16 +43,20 @@ type taskBody struct {
 }
 
 // taskEventBody 是抽屉事件时间线的一行。
+//
+// Detail 是结构化附注（人工重试留下旧 raw_snapshot 的对比基准）：v1 抽屉不渲染刮削字段，
+// 但接口把它原样回出去——「重刮前 raw_snapshot 对比可查」需要读得到（规格 §8.2 / P13-3）。
 type taskEventBody struct {
-	ID        int64     `json:"id"`
-	MovieID   string    `json:"movie_id"`
-	Infohash  string    `json:"infohash,omitempty"`
-	Kind      string    `json:"kind"`
-	FromState string    `json:"from_state,omitempty"`
-	ToState   string    `json:"to_state,omitempty"`
-	Phase     string    `json:"phase,omitempty"`
-	Reason    string    `json:"reason"`
-	At        time.Time `json:"at"`
+	ID        int64           `json:"id"`
+	MovieID   string          `json:"movie_id"`
+	Infohash  string          `json:"infohash,omitempty"`
+	Kind      string          `json:"kind"`
+	FromState string          `json:"from_state,omitempty"`
+	ToState   string          `json:"to_state,omitempty"`
+	Phase     string          `json:"phase,omitempty"`
+	Reason    string          `json:"reason"`
+	Detail    json.RawMessage `json:"detail,omitempty"`
+	At        time.Time       `json:"at"`
 }
 
 // tasksBody 是 GET /api/tasks 的回执。
@@ -169,6 +176,7 @@ func toTaskBody(row task.TaskRow) taskBody {
 			ErrorReason:        version.ErrorReason,
 			AddPending:         version.AddPending,
 			ListRemovalPending: version.ListRemovalPending,
+			ForceRescrape:      version.ForceRescrape,
 			Attempts:           version.Attempts,
 			CreatedAt:          version.CreatedAt,
 			UpdatedAt:          version.UpdatedAt,
@@ -187,6 +195,7 @@ func toEventBody(event task.Event) taskEventBody {
 		ToState:   event.ToState,
 		Phase:     event.Phase,
 		Reason:    event.Reason,
+		Detail:    event.Detail,
 		At:        event.At,
 	}
 }
@@ -243,4 +252,78 @@ func toAttentionItem(item task.AttentionItem) attentionItem {
 		Reason:   item.Reason,
 		At:       item.At,
 	}
+}
+
+// maxRetryBody 挡住一个过大的请求体：重试只需要一个布尔。
+const maxRetryBody = 4 << 10
+
+// retryRequest 是 POST /api/tasks/{movie_id}/retry 的请求体（规格 §8.4）。
+// 缺省（空请求体或只有 {}）就是 force=false。
+type retryRequest struct {
+	Force bool `json:"force"`
+}
+
+// taskRetryBody 是 POST /api/tasks/{movie_id}/retry 的回执。
+//
+// 逐版结果而不是一个布尔：一条任务可以有多条版本，一个在下载中被拒、
+// 另一条重新加种成功是正常的一天（规格 §6.1 人工重试行）。
+type taskRetryBody struct {
+	OK      bool               `json:"ok"`
+	MovieID string             `json:"movie_id"`
+	Force   bool               `json:"force"`
+	Results []taskRetryOutcome `json:"results"`
+}
+
+// taskRetryOutcome 是逐版结局：面板行内显示 reason，测试与排查看 from/to。
+type taskRetryOutcome struct {
+	Infohash      string `json:"infohash"`
+	Action        string `json:"action"`
+	FromState     string `json:"from_state"`
+	ToState       string `json:"to_state"`
+	Reason        string `json:"reason"`
+	ForceRescrape bool   `json:"force_rescrape"`
+}
+
+// taskRetry 是「重试 / 强制重刮」的入口（规格 §8.4 / P13）。
+//
+// 永远 200 + 逐版结果：版本的结局（被拒、加种失败）不是 HTTP 错误，而是这个任务
+// 此刻的真实状态；只有任务不存在（404）与库不可用（503）才用错误信封。
+func (s *server) taskRetry(w http.ResponseWriter, r *http.Request) {
+	if s.retrier == nil {
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "人工重试未装配（数据库不可用）")
+		return
+	}
+
+	request := retryRequest{}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRetryBody))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "validation_error", "读请求体失败: "+err.Error())
+		return
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "validation_error", "请求体不是 JSON 对象: "+err.Error())
+			return
+		}
+	}
+
+	result, err := s.retrier.Retry(r.Context(), r.PathValue("movie_id"), request.Force)
+	if err != nil {
+		s.writeTaskError(w, err)
+		return
+	}
+
+	response := taskRetryBody{OK: true, MovieID: result.MovieID, Force: request.Force,
+		Results: make([]taskRetryOutcome, 0, len(result.Versions))}
+	for _, outcome := range result.Versions {
+		response.Results = append(response.Results, taskRetryOutcome{
+			Infohash:      outcome.Infohash,
+			Action:        string(outcome.Action),
+			FromState:     string(outcome.FromState),
+			ToState:       string(outcome.ToState),
+			Reason:        outcome.Reason,
+			ForceRescrape: outcome.ForceRescrape,
+		})
+	}
+	writeJSON(w, http.StatusOK, response)
 }

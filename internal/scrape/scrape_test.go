@@ -487,3 +487,68 @@ func TestProcessPendingSkipsVersionsClaimedElsewhere(t *testing.T) {
 		t.Errorf("抢输的版本仍然上网了: dmm %d / javdb %d", f.dmm.hit(), f.javdb.hit())
 	}
 }
+
+// TestProcessPendingRefetchesWhenForcedRescrapeIsSet 钉住 P13-3 的取数一半：
+// force_rescrape 置起时跳过复用判据（元数据在也再取一次），取数成功后标记清掉。
+func TestProcessPendingRefetchesWhenForcedRescrapeIsSet(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.seedProcessing(t, firstMovie, firstNum, firstHash)
+
+	if _, err := f.runner.ProcessPending(ctx); err != nil {
+		t.Fatalf("第一轮 ProcessPending: %v", err)
+	}
+	f.dmm.calls = nil
+	f.javdb.calls = nil
+
+	// 人工重试点了「强制重刮」：版本回 processing 开头 + 复用判据被强制绕过。
+	if _, err := f.store.Claim(ctx, firstHash, "owner-retry"); err != nil {
+		t.Fatalf("Claim(人工重试): %v", err)
+	}
+	if _, err := f.store.ResetForRetry(ctx, firstHash, "owner-retry", true); err != nil {
+		t.Fatalf("ResetForRetry(force): %v", err)
+	}
+
+	progress, err := f.runner.ProcessPending(ctx)
+	if err != nil {
+		t.Fatalf("第二轮 ProcessPending: %v", err)
+	}
+	if progress.Fetched != 1 || progress.Reused != 0 {
+		t.Fatalf("progress = %+v, want Fetched=1 Reused=0（强制重刮不许复用）", progress)
+	}
+	if f.dmm.hit() != 1 || f.javdb.hit() != 1 {
+		t.Errorf("上游调用 = dmm %d / javdb %d, want 各 1 次（强制重刮要网络重取）", f.dmm.hit(), f.javdb.hit())
+	}
+	if version := f.version(t, firstHash); version.ForceRescrape {
+		t.Error("force_rescrape = true, want false（取数成功后标记就兑现完了）")
+	}
+}
+
+// TestProcessPendingKeepsReuseCriterionForAPlainRetry 是上一条的对照：
+// 普通重试（force=false）不改复用判据，元数据在就还是 0 次网络。
+func TestProcessPendingKeepsReuseCriterionForAPlainRetry(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.seedProcessing(t, firstMovie, firstNum, firstHash)
+
+	if _, err := f.runner.ProcessPending(ctx); err != nil {
+		t.Fatalf("第一轮 ProcessPending: %v", err)
+	}
+	f.dmm.calls = nil
+	f.javdb.calls = nil
+
+	if _, err := f.store.Claim(ctx, firstHash, "owner-retry"); err != nil {
+		t.Fatalf("Claim(人工重试): %v", err)
+	}
+	if _, err := f.store.ResetForRetry(ctx, firstHash, "owner-retry", false); err != nil {
+		t.Fatalf("ResetForRetry: %v", err)
+	}
+
+	progress, err := f.runner.ProcessPending(ctx)
+	if err != nil {
+		t.Fatalf("第二轮 ProcessPending: %v", err)
+	}
+	if progress.Reused != 1 || f.dmm.hit()+f.javdb.hit() != 0 {
+		t.Errorf("progress = %+v 调用 = %d/%d, want 复用且 0 次网络", progress, f.dmm.hit(), f.javdb.hit())
+	}
+}

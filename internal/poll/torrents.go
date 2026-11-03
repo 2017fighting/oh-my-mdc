@@ -86,25 +86,10 @@ func bytesToMiB(size int64) int64 {
 
 // deliveryFor 把一条版本翻成 qBittorrent 要的交付形态（磁力串 / 私有种子字节）。
 //
-// 两种形态共用一条版本行，但材料来源不同：磁力在 payload 里就是串，而私种
-// **只有一份备份路径**（payload 存路径，规格 §4.1）—— 字节要从盘上读回来。
+// 两种形态共用一条版本行，材料来源不同（磁力串 vs `.torrent` 备份路径），
+// 但「怎么把 payload 变成加种请求」只有一份实现：人工重试（#31）读的是同一列，
+// 两条路必须对同一条版本有同一个理解。
 func deliveryFor(version task.Version, cfg qbittorrent.Config) (qbittorrent.Torrent, error) {
-	delivery := qbittorrent.Torrent{
-		Hash:     version.Infohash,
-		Number:   version.Number,
-		SavePath: cfg.DownloadRoot, // 显式 savepath（P7-2）；不设 autoTMM
-	}
-
-	if version.Delivery != task.DeliveryTorrent {
-		delivery.Magnet = version.Payload
-		return delivery, nil
-	}
-
-	data, err := os.ReadFile(version.Payload)
-	if err != nil {
-		return qbittorrent.Torrent{}, fmt.Errorf("读不到私种备份 %s（瞬态目录可能在重启后清空了）: %w", version.Payload, err)
-	}
-	delivery.Body = data
-	delivery.Filename = version.Infohash + ".torrent"
-	return delivery, nil
+	return qbittorrent.FromPayload(cfg, version.Infohash, version.Number,
+		string(version.Delivery), version.Payload)
 }

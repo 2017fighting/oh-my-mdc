@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -260,11 +261,11 @@ func (s *Store) AppendEvent(ctx context.Context, event Event) error {
 	}
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO task_event (movie_id, infohash, kind, from_state, to_state, phase, reason, at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO task_event (movie_id, infohash, kind, from_state, to_state, phase, reason, detail, at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		event.MovieID, nullIfEmpty(event.Infohash), string(event.Kind),
 		nullIfEmpty(event.FromState), nullIfEmpty(event.ToState),
-		nullIfEmpty(event.Phase), event.Reason, at,
+		nullIfEmpty(event.Phase), event.Reason, detailJSON(event.Detail), at,
 	)
 	if err != nil {
 		return fmt.Errorf("task: 记事件: %w", err)
@@ -355,7 +356,7 @@ func (s *Store) Events(ctx context.Context, movieID string, limit int) ([]Event,
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, movie_id, COALESCE(infohash, ''), kind,
-		        COALESCE(from_state, ''), COALESCE(to_state, ''), COALESCE(phase, ''), reason, at
+		        COALESCE(from_state, ''), COALESCE(to_state, ''), COALESCE(phase, ''), reason, detail, at
 		 FROM task_event
 		 WHERE movie_id = $1
 		 ORDER BY id DESC
@@ -369,11 +370,15 @@ func (s *Store) Events(ctx context.Context, movieID string, limit int) ([]Event,
 
 	events := []Event{}
 	for rows.Next() {
-		var event Event
+		var (
+			event  Event
+			detail []byte
+		)
 		if err := rows.Scan(&event.ID, &event.MovieID, &event.Infohash, &event.Kind,
-			&event.FromState, &event.ToState, &event.Phase, &event.Reason, &event.At); err != nil {
+			&event.FromState, &event.ToState, &event.Phase, &event.Reason, &detail, &event.At); err != nil {
 			return nil, fmt.Errorf("task: 扫事件: %w", err)
 		}
+		event.Detail = json.RawMessage(detail)
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -448,7 +453,7 @@ func (s *Store) attachVersions(ctx context.Context, tasks []TaskRow) ([]TaskRow,
 // versionColumns 是 claim/version 读取共用的列序（与 scanVersion 一一对应）。
 const versionColumns = `v.infohash, v.movie_id, t.number, v.source, v.delivery, v.label, v.status,
 	COALESCE(v.error_phase, ''), v.error_reason, v.add_pending, v.list_removal_pending,
-	v.attempts, v.payload, v.created_at, v.updated_at`
+	v.attempts, v.force_rescrape, v.payload, v.created_at, v.updated_at`
 
 // scanner 是 pgx.Row 与 pgx.Rows 共有的那一半。
 type scanner interface {
@@ -462,7 +467,7 @@ func scanVersion(row scanner) (Version, error) {
 		&version.Infohash, &version.MovieID, &version.Number, &version.Source,
 		&version.Delivery, &version.Label, &version.Status, &version.ErrorPhase,
 		&version.ErrorReason, &version.AddPending, &version.ListRemovalPending,
-		&version.Attempts, &version.Payload, &version.CreatedAt, &version.UpdatedAt,
+		&version.Attempts, &version.ForceRescrape, &version.Payload, &version.CreatedAt, &version.UpdatedAt,
 	)
 	if err != nil {
 		return Version{}, err
@@ -511,4 +516,12 @@ func nullIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+// detailJSON 把事件附注落成 jsonb：空值写成 {}，读回来永远是一份合法 JSON。
+func detailJSON(detail json.RawMessage) json.RawMessage {
+	if len(detail) == 0 || !json.Valid(detail) {
+		return json.RawMessage(`{}`)
+	}
+	return detail
 }

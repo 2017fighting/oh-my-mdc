@@ -126,6 +126,8 @@ export type TaskVersion = {
   add_pending: boolean;
   /** 加种成功后置起，等旁路循环删清单项。 */
   list_removal_pending: boolean;
+  /** 下一次取数不许复用元数据（人工「强制重刮」置起，取数成功后清掉）。 */
+  force_rescrape: boolean;
   attempts: number;
   created_at: string;
   updated_at: string;
@@ -152,6 +154,8 @@ export type TaskEvent = {
   to_state?: string;
   phase?: string;
   reason: string;
+  /** 结构化附注：人工重试把旧 raw_snapshot 的对比基准留在这里（规格 P13-3）。 */
+  detail?: Record<string, unknown>;
   at: string;
 };
 
@@ -166,6 +170,28 @@ export type TaskDetail = {
   ok: boolean;
   task: TaskRow;
   events: TaskEvent[];
+};
+
+/** 一次重试对一条版本的结局（规格 §6.1 人工重试行）。 */
+export type TaskRetryAction = "reset_processing" | "readded" | "skipped" | "failed";
+
+export type TaskRetryOutcome = {
+  infohash: string;
+  action: TaskRetryAction;
+  from_state: TaskState;
+  to_state: TaskState;
+  /** 给人看的一句话：被拒、加种失败、重新加种成功都在这里说清。 */
+  reason: string;
+  /** 下一次取数不复用元数据（强制重刮）。 */
+  force_rescrape: boolean;
+};
+
+/** 逐版结果：一条任务可以有多条版本，各走各的分支。 */
+export type TaskRetryResult = {
+  ok: boolean;
+  movie_id: string;
+  force: boolean;
+  results: TaskRetryOutcome[];
 };
 
 /** 副作用的三种 kind（规格 §4.2）。 */
@@ -288,6 +314,16 @@ export const api = {
 
   /** 抽屉数据：任务 + 版本列表 + 最近事件。 */
   task: (movieID: string) => request<TaskDetail>(`/api/tasks/${encodeURIComponent(movieID)}`),
+
+  /**
+   * 人工重试（规格 §6.1 人工重试行）：force=false 是「重试」，force=true 是「强制重刮」。
+   * 版本侧的结局（被拒、加种失败）是 200 里的逐版结果，不是 HTTP 错误。
+   */
+  retryTask: (movieID: string, force = false) =>
+    request<TaskRetryResult>(`/api/tasks/${encodeURIComponent(movieID)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
 
   /** 「需要人工」区的任务侧两半：失败版本与停滞下载（规格 §8.2）。 */
   attention: () => request<Attention>("/api/attention"),

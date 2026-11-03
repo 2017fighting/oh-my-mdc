@@ -93,22 +93,32 @@ func (s *Store) failedItems(ctx context.Context, limit int) ([]AttentionItem, er
 	return items, nil
 }
 
+// stalledItems 列「已告过警、仍在下载」的版本。
+//
+// 人工重试的重新加种是这条告警的终点：种子被重新加进 qBittorrent、进度从头来，
+// 之前那次停滞就不再说当前事实。判据是事件序（不是时间戳）：最近一条揭示
+// 「重新加种过」的 manual_retry 事件之后还没再告过警。
 func (s *Store) stalledItems(ctx context.Context, limit int) ([]AttentionItem, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT v.movie_id, t.number, v.infohash, e.reason, e.at
 		 FROM task_version v
 		 JOIN task t ON t.movie_id = v.movie_id
 		 JOIN LATERAL (
-		     SELECT reason, at
+		     SELECT id, reason, at
 		     FROM task_event
 		     WHERE infohash = v.infohash AND kind = 'alert' AND reason LIKE $2 ESCAPE '\'
 		     ORDER BY id DESC
 		     LIMIT 1
 		 ) e ON true
 		 WHERE v.status = 'downloading'
+		   AND e.id > COALESCE((
+		       SELECT max(id) FROM task_event
+		       WHERE infohash = v.infohash AND kind = 'manual_retry'
+		         AND detail->>'action' = $3
+		   ), 0)
 		 ORDER BY e.at DESC, v.infohash
 		 LIMIT $1`,
-		limit, escapeLike(StallReasonPrefix)+"%",
+		limit, escapeLike(StallReasonPrefix)+"%", RetryActionReadded,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("task: 列停滞下载: %w", err)

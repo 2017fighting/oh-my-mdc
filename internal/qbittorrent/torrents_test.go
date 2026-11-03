@@ -28,7 +28,7 @@ func formatFloat(value float64) string {
 func TestLookupMergesPropertiesAndInfo(t *testing.T) {
 	fake := newFakeQbt(t, map[string]http.HandlerFunc{
 		"GET /api/v2/torrents/properties": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"hash":"` + testHash + `","name":"ABP-123","save_path":"/media/downloads/completed/av","content_path":"/media/downloads/completed/av/ABP-123","category":"mdc","tags":"mdc:in-progress,ABP-123"}`))
+			_, _ = w.Write([]byte(`{"hash":"` + testHash + `","name":"ABP-123","save_path":"/media/downloads/completed/av","content_path":"/media/downloads/completed/av/ABP-123","total_size":1234567890,"category":"mdc","tags":"mdc:in-progress,ABP-123"}`))
 		},
 		"GET /api/v2/torrents/info": func(w http.ResponseWriter, r *http.Request) {
 			if got := r.URL.Query().Get("hashes"); got != testHash {
@@ -55,6 +55,9 @@ func TestLookupMergesPropertiesAndInfo(t *testing.T) {
 	wantPath := "/media/downloads/completed/av/ABP-123"
 	if status.ContentPath != wantPath {
 		t.Errorf("content_path = %q, want %q", status.ContentPath, wantPath)
+	}
+	if status.SizeBytes != 1234567890 {
+		t.Errorf("size_bytes = %d, want properties 的 total_size（通知的「大小」槽位）", status.SizeBytes)
 	}
 }
 
