@@ -13,6 +13,8 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
+	"github.com/2017fighting/oh-my-mdc/internal/material"
+	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/retry"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -28,8 +30,15 @@ import (
 // ------------------------------------------------------------------ fakes
 
 type fakeSettings struct {
-	inputs map[string]settings.TestInput
+	inputs   map[string]settings.TestInput
+	snapshot settings.Snapshot
 }
+
+func (f *fakeSettings) Load(context.Context) (settings.Snapshot, error) {
+	return f.snapshot, nil
+}
+
+func boolPtr(value bool) *bool { return &value }
 
 func (f *fakeSettings) Input(_ context.Context, section string) (settings.TestInput, error) {
 	input, ok := f.inputs[section]
@@ -72,6 +81,21 @@ func (f *fakeQbt) Ensure(_ context.Context, _ qbittorrent.Config, torrent qbitto
 
 // ------------------------------------------------------------------ fixture
 
+// fakeTorrents 是 M-Team 取种接缝：重取私种备份时才被问到（#36）。
+type fakeTorrents struct {
+	torrent mteam.Torrent
+	err     error
+	calls   []string
+}
+
+func (f *fakeTorrents) Resolve(_ context.Context, _ string, number string) (mteam.Torrent, error) {
+	f.calls = append(f.calls, number)
+	if f.err != nil {
+		return mteam.Torrent{}, f.err
+	}
+	return f.torrent, nil
+}
+
 const (
 	movieID   = "YwrO3B"
 	number    = "ABP-123"
@@ -80,12 +104,14 @@ const (
 )
 
 type fixture struct {
-	database *db.DB
-	store    *task.Store
-	outbox   *sidefx.Outbox
-	settings *fakeSettings
-	qbt      *fakeQbt
-	runner   *retry.Runner
+	database     *db.DB
+	store        *task.Store
+	outbox       *sidefx.Outbox
+	settings     *fakeSettings
+	qbt          *fakeQbt
+	torrents     *fakeTorrents
+	materialsDir string
+	runner       *retry.Runner
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -108,14 +134,27 @@ func newFixture(t *testing.T) *fixture {
 				"qbittorrent": {Values: map[string]any{
 					"url": "http://qbt:8080", "download_root": "/media/downloads", "category": "mdc",
 				}},
+				"mteam": {Values: map[string]any{"api_key": "mteam-key"}, Enabled: true},
 			},
+			snapshot: settings.Snapshot{Sections: map[string]settings.SectionState{
+				"mteam": {Configured: true, Enabled: boolPtr(true)},
+			}},
 		},
+		torrents: &fakeTorrents{},
 	}
+	f.materialsDir = t.TempDir()
+	materials := material.New(material.Options{
+		Dir:      f.materialsDir,
+		Torrents: f.torrents,
+		Settings: f.settings,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	f.runner = retry.New(retry.Options{
 		Store:    f.store,
 		Outbox:   f.outbox,
 		Settings: f.settings,
 		Qbt:      f.qbt,
+		Material: materials,
 		Owner:    "test-retry",
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -454,6 +493,129 @@ func TestRetryReaddsTorrentDeliveryFromItsBackup(t *testing.T) {
 	if len(f.qbt.ensured) != 1 || string(f.qbt.ensured[0].Body) != string(body) {
 		t.Errorf("Ensure 收到 = %+v, want 备份文件原文", f.qbt.ensured)
 	}
+}
+
+// TestRetryRefetchesAMissingTorrentBackup 钉住 #36 在人工重试那条路上的形态：
+// 备份没了就回 M-Team 重取（只认 infohash 相符的那条），重取成功才重新加种，
+// 并把新的备份路径写回 payload（下一轮 poll 与下一次重试读的就是它）。
+func TestRetryRefetchesAMissingTorrentBackup(t *testing.T) {
+	f := newFixture(t)
+	body := []byte("d4:infod4:name4:testee")
+	f.torrents.torrent = mteam.Torrent{Infohash: otherHash, Bytes: body}
+
+	missing := filepath.Join(t.TempDir(), "gone.torrent")
+	f.seedVersion(t, otherHash, func(id string) {
+		f.exec(t, `UPDATE task_version
+		 SET source = 'mteam_torrent', delivery = 'torrent', payload = $2,
+		     status = 'failed', error_phase = 'downloading', error_reason = '种子已从 qBittorrent 移除'
+		 WHERE infohash = $1`, id, missing)
+	})
+
+	result, err := f.runner.Retry(context.Background(), movieID, false)
+	if err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	if outcome := retried(t, result, otherHash); outcome.Action != retry.ActionReadded {
+		t.Fatalf("action = %q, want readded（%s）", outcome.Action, outcome.Reason)
+	}
+	if len(f.torrents.calls) != 1 {
+		t.Errorf("重取调用 = %v, want 按番号重取一次", f.torrents.calls)
+	}
+	if len(f.qbt.ensured) != 1 || string(f.qbt.ensured[0].Body) != string(body) {
+		t.Errorf("Ensure 收到 = %+v, want 重取回来的种子字节", f.qbt.ensured)
+	}
+
+	version := f.version(t, otherHash)
+	wantPath := filepath.Join(f.materialsDir, otherHash+".torrent")
+	if version.Payload != wantPath {
+		t.Errorf("payload = %q, want %q（重取落盘的新路径要写回库）", version.Payload, wantPath)
+	}
+	if version.Status != task.StatusDownloading {
+		t.Errorf("status = %q, want downloading", version.Status)
+	}
+}
+
+// TestRetryReportsAFailedReaddWhenTheTorrentIsGone 钉住重取不到时的口径：
+// 站点上已没有这条种子 → 这次重试是 failed（带一句人看得懂的因），
+// 还在下载中的版本**当场**进需人工区（而不是等下轮 poll 再花一次 M-Team 配额）。
+func TestRetryReportsAFailedReaddWhenTheTorrentIsGone(t *testing.T) {
+	t.Run("仍卡在下载中", func(t *testing.T) {
+		f := newFixture(t)
+		f.torrents.err = mteam.NotFoundError{Number: number}
+		missing := filepath.Join(t.TempDir(), "gone.torrent")
+		// #36 的现场：版本从未加种成功（add_pending 还在），而备份已经没了。
+		f.seedVersion(t, otherHash, func(id string) {
+			f.exec(t, `UPDATE task_version
+			 SET source = 'mteam_torrent', delivery = 'torrent', payload = $2,
+			     status = 'downloading', add_pending = true
+			 WHERE infohash = $1`, id, missing)
+		})
+
+		result, err := f.runner.Retry(context.Background(), movieID, false)
+		if err != nil {
+			t.Fatalf("Retry: %v", err)
+		}
+		outcome := retried(t, result, otherHash)
+		if outcome.Action != retry.ActionFailed || outcome.ToState != task.StatusFailed {
+			t.Fatalf("action/from→to = %q/%q→%q, want failed/downloading→failed", outcome.Action, outcome.FromState, outcome.ToState)
+		}
+		if !strings.Contains(outcome.Reason, "重取") {
+			t.Errorf("reason = %q, want 说清重取也失败", outcome.Reason)
+		}
+
+		version := f.version(t, otherHash)
+		if version.Status != task.StatusFailed || version.ErrorPhase != task.PhaseDownloading {
+			t.Errorf("status/phase = %q/%q, want failed/downloading", version.Status, version.ErrorPhase)
+		}
+		if version.AddPending {
+			t.Error("add_pending = true, want false（不再每轮静默重试）")
+		}
+		if !strings.Contains(version.ErrorReason, "重取") {
+			t.Errorf("error_reason = %q, want 说清重取也失败", version.ErrorReason)
+		}
+		attention, err := f.store.Attention(context.Background(), 50)
+		if err != nil {
+			t.Fatalf("Attention: %v", err)
+		}
+		if len(attention.Failed) != 1 || attention.Failed[0].Infohash != otherHash {
+			t.Errorf("attention.failed = %+v, want 这条版本", attention.Failed)
+		}
+	})
+
+	t.Run("已经失败", func(t *testing.T) {
+		f := newFixture(t)
+		f.torrents.err = mteam.NotFoundError{Number: number}
+		missing := filepath.Join(t.TempDir(), "gone.torrent")
+		f.seedVersion(t, otherHash, func(id string) {
+			f.exec(t, `UPDATE task_version
+			 SET source = 'mteam_torrent', delivery = 'torrent', payload = $2,
+			     status = 'failed', error_phase = 'downloading', error_reason = '种子已从 qBittorrent 移除'
+			 WHERE infohash = $1`, id, missing)
+		})
+
+		result, err := f.runner.Retry(context.Background(), movieID, false)
+		if err != nil {
+			t.Fatalf("Retry: %v", err)
+		}
+		outcome := retried(t, result, otherHash)
+		if outcome.Action != retry.ActionFailed || outcome.ToState != task.StatusFailed {
+			t.Fatalf("action/from→to = %q/%q→%q, want failed/failed→failed", outcome.Action, outcome.FromState, outcome.ToState)
+		}
+		if len(f.qbt.ensured) != 0 {
+			t.Errorf("加种调用 = %d, want 0", len(f.qbt.ensured))
+		}
+
+		version := f.version(t, otherHash)
+		if version.Status != task.StatusFailed || version.ErrorReason != "种子已从 qBittorrent 移除" {
+			t.Errorf("version = %q/%q, want 状态与原因都保持原样", version.Status, version.ErrorReason)
+		}
+		if version.Payload != missing {
+			t.Errorf("payload = %q, want 原样 %q", version.Payload, missing)
+		}
+		if retries := f.manualRetries(t); len(retries) != 1 || !strings.Contains(retries[0].Reason, "重取") {
+			t.Errorf("manual_retry 事件 = %+v, want 一条说清重取也失败", retries)
+		}
+	})
 }
 
 // TestRetryRefusesToRedownloadWhatQbtIsStillDownloading 钉住那条硬边界：

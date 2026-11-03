@@ -9,8 +9,11 @@ import (
 	"testing"
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
@@ -290,29 +293,201 @@ func TestPollRetriesPendingTorrentVersionFromBackup(t *testing.T) {
 	}
 }
 
-// TestPollKeepsPendingWhenTorrentBackupIsGone 钉住「瞬态目录被清空」的处置：
-// 保留 pending、记一条告警，下轮再试（人工重试票 #31 收口），不静默丢版本。
-func TestPollKeepsPendingWhenTorrentBackupIsGone(t *testing.T) {
+// TestPollFailsAVersionWhoseTorrentBackupIsGoneForGood 钉住 #36 的兜底：
+// 备份没了、回 M-Team 也重取不回来（站点上已没有这一条种子）→ 落 failed(下载阶段, 原因)
+// 进需人工区，而不是每轮把 poll 拖成 error（那会让 §9 的 LoopStalled 一直红着，
+// 而那条路永远走不通：文件不会再出现）。
+func TestPollFailsAVersionWhoseTorrentBackupIsGoneForGood(t *testing.T) {
 	f := newFixture(t)
+	f.enableMTeam(t)
+	f.torrents.err = mteam.NotFoundError{Number: number}
 	missing := filepath.Join(t.TempDir(), "gone.torrent")
 	inserted, err := f.store.SaveCandidate(context.Background(), torrentCandidate(missing))
 	if err != nil || !inserted {
 		t.Fatalf("预置种子版本: inserted=%v err=%v", inserted, err)
 	}
 
-	if _, err := f.runner.RunOnce(context.Background()); err == nil {
-		t.Fatal("种子备份读不到时 RunOnce 应当回错误（循环健康位要红）")
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v, want nil（一条版本的材料拿不回来不该让整轮 poll 变红）", err)
+	}
+	if result.Added != 0 || len(f.adder.calls) != 0 {
+		t.Errorf("added = %d, 加种调用 = %d, want 0", result.Added, len(f.adder.calls))
+	}
+	if len(f.torrents.calls) != 1 {
+		t.Errorf("重取调用 = %v, want 恰好一次（不是每轮一次）", f.torrents.calls)
+	}
+
+	version := f.detail(t).Versions[0]
+	if version.Status != task.StatusFailed || version.ErrorPhase != task.PhaseDownloading {
+		t.Errorf("status/phase = %q/%q, want failed/downloading", version.Status, version.ErrorPhase)
+	}
+	if version.AddPending {
+		t.Error("add_pending = true, want false（不再每轮静默重试）")
+	}
+	if !strings.Contains(version.ErrorReason, "重取") {
+		t.Errorf("error_reason = %q, want 说清「重取也失败」", version.ErrorReason)
+	}
+
+	// 需人工区看得见它（§8.2）；下一轮不再碰它，poll 自己的健康位仍是绿的。
+	attention, err := f.store.Attention(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("Attention: %v", err)
+	}
+	if len(attention.Failed) != 1 || attention.Failed[0].Infohash != torrentHash {
+		t.Errorf("attention.failed = %+v, want 这条版本", attention.Failed)
+	}
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第二轮 RunOnce: %v, want nil", err)
+	}
+	if len(f.torrents.calls) != 1 {
+		t.Errorf("重取调用 = %v, want 仍是一次（failed 的版本不再重试）", f.torrents.calls)
+	}
+	if health := f.loops.Health(loops.Poll); health.LastOK == nil || !*health.LastOK {
+		t.Errorf("poll 健康位 = %+v, want 绿（材料永久缺失不是循环故障）", health)
+	}
+}
+
+// TestPollRefetchesAMissingTorrentBackup 钉住 #36 的首选修复：
+// 备份没了就回 M-Team 重取这一条 infohash 的种子，落盘后走正常加种；payload 跟着换成
+// 新路径（人工重试与下一轮 poll 读的正是它）。
+func TestPollRefetchesAMissingTorrentBackup(t *testing.T) {
+	f := newFixture(t)
+	f.enableMTeam(t)
+	f.withTorrent()
+	missing := filepath.Join(t.TempDir(), "gone.torrent")
+	inserted, err := f.store.SaveCandidate(context.Background(), torrentCandidate(missing))
+	if err != nil || !inserted {
+		t.Fatalf("预置种子版本: inserted=%v err=%v", inserted, err)
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Added != 1 {
+		t.Errorf("added = %d, want 1（重取回来的材料照常加种）", result.Added)
+	}
+	if len(f.torrents.calls) != 1 {
+		t.Errorf("重取调用 = %v, want 按番号重取一次", f.torrents.calls)
+	}
+	if len(f.adder.calls) != 1 || string(f.adder.calls[0].Body) != torrentBencode {
+		t.Errorf("加种 = %+v, want 重取回来的种子字节", f.adder.calls)
+	}
+
+	version := f.detail(t).Versions[0]
+	wantPath := filepath.Join(f.torrentsDir, torrentHash+".torrent")
+	if version.Payload != wantPath {
+		t.Errorf("payload = %q, want %q（重取落盘的新路径要写回库）", version.Payload, wantPath)
+	}
+	if body, err := os.ReadFile(wantPath); err != nil || string(body) != torrentBencode {
+		t.Errorf("备份 %s = %q/%v, want 重取回来的字节", wantPath, body, err)
+	}
+	if version.Status != task.StatusDownloading || version.AddPending {
+		t.Errorf("status/add_pending = %q/%v, want downloading/false", version.Status, version.AddPending)
+	}
+	if keys := f.sideEffectKeys(t, sidefx.KindNotify); len(keys) != 1 || keys[0] != sidefx.EventDownloadStarted+":"+torrentHash {
+		t.Errorf("通知待办 = %v, want 一条下载开始", keys)
+	}
+}
+
+// TestPollTreatsADifferentInfohashAsGone 钉住「只认 infohash 相符的那一条」：
+// 重取到的是另一个种子（站点换了种），拿它加种会把两条版本混成一条——
+// 按「站点上已没有这条种子」处置，而不是凑合着用。
+func TestPollTreatsADifferentInfohashAsGone(t *testing.T) {
+	f := newFixture(t)
+	f.enableMTeam(t)
+	f.torrents.torrent = mteam.Torrent{
+		Infohash:  plainHash,
+		SizeBytes: 8 << 30,
+		Bytes:     []byte(torrentBencode),
+	}
+	missing := filepath.Join(t.TempDir(), "gone.torrent")
+	if inserted, err := f.store.SaveCandidate(context.Background(), torrentCandidate(missing)); err != nil || !inserted {
+		t.Fatalf("预置种子版本: inserted=%v err=%v", inserted, err)
+	}
+
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v, want nil", err)
+	}
+	if len(f.adder.calls) != 0 {
+		t.Errorf("加种调用 = %d, want 0（不能用别的种的字节）", len(f.adder.calls))
+	}
+	version := f.detail(t).Versions[0]
+	if version.Status != task.StatusFailed || !strings.Contains(version.ErrorReason, "已没有这条种子") {
+		t.Errorf("status/reason = %q/%q, want failed + 说清站点上已没有这条种子", version.Status, version.ErrorReason)
+	}
+	if version.Payload != missing {
+		t.Errorf("payload = %q, want 原样 %q（没重取成功不该改写）", version.Payload, missing)
+	}
+}
+
+// TestPollKeepsPendingWhenTheRefetchIsTransient 钉住另一半个裁决：
+// M-Team 连不上是**瞬时**失败——保留 pending 下轮再试，且不把这一轮 poll 判成失败；
+// 上游回来之后下一轮自己就补上了。
+func TestPollKeepsPendingWhenTheRefetchIsTransient(t *testing.T) {
+	f := newFixture(t)
+	f.enableMTeam(t)
+	f.torrents.err = &mteam.Error{Code: settings.CodeNetwork, Op: "search", Detail: "连不上 M-Team（search）"}
+	missing := filepath.Join(t.TempDir(), "gone.torrent")
+	if inserted, err := f.store.SaveCandidate(context.Background(), torrentCandidate(missing)); err != nil || !inserted {
+		t.Fatalf("预置种子版本: inserted=%v err=%v", inserted, err)
+	}
+
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v, want nil（M-Team 挂了不该让 poll 的健康位变红）", err)
 	}
 	if len(f.adder.calls) != 0 {
 		t.Errorf("加种调用 = %d, want 0", len(f.adder.calls))
 	}
-
-	row := f.detail(t)
-	if !row.Versions[0].AddPending {
-		t.Error("add_pending = false, want true（保留 pending 下轮再试）")
+	version := f.detail(t).Versions[0]
+	if !version.AddPending || version.Status != task.StatusDownloading {
+		t.Errorf("status/add_pending = %q/%v, want downloading/true（保留 pending 下轮再试）",
+			version.Status, version.AddPending)
 	}
-	if !hasEventWithReason(row, "私种备份") {
-		t.Errorf("events = %+v, want 一条说明种子备份读不到的告警", row.Events)
+
+	// 上游仍然挂着时再跑一轮：告警只记一次（时间线不是重试日志）。
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第二轮 RunOnce: %v, want nil", err)
+	}
+	if alerts := countAlerts(f.detail(t)); alerts != 1 {
+		t.Errorf("材料缺失告警 = %d, want 1（同一版本只记一次）", alerts)
+	}
+
+	// 上游回来之后，同一轮 poll 自己就把它补上了。
+	f.torrents.err = nil
+	f.withTorrent()
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if result.Added != 1 {
+		t.Errorf("added = %d, want 1（上游回来后自动恢复）", result.Added)
+	}
+}
+
+// TestPollDoesNotRefetchWhenMTeamIsDisabled 钉住重取也要守 M-Team 的启停开关：
+// 搜索与下载是它唯一有配额的调用（§5.2），禁用时不该每轮去撞一次——
+// 直接进需人工区，并说清「启用后再重试」。
+func TestPollDoesNotRefetchWhenMTeamIsDisabled(t *testing.T) {
+	f := newFixture(t)
+	f.enableMTeam(t)
+	disabled := false
+	f.settings.snapshot.Sections[material.SectionMTeam] = settings.SectionState{Configured: true, Enabled: &disabled}
+	missing := filepath.Join(t.TempDir(), "gone.torrent")
+	if inserted, err := f.store.SaveCandidate(context.Background(), torrentCandidate(missing)); err != nil || !inserted {
+		t.Fatalf("预置种子版本: inserted=%v err=%v", inserted, err)
+	}
+
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v, want nil", err)
+	}
+	if len(f.torrents.calls) != 0 {
+		t.Errorf("M-Team 调用 = %v, want 0（禁用时不搜种）", f.torrents.calls)
+	}
+	version := f.detail(t).Versions[0]
+	if version.Status != task.StatusFailed || !strings.Contains(version.ErrorReason, "禁用") {
+		t.Errorf("status/reason = %q/%q, want failed + 说清 M-Team 被禁用", version.Status, version.ErrorReason)
 	}
 }
 
@@ -343,6 +518,17 @@ func writeTorrentBackup(t *testing.T, dir, data string) string {
 		t.Fatalf("写种子备份: %v", err)
 	}
 	return path
+}
+
+// countAlerts 数时间线里的告警事件条数。
+func countAlerts(row task.TaskRow) int {
+	count := 0
+	for _, event := range row.Events {
+		if event.Kind == task.EventAlert {
+			count++
+		}
+	}
+	return count
 }
 
 // hasEventWithReason 报告事件时间线里有没有一条提到 needle 的事件。

@@ -8,7 +8,8 @@
 //   - 去重：任务已有版本就不再查源；同 infohash 已有版本行就零写入；
 //   - 定源：JavDB 有磁力才查 M-Team（限速意识）；M-Team 命中就取私有种子，
 //     取不到（未配置/禁用/搜索无果/取种失败）就**同轮降级** JavDB 磁力；
-//   - 顺序：版本行先以 add_pending=true 落库，qBittorrent 成功才清（ADR-0004）。
+//   - 顺序：版本行先以 add_pending=true 落库，qBittorrent 成功才清（ADR-0004）；
+//   - 材料：私种备份读不到时回 M-Team 重取一次，重取不回来才进需人工（ADR-0011）。
 //
 // 真正删清单项、刷 Jellyfin、发 Telegram 由旁路引擎执行（#26）：本包只入箱。
 package poll
@@ -25,6 +26,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/pin"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
@@ -78,8 +80,9 @@ type Options struct {
 	Adder    Adder
 	// Torrents 是可选来源（M-Team）；nil 时定源只走 JavDB 磁力。
 	Torrents Torrents
-	// TorrentsDir 是 .torrent 备份目录；空则用 os.TempDir()/oh-my-mdc/torrents。
-	TorrentsDir string
+	// Material 是交付材料仓库（私种备份的落盘与重取）。必填：poll 的每一轮都要
+	// 落盘与读回私种备份，装配漏了它就不该跑起来。
+	Material *material.Store
 	// Pool 只用于 advisory lock 的专用连接；nil 时不做单飞（测试或单进程场景）。
 	Pool *pgxpool.Pool
 	// Loops 记循环健康位；nil 时只跑不记。
@@ -94,18 +97,18 @@ type Options struct {
 
 // Runner 是 poll 循环。
 type Runner struct {
-	store       *task.Store
-	outbox      *sidefx.Outbox
-	settings    Settings
-	source      Source
-	adder       Adder
-	torrents    Torrents
-	torrentsDir string
-	pool        *pgxpool.Pool
-	loops       *loops.Registry
-	logger      *slog.Logger
-	owner       string
-	now         func() time.Time
+	store    *task.Store
+	outbox   *sidefx.Outbox
+	settings Settings
+	source   Source
+	adder    Adder
+	torrents Torrents
+	material *material.Store
+	pool     *pgxpool.Pool
+	loops    *loops.Registry
+	logger   *slog.Logger
+	owner    string
+	now      func() time.Time
 }
 
 // New 构造循环。
@@ -123,24 +126,19 @@ func New(opts Options) *Runner {
 		now = time.Now
 	}
 
-	torrentsDir := strings.TrimSpace(opts.TorrentsDir)
-	if torrentsDir == "" {
-		torrentsDir = defaultTorrentsDir()
-	}
-
 	return &Runner{
-		store:       opts.Store,
-		outbox:      opts.Outbox,
-		settings:    opts.Settings,
-		source:      opts.Source,
-		adder:       opts.Adder,
-		torrents:    opts.Torrents,
-		torrentsDir: torrentsDir,
-		pool:        opts.Pool,
-		loops:       opts.Loops,
-		logger:      logger,
-		owner:       owner,
-		now:         now,
+		store:    opts.Store,
+		outbox:   opts.Outbox,
+		settings: opts.Settings,
+		source:   opts.Source,
+		adder:    opts.Adder,
+		torrents: opts.Torrents,
+		material: opts.Material,
+		pool:     opts.Pool,
+		loops:    opts.Loops,
+		logger:   logger,
+		owner:    owner,
+		now:      now,
 	}
 }
 
@@ -381,20 +379,29 @@ func (r *Runner) addPending(ctx context.Context, cfg qbittorrent.Config, sizes m
 // maxAddsPerRound 是一轮最多加多少条：挡住异常积压把一轮 poll 拖成无尽循环。
 const maxAddsPerRound = 500
 
-// addOne 加一条版本：进程内锁 → Ensure → 成功清 pending/置待删/入箱通知。
+// addOne 加一条版本：进程内锁 → 备好交付材料 → Ensure → 成功清 pending/置待删/入箱通知。
 func (r *Runner) addOne(ctx context.Context, version task.Version, cfg qbittorrent.Config, sizes map[string]int64) (bool, error) {
 	unlock := r.store.Lock(version.Infohash)
 	defer unlock()
 
-	delivery, err := deliveryFor(version, cfg)
+	delivery, err := r.material.Deliver(ctx, version, cfg)
 	if err != nil {
-		// 交付形态的材料没了（私种的备份路径读不到）：保留 pending、下轮再试，
-		// 并把原因写进时间线——静默重试会让面板上只剩一个永远不动的「下载中」。
-		r.abandonAdd(ctx, version, err.Error())
-		return false, fmt.Errorf("poll: 准备加种材料 %s: %w", version.Infohash, err)
+		// 材料拿不到：永久缺失进需人工，瞬时失败保 pending 下轮再试（两条路都不让
+		// 这一轮 poll 变红——那正是 #36 里「版本永久卡住 + LoopStalled 常红」的现场）。
+		r.handleMaterialError(ctx, version, err)
+		return false, nil
+	}
+	if delivery.Material != version.Payload {
+		// 重取落到了新路径：payload 是下次读材料的唯一线索，必须写回库。
+		if err := r.store.SetPayload(ctx, version.Infohash, r.owner, delivery.Material); err != nil {
+			if errors.Is(err, task.ErrClaimLost) {
+				return false, nil
+			}
+			return false, err
+		}
 	}
 
-	outcome, err := r.adder.Ensure(ctx, cfg, delivery)
+	outcome, err := r.adder.Ensure(ctx, cfg, delivery.Torrent)
 	if err != nil {
 		// 加种失败：保留 add_pending，放掉租约，记一条告警，下轮重试。
 		r.abandonAdd(ctx, version, fmt.Sprintf("加种失败：%v", err))
@@ -451,6 +458,75 @@ func (r *Runner) abandonAdd(ctx context.Context, version task.Version, reason st
 	r.recordAlert(ctx, version, reason)
 }
 
+// abandonAddOnce 与 abandonAdd 同一处置，但告警**只记一次**（HasAlert 判据，重启后也认）。
+//
+// 用在「材料缺失、上游连不上」这条会自动重来的路上：第一次就够说明问题了，
+// 之后同一句话每轮再写一遍只是把时间线填满。
+func (r *Runner) abandonAddOnce(ctx context.Context, version task.Version, reason string) {
+	if err := r.store.Release(ctx, version.Infohash, r.owner); err != nil {
+		r.logger.Error("poll: 释放失败版本的租约失败", "infohash", version.Infohash, "err", err)
+	}
+	alerted, err := r.store.HasAlert(ctx, version.Infohash, materialAlertPrefix)
+	if err != nil {
+		r.logger.Error("poll: 查材料缺失告警失败", "infohash", version.Infohash, "err", err)
+		return
+	}
+	if alerted {
+		r.logger.Warn("poll: 加种材料仍然缺失", "movie_id", version.MovieID,
+			"infohash", version.Infohash, "reason", reason)
+		return
+	}
+	r.recordAlert(ctx, version, reason)
+}
+
+// handleMaterialError 处置「这一条版本的交付材料拿不到」。
+//
+//   - 永久（站点上已没有这条种子、凭据不对）→ 落 failed(下载阶段) 进需人工区：
+//     这条路重试变不出来，留在 pending 里只会让每一轮 poll 都以 error 收尾；
+//   - 瞬时（连不上 M-Team、设置域读不出来）→ 保留 pending 下轮再试，且**不**把这
+//     一轮判成失败：M-Team 挂了不该让循环健康位变红（与降级磁力同一口径）。
+func (r *Runner) handleMaterialError(ctx context.Context, version task.Version, err error) {
+	if material.Permanent(err) {
+		r.failAdd(ctx, version, err.Error())
+		return
+	}
+	r.abandonAddOnce(ctx, version, materialAlertPrefix+"，下轮再试："+err.Error())
+}
+
+// materialAlertPrefix 是「加种材料缺失」告警的固定开头。
+//
+// 它有两个读者：这里写（kind=alert），以及 HasAlert 判据（同一版本只写一次）。
+// 瞬时失败会每轮重来（上游迟早回来），但时间线不该每 15 分钟多一条同样的红字。
+const materialAlertPrefix = "加种材料缺失"
+
+// failAdd 把一条加不了种的版本落进「需要人工」（规格 §8.2 的 failed(phase, reason)）。
+//
+// 清 pending 是这件事的重点：不清就每轮都把同一条材料缺失重跑一遍，而它不会自己好。
+func (r *Runner) failAdd(ctx context.Context, version task.Version, reason string) {
+	if err := r.store.MarkAddFailed(ctx, version.Infohash, r.owner, reason); err != nil {
+		if errors.Is(err, task.ErrClaimLost) {
+			return
+		}
+		r.logger.Error("poll: 落加种失败状态失败", "infohash", version.Infohash, "err", err)
+		return
+	}
+
+	// 事件只是时间线：写不进去不该让一次已经落到库里的失败变成两次。
+	if err := r.store.AppendEvent(ctx, task.Event{
+		MovieID:   version.MovieID,
+		Infohash:  version.Infohash,
+		Kind:      task.EventStateChange,
+		FromState: string(task.StatusDownloading),
+		ToState:   string(task.StatusFailed),
+		Phase:     string(task.PhaseDownloading),
+		Reason:    reason,
+	}); err != nil {
+		r.logger.Error("poll: 记加种失败事件失败", "infohash", version.Infohash, "err", err)
+	}
+	r.logger.Warn("poll: 交付材料拿不回来，版本已进需人工",
+		"movie_id", version.MovieID, "infohash", version.Infohash, "reason", reason)
+}
+
 // recordAlert 记一条失败事件（时间线 + 后续告警判据都靠它）。
 func (r *Runner) recordAlert(ctx context.Context, version task.Version, reason string) {
 	if err := r.store.AppendEvent(ctx, task.Event{
@@ -486,7 +562,7 @@ type mteamAccess struct {
 
 // newMTeamAccess 按设置快照构造这一轮的 M-Team 判据。
 func (r *Runner) newMTeamAccess(ctx context.Context, snapshot settings.Snapshot) *mteamAccess {
-	section, ok := snapshot.Sections["mteam"]
+	section, ok := snapshot.Sections[material.SectionMTeam]
 	enabled := r.torrents != nil && ok && section.Configured && section.Enabled != nil && *section.Enabled
 	return &mteamAccess{runner: r, ctx: ctx, enabled: enabled}
 }
@@ -504,7 +580,7 @@ func (a *mteamAccess) prepare(ctx context.Context, number string) (stashedTorren
 	if err != nil {
 		return stashedTorrent{}, err
 	}
-	path, err := stashTorrent(a.runner.torrentsDir, torrent.Infohash, torrent.Bytes)
+	path, err := a.runner.material.Stash(torrent.Infohash, torrent.Bytes)
 	if err != nil {
 		return stashedTorrent{}, err
 	}
@@ -518,7 +594,7 @@ func (a *mteamAccess) apiKey() (string, error) {
 	}
 	a.loaded = true
 
-	input, err := a.runner.settings.Input(a.ctx, "mteam")
+	input, err := a.runner.settings.Input(a.ctx, material.SectionMTeam)
 	if err != nil {
 		a.err = fmt.Errorf("读 M-Team 设置失败: %w", err)
 		return a.key, a.err

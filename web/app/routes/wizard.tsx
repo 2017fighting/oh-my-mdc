@@ -94,7 +94,7 @@ const steps: StepSpec[] = [
     help: "地址、账号、分类、下载根目录、回调 base URL。回调地址要走集群内 svc DNS：qBittorrent 在集群里，公网域名留给人类。",
     test: { label: "测试连接" },
     fields: [
-      { key: "url", label: "地址", kind: "text", mono: true, placeholder: "http://qbittorrent.media.svc:8080" },
+      { key: "url", label: "地址", kind: "text", mono: true, placeholder: "http://qbittorrent.qbittorrent-private.svc:8082" },
       { key: "username", label: "用户名", hint: "可选", kind: "text" },
       { key: "password", label: "密码", hint: "留空＝不改", kind: "secret" },
       { key: "category", label: "分类 (category)", hint: "默认 mdc", kind: "text" },
@@ -115,7 +115,7 @@ const steps: StepSpec[] = [
     help: "地址 + API key + 媒体库目录。「测试可写」过两关：System/Info 鉴权，以及这项目录在本机可见——三个容器必须把同一个 host 目录挂到同一路径。",
     test: { label: "测试可写" },
     fields: [
-      { key: "url", label: "地址", kind: "text", mono: true, placeholder: "http://jellyfin.media.svc:8096" },
+      { key: "url", label: "地址", kind: "text", mono: true, placeholder: "http://jellyfin.jellyfin.svc:8096" },
       { key: "api_key", label: "API Key", hint: "留空＝不改", kind: "secret", mono: true },
       {
         key: "media_root",

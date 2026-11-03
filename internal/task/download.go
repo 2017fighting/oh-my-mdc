@@ -69,24 +69,58 @@ func (s *Store) DownloadingVersions(ctx context.Context) ([]Version, error) {
 //
 // 上一次下载期留下的 error_phase/error_reason 一并清空：它们描述的是过去。
 func (s *Store) MarkProcessing(ctx context.Context, infohash, owner string) error {
-	return s.leaveDownloading(ctx, infohash, owner, StatusProcessing, "", "")
+	return s.leaveDownloading(ctx, infohash, owner, StatusProcessing, "", "", false)
 }
 
 // MarkDownloadFailed 落 failed(下载阶段, reason) 并清掉租约。
 func (s *Store) MarkDownloadFailed(ctx context.Context, infohash, owner, reason string) error {
-	return s.leaveDownloading(ctx, infohash, owner, StatusFailed, PhaseDownloading, reason)
+	return s.leaveDownloading(ctx, infohash, owner, StatusFailed, PhaseDownloading, reason, false)
 }
 
-// leaveDownloading 是两条「离开下载阶段」写法的共同形状：改状态、清错误列、清租约。
+// MarkAddFailed 落 failed(下载阶段, reason)，并**清掉待加种标记**。
+//
+// 它与 MarkDownloadFailed 的差别只在那一列：加种失败的版本要进「需要人工」区
+// （§8.2 的 failed(phase, reason)），而不是留在 add_pending 里每轮静默重试——
+// 有些材料（私种备份）重试变不回来，留下去的只是永远走不通的一轮轮 error。
+//
+// 待加种标记与状态在**同一条 UPDATE** 里改：两条语句之间崩掉会留下
+// 「failed 但仍然 pending」的自相矛盾状态，而那种版本再也不会被重试。
+func (s *Store) MarkAddFailed(ctx context.Context, infohash, owner, reason string) error {
+	return s.leaveDownloading(ctx, infohash, owner, StatusFailed, PhaseDownloading, reason, true)
+}
+
+// SetPayload 改写版本行的交付材料（重取私种备份落到新路径时适用）。
+//
+// payload 是「这次加种用的材料」的持久记录：下一轮 poll 与人工重试都读它，
+// 所以重取成功后必须写回——否则重启一次又回到读不到的旧路径。
+func (s *Store) SetPayload(ctx context.Context, infohash, owner, payload string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE task_version
+		 SET payload = $3, updated_at = now()
+		 WHERE infohash = $1 AND claimed_by = $2`,
+		infohash, owner, payload,
+	)
+	if err != nil {
+		return fmt.Errorf("task: 改写版本 %s 的交付材料: %w", infohash, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
+// leaveDownloading 是三条「离开下载阶段」写法的共同形状：改状态、清错误列、清租约。
 //
 // 租约不属于自己或状态已不是下载中 → 零写入 + ErrClaimLost（抢输不是失败）。
-func (s *Store) leaveDownloading(ctx context.Context, infohash, owner string, status Status, phase Phase, reason string) error {
+// clearPending 只在「这条路重试变不出来」时置起（MarkAddFailed）。
+func (s *Store) leaveDownloading(ctx context.Context, infohash, owner string, status Status, phase Phase, reason string, clearPending bool) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE task_version
 		 SET status = $3, error_phase = $4, error_reason = $5,
+		     add_pending = add_pending AND NOT $6,
 		     claimed_at = NULL, claimed_by = '', updated_at = now()
 		 WHERE infohash = $1 AND claimed_by = $2 AND status = 'downloading'`,
-		infohash, owner, string(status), nullIfEmpty(string(phase)), reason,
+		infohash, owner, string(status), nullIfEmpty(string(phase)), reason, clearPending,
 	)
 	if err != nil {
 		return fmt.Errorf("task: 版本 %s 离开下载阶段（%s）: %w", infohash, status, err)

@@ -21,6 +21,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/organize"
@@ -155,6 +156,14 @@ func run(logger *slog.Logger) error {
 					Logger:   logger,
 				})
 
+				// 交付材料（私种备份）的落盘与重取：poll 的自动加种与人工重试共用一处。
+				// 备份目录是 /tmp 里的 emptyDir，pod 重启就空；读不到就回 M-Team 重取一次（#36）。
+				materials := material.New(material.Options{
+					Torrents: mteamIntegration,
+					Settings: settingsStore,
+					Logger:   logger,
+				})
+
 				// 人工重试（规格 §6.1 人工重试行）：面板的「重试 / 强制重刮」走它，
 				// 逐条版本分支——回加工开头、按 payload 重新加种、或强制重刮 finished。
 				retryRunner = retry.New(retry.Options{
@@ -162,6 +171,7 @@ func run(logger *slog.Logger) error {
 					Outbox:   sidefxOutbox,
 					Settings: settingsStore,
 					Qbt:      qbtIntegration,
+					Material: materials,
 					Logger:   logger,
 				})
 
@@ -196,6 +206,7 @@ func run(logger *slog.Logger) error {
 					Adder:    qbtIntegration,
 					// M-Team 是可选来源：未配置/禁用时 poll 自己不会问它（P5-1）。
 					Torrents: mteamIntegration,
+					Material: materials,
 					Pool:     database.Pool(),
 					Loops:    loopsRegistry,
 					Logger:   logger,

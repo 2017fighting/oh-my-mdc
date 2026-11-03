@@ -1,67 +1,14 @@
 package poll
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
-	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
-
-// defaultTorrentsDir 是 .torrent 备份目录的兜底：生产上 /tmp 是 emptyDir，
-// 进程重启后内容会没（规格 §5.2 的「字节瞬态走 /tmp」）。
-func defaultTorrentsDir() string {
-	return filepath.Join(os.TempDir(), "oh-my-mdc", "torrents")
-}
-
-// stashTorrent 把取回的 .torrent 字节落到备份路径，返回 payload 要存的那条路径。
-//
-// 为什么落盘而不是把字节塞进 payload 列：payload 是 text（磁力串或备份路径），
-// 而加种与人工重试（#31）都要拿到原文才下得动。
-//
-// 原子写（temp + rename）：加种可能在任何时刻读到这个路径，读到半份种子
-// 只会得到「infohash 对不上的红种」，而那种故障在日志里没有痕迹。
-func stashTorrent(dir, infohash string, data []byte) (string, error) {
-	if infohash == "" {
-		return "", fmt.Errorf("poll: 存种子需要 infohash")
-	}
-	if len(data) == 0 {
-		return "", fmt.Errorf("poll: 存种子需要字节")
-	}
-	if dir == "" {
-		return "", fmt.Errorf("poll: 存种子需要备份目录（Runner 装配时一定给了）")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("poll: 建种子备份目录 %s: %w", dir, err)
-	}
-
-	path := filepath.Join(dir, infohash+".torrent")
-	tmp, err := os.CreateTemp(dir, infohash+".*.tmp")
-	if err != nil {
-		return "", fmt.Errorf("poll: 建种子临时文件: %w", err)
-	}
-	tmpPath := tmp.Name()
-	// 失败路径上一定删掉临时文件：留着就是 /tmp 里永不回收的垃圾。
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return "", fmt.Errorf("poll: 写种子临时文件: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("poll: 收尾种子临时文件: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return "", fmt.Errorf("poll: 落种子到 %s: %w", path, err)
-	}
-	return path, nil
-}
 
 // candidateFromTorrent 把取种结果装成一条版本候选。
 //
 // payload 存的是**备份路径**：交付形态是 torrent，加种时要读字节（multipart）。
+// 落盘与「读不到就重取」都归 material 包（poll 与人工重试共用那一处）。
 func candidateFromTorrent(item appapi.ListItem, listID string, stashed stashedTorrent) task.Candidate {
 	torrent := stashed.torrent
 	return task.Candidate{
@@ -82,14 +29,4 @@ func bytesToMiB(size int64) int64 {
 		return 0
 	}
 	return size / (1 << 20)
-}
-
-// deliveryFor 把一条版本翻成 qBittorrent 要的交付形态（磁力串 / 私有种子字节）。
-//
-// 两种形态共用一条版本行，材料来源不同（磁力串 vs `.torrent` 备份路径），
-// 但「怎么把 payload 变成加种请求」只有一份实现：人工重试（#31）读的是同一列，
-// 两条路必须对同一条版本有同一个理解。
-func deliveryFor(version task.Version, cfg qbittorrent.Config) (qbittorrent.Torrent, error) {
-	return qbittorrent.FromPayload(cfg, version.Infohash, version.Number,
-		string(version.Delivery), version.Payload)
 }

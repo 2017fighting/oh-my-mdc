@@ -1,6 +1,7 @@
 package qbittorrent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,13 +52,17 @@ func TestFromPayloadReadsBackTheTorrentBackup(t *testing.T) {
 	}
 }
 
-// TestFromPayloadExplainsAMissingBackup 钉住失败时的措辞：
-// 备份在 /tmp 里，重启后可能已经没了——错误要说清这一点，而不是只报 an error。
+// TestFromPayloadExplainsAMissingBackup 钉住失败时的措辞与身份：
+// 备份在 /tmp 里，重启后可能已经没了——错误要说清这一点（而不是只报 an error），
+// 并且要能被 errors.Is 认出来：材料缺失是可补的，调用方要回上游重取一次（#36）。
 func TestFromPayloadExplainsAMissingBackup(t *testing.T) {
 	_, err := FromPayload(testConfig(), "0123456789abcdef0123456789abcdef01234567", "ABP-123",
 		"torrent", filepath.Join(t.TempDir(), "gone.torrent"))
 	if err == nil {
 		t.Fatal("备份读不到时应当报错")
+	}
+	if !errors.Is(err, ErrPayloadMissing) {
+		t.Errorf("err = %v, want errors.Is(ErrPayloadMissing)", err)
 	}
 	if !strings.Contains(err.Error(), "私种备份") {
 		t.Errorf("err = %v, want 提到私种备份路径", err)

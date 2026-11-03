@@ -124,6 +124,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 - **限速**（官方「建议值」，binding 的是下载动作 100/h、日配额 1000）：配额 API 不可读。仅在「JavDB 有磁力的 movie 且尚无版本」时才搜索（PLAN：javdb 没有 → 直接结束）。
 - 种子选择策略（本票落定，可调）：`status.seeders` 降序 → 折扣（FREE 优先）→ 体积降序；命中即取一条候选。
 - 取种失败/无 key/配额疑尽 → **降级 JavDB 磁力，产生第二条版本**（#8），一条版本永远只下一种形态。
+- **备份失效后的重取**（#36）：`payload` 存的备份路径读不到时不重试那条路（文件不会再出现），而是回 M-Team 按番号**重取一次**，且只认 infohash 与版本行相符的那条（今天按选种策略挑中的可能是另一条种子——API 不在搜索里给 infohash，只有下完才核得出来；不符就是「站点上已无该种」，不拿别的种子凑合）。重取**守 M-Team 的启停开关**（禁用时给「启用后再重试」的永久失败，不去撞配额）。重取成功 → 落盘、把新路径写回 `payload`、照常加种；永久失败（站点上已无该种 / 凭据不对）→ `failed(downloading, reason)` 进需人工区，不再每轮拉红 poll；瞬时失败（连不上 / 超时）→ 保持 `add_pending`，下一轮再试且不把这一轮判成循环故障。
 
 ### 5.3 DMM
 
@@ -213,7 +214,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | → finished | 硬链接 + NFO/图片落盘后 | tag `mdc:in-progress` → `mdc:finished`；置 jellyfin_refresh / notify 待办 |
 | 失败 | 加工每一步 | 最多 3 次（`max_attempts`）指数退避，第 3 次落 `failed(phase, reason)` + Telegram ×1；此后不自动碰 |
 | 下载异常 | 对账 | 种子消失 → `failed(下载阶段, 种子已移除)`；完成但文件缺 → `failed(下载阶段, 文件丢失)`；**progress 持续不动（常量 60 分钟，非设置项）→ 只告警 ×1，保持 downloading** |
-| 人工重试 | 面板抽屉 | `retry(movie_id, force=false)`：非 finished 版本回 processing 开头；下载阶段的版本（含下载中但种子已不在 qbt 的）按存的 magnet/种子重加（允许重下）；`force=true` 才重刮已 finished 版本（旧 `raw_snapshot` 先落 `manual_retry` 事件的 `detail`），并对任何分支都置起 `force_rescrape`；**qbt 里仍在下载的永不重下**（该版本跳过并附原因） |
+| 人工重试 | 面板抽屉 | `retry(movie_id, force=false)`：非 finished 版本回 processing 开头；下载阶段的版本（含下载中但种子已不在 qbt 的）按存的 magnet/种子重加（允许重下；私种备份缺失时同样回 M-Team 重取一次，#36）；`force=true` 才重刮已 finished 版本（旧 `raw_snapshot` 先落 `manual_retry` 事件的 `detail`），并对任何分支都置起 `force_rescrape`；**qbt 里仍在下载的永不重下**（该版本跳过并附原因） |
 | 重启 | 进程启动 | downloading 不动（真实进度在 qbt）；processing 阶段级复位重跑（幂等，无步骤游标）；finished/failed 不动 |
 | 互斥 | 全部 | 版本行条件 claim（§4.4）+ 进程内 per-version 锁 |
 

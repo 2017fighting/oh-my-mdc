@@ -6,6 +6,8 @@
 //     清错误、清尝试计数与退避、放回租约，下轮取数与整理各自从头跑（幂等）。
 //   - **重新加种**：下载阶段的版本按版本行存的 payload（磁力串或 .torrent 备份路径）重加，
 //     成功才回 downloading——**允许重下**；重加失败保持 failed，可以再试。
+//     私种备份没了（重启清空了 /tmp）时与 poll 走同一处重取（material 包，ADR-0011）：
+//     重新加种不该是一条死路。
 //   - **强制重刮**：只有 force=true 才碰已 finished 的版本。旧 raw_snapshot 在覆盖前
 //     先落进 manual_retry 事件的 detail（新旧对比可查），版本回加工开头并置起
 //     force_rescrape，取数段见它就不再复用元数据。
@@ -25,6 +27,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
@@ -74,8 +77,10 @@ type Result struct {
 // Settings 是本包对设置域的唯一要求：加种要 qBittorrent 那一节的凭据。
 //
 // 人工重试是人的动作，不看循环门禁（暂停时点了也只是把状态摆好，循环恢复后自然跑）。
+// Load 只为交付材料的重取而存在：补私种备份要问 M-Team 还在不在启用状态（#36）。
 type Settings interface {
 	Input(ctx context.Context, section string) (settings.TestInput, error)
+	Load(ctx context.Context) (settings.Snapshot, error)
 }
 
 // Qbt 是 qBittorrent 的接缝：回读现状（判「仍在下载」）与加种（幂等，含收编）。
@@ -90,6 +95,8 @@ type Options struct {
 	Outbox   *sidefx.Outbox
 	Settings Settings
 	Qbt      Qbt
+	// Material 是交付材料仓库（私种备份的读取与重取）。必填：重新加种读的就是它。
+	Material *material.Store
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Owner 是 claim 的持有者标识；空则用 hostname-pid。
@@ -102,6 +109,7 @@ type Runner struct {
 	outbox   *sidefx.Outbox
 	settings Settings
 	qbt      Qbt
+	material *material.Store
 	logger   *slog.Logger
 	owner    string
 }
@@ -121,6 +129,7 @@ func New(opts Options) *Runner {
 		outbox:   opts.Outbox,
 		settings: opts.Settings,
 		qbt:      opts.Qbt,
+		material: opts.Material,
 		logger:   logger,
 		owner:    owner,
 	}
@@ -275,24 +284,44 @@ func (r *Runner) readd(ctx context.Context, version task.Version, force bool) (O
 		return r.finish(ctx, version, outcome)
 	}
 
-	delivery, err := qbittorrent.FromPayload(cfg, version.Infohash, version.Number,
-		string(version.Delivery), version.Payload)
-	if err == nil {
-		var ensured qbittorrent.Outcome
-		if ensured, err = r.qbt.Ensure(ctx, cfg, delivery); err == nil {
-			// 通知在清 pending 之前入箱：与自动加种同一顺序，崩在中间也不会丢（§5.6）。
-			// 已经带着项目 tag 的种子不算「新的下载开始」，不重复喊一次。
-			if ensured != qbittorrent.AlreadyTracked {
-				r.enqueueDownloadStarted(ctx, version, r.sizeAfterAdd(ctx, cfg, version.Infohash, status))
+	delivery, err := r.material.Deliver(ctx, version, cfg)
+	if err != nil {
+		outcome.Reason = fmt.Sprintf("重新加种失败：%v", err)
+		// 材料永久没了（站点上已无该种、M-Team 已禁用）：这一次就把版本摆进需人工区，
+		// 而不是等下一轮 poll 再花一次 M-Team 配额得出同一个结论（进「需要人工」的判词
+		// 与 poll 一致，两处不各写一套）。
+		if material.Permanent(err) && version.Status == task.StatusDownloading {
+			return r.failAdd(ctx, version, outcome, err.Error())
+		}
+		return r.finish(ctx, version, outcome)
+	}
+	if delivery.Material != version.Payload {
+		// 重取落到了新路径：payload 是下次读材料的唯一线索，必须写回库。
+		if err := r.store.SetPayload(ctx, version.Infohash, r.owner, delivery.Material); err != nil {
+			if errors.Is(err, task.ErrClaimLost) {
+				return skipped(version, LeaseHeldReason), nil
 			}
-			outcome.Action = ActionReadded
-			outcome.ToState = task.StatusDownloading
-			outcome.Reason = fmt.Sprintf("重新加种（%s），版本回下载中", ensureLabel(ensured))
+			return Outcome{}, err
 		}
 	}
+
+	ensured, err := r.qbt.Ensure(ctx, cfg, delivery.Torrent)
 	if err != nil {
 		outcome.Reason = fmt.Sprintf("重新加种失败：%v", err)
 		return r.finish(ctx, version, outcome)
+	}
+
+	// 通知在清 pending 之前入箱：与自动加种同一顺序，崩在中间也不会丢（§5.6）。
+	// 已经带着项目 tag 的种子不算「新的下载开始」，不重复喊一次。
+	if ensured != qbittorrent.AlreadyTracked {
+		r.enqueueDownloadStarted(ctx, version, r.sizeAfterAdd(ctx, cfg, version.Infohash, status))
+	}
+	outcome.Action = ActionReadded
+	outcome.ToState = task.StatusDownloading
+	outcome.Reason = fmt.Sprintf("重新加种（%s），版本回下载中", ensureLabel(ensured))
+	if delivery.Refetched {
+		// 时间线上要说清「备份曾经没了、这次是重取回来的」：那是一次真实的 M-Team 调用。
+		outcome.Reason = fmt.Sprintf("私种备份已回 M-Team 重取；重新加种（%s），版本回下载中", ensureLabel(ensured))
 	}
 
 	updated, err := r.store.MarkRetryDownloading(ctx, version.Infohash, r.owner, force)
@@ -311,6 +340,22 @@ func (r *Runner) readd(ctx context.Context, version task.Version, force bool) (O
 	r.logger.Info("人工重试已重新加种",
 		"movie_id", version.MovieID, "infohash", version.Infohash, "outcome", outcome.Reason)
 	return outcome, nil
+}
+
+// failAdd 把一条「交付材料永久没了」的版本摆进需人工（§8.2 的 failed(phase, reason)）。
+//
+// 只对还在 downloading 的版本动手：已经 failed 的那条状态与原因都在，这次重试只是
+// 再说一遍「补不回来」——改写它的 error_reason 没有意义，留一条事件就够。
+func (r *Runner) failAdd(ctx context.Context, version task.Version, outcome Outcome, reason string) (Outcome, error) {
+	if err := r.store.MarkAddFailed(ctx, version.Infohash, r.owner, reason); err != nil {
+		if errors.Is(err, task.ErrClaimLost) {
+			return skipped(version, LeaseHeldReason), nil
+		}
+		return Outcome{}, errors.Join(err, r.store.Release(ctx, version.Infohash, r.owner))
+	}
+	outcome.Action = ActionFailed
+	outcome.ToState = task.StatusFailed
+	return r.finish(ctx, version, outcome)
 }
 
 // finish 收尾一次没有改动状态的尝试：记一条事件（人要知道点过、为什么没成），放回租约。

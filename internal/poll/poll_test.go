@@ -12,6 +12,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
@@ -136,18 +137,26 @@ func newFixture(t *testing.T) *fixture {
 	torrentsDir := t.TempDir()
 	store := task.NewStore(database.Pool())
 	registry := loops.NewRegistry()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// 材料仓库显式注入：poll 自己也要落盘，测试要能指定备份目录并断言重取。
+	materials := material.New(material.Options{
+		Dir:      torrentsDir,
+		Torrents: torrents,
+		Settings: settingsFake,
+		Logger:   logger,
+	})
 	runner := poll.New(poll.Options{
-		Store:       store,
-		Outbox:      sidefx.New(database.Pool()),
-		Settings:    settingsFake,
-		Source:      source,
-		Adder:       adder,
-		Torrents:    torrents,
-		TorrentsDir: torrentsDir,
-		Pool:        database.Pool(),
-		Loops:       registry,
-		Owner:       "test-owner",
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:    store,
+		Outbox:   sidefx.New(database.Pool()),
+		Settings: settingsFake,
+		Source:   source,
+		Adder:    adder,
+		Torrents: torrents,
+		Material: materials,
+		Pool:     database.Pool(),
+		Loops:    registry,
+		Owner:    "test-owner",
+		Logger:   logger,
 	})
 	return &fixture{
 		database:    database,
