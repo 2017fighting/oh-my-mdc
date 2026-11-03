@@ -64,6 +64,15 @@ func Classify(err error) settings.TestCode {
 	return settings.CodeNetwork
 }
 
+// IsPermanent 报告这次失败是否**永久**（重试无用，要人换 key / 改配置）。
+//
+// 它就是规格 §9 上游指标 `mdc_upstream_requests_total{result="permanent"}` 的
+// openai 分类钩子：auth/business（缺 key、401/403、400/404/422）要人改，
+// 网络/429/5xx 与信封错重试就好——判据与 sidefx 的驻留处置同源。
+func IsPermanent(err error) bool {
+	return settings.IsPermanentCode(Classify(err))
+}
+
 // protocolError 是「上游回了响应，但不是我们认得的样子」：非 JSON、没有 choices、
 // 译文不是 JSON 对象。处置是查代码/查上游，不是盲重试。
 func protocolError(op, detail string, err error) error {

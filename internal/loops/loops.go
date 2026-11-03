@@ -1,7 +1,11 @@
-// Package loops 记三条循环（poll / reconcile / sidefx）的健康位：最近一次跑的时间与成败。
+// Package loops 记三条循环（poll / reconcile / sidefx）的健康位：最近一次跑的时间与成败、
+// 最近一次成功的时间、以及 ok/error 的迭代计数。
 //
 // 面板的「循环健康」与规格 §9 的 mdc_loop_* 指标都读它。它是进程内状态而不是数据库
 // 状态：循环活在进程里，进程重启本来就该显示「还没跑过」。
+//
+// last_run 与 last_success 分开：连续失败的循环「跑过」但「没成功」，而 LoopStalled
+// 告警判的是后者——只记 last_run 会让一个每轮都失败的循环看起来完全健康。
 package loops
 
 import (
@@ -21,10 +25,28 @@ const (
 	Sidefx    = "sidefx"
 )
 
+// All 是三条循环的固定顺序：指标与面板都按它列，免得顺序随机。
+var All = []string{Poll, Reconcile, Sidefx}
+
+// Iterations 是一条循环的迭代计数（规格 §9 的 result=ok|error）。
+//
+// 只有真跑了才算：门禁没开、抢锁抢输的轮次既不记 last_run 也不计数（被跳过的
+// 不算一次迭代——否则空转会在指标上看起来像健康）。
+type Iterations struct {
+	OK    uint64
+	Error uint64
+}
+
 // Status 是一条循环的健康位。
 type Status struct {
 	LastRunAt *time.Time
 	LastOK    *bool
+	// LastSuccessAt 是最近一次 ok=true 的时间；从没成功过时为 nil。
+	//
+	// 它与 LastRunAt 分开存：连续失败的循环「跑过」但「没成功」，
+	// LoopStalled 告警判的是后者（规格 §9）。
+	LastSuccessAt *time.Time
+	Iterations    Iterations
 }
 
 // Registry 是三条循环健康位的进程内登记处。
@@ -46,7 +68,16 @@ func (r *Registry) Record(name string, at time.Time, ok bool) {
 	utc := at.UTC()
 	lastOK := ok
 	r.mu.Lock()
-	r.status[name] = Status{LastRunAt: &utc, LastOK: &lastOK}
+	status := r.status[name]
+	status.LastRunAt = &utc
+	status.LastOK = &lastOK
+	if ok {
+		status.LastSuccessAt = &utc
+		status.Iterations.OK++
+	} else {
+		status.Iterations.Error++
+	}
+	r.status[name] = status
 	r.mu.Unlock()
 }
 

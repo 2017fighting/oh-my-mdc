@@ -16,6 +16,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/retry"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -70,6 +71,8 @@ type Options struct {
 	Sidefx *sidefx.Outbox
 	// Loops 是三条循环的进程内健康位；nil 时 overview 的 loops 全空。
 	Loops *loops.Registry
+	// Metrics 是 /metrics 的四族指标；nil 时端点回 503（进程还没接上可观测性）。
+	Metrics *metrics.Registry
 	// Hooks 是 qbt autorun 回调（GET /api/hooks/qbt）；nil 时端点仍回 200 但不做事。
 	Hooks Hooks
 	// Retrier 是人工重试（POST /api/tasks/{movie_id}/retry）；nil 时端点回 503 db_unavailable。
@@ -107,6 +110,7 @@ func New(opts Options) (http.Handler, error) {
 		tasks:    opts.Tasks,
 		sidefx:   opts.Sidefx,
 		loops:    opts.Loops,
+		metrics:  opts.Metrics,
 		hooks:    opts.Hooks,
 		retrier:  opts.Retrier,
 		logger:   logger,
@@ -122,6 +126,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.versionHandler)
+	mux.Handle("GET /metrics", s.metricsHandler())
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/config", s.configAll)
 	mux.HandleFunc("GET /api/hooks/qbt", s.qbtHook)
@@ -155,6 +160,7 @@ type server struct {
 	tasks    *task.Store
 	sidefx   *sidefx.Outbox
 	loops    *loops.Registry
+	metrics  *metrics.Registry
 	hooks    Hooks
 	retrier  Retrier
 	logger   *slog.Logger
@@ -198,6 +204,19 @@ func (s *server) qbtHook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// metricsHandler 挂上规格 §9 的 /metrics。
+//
+// 它不折叠数据库：库抖了只让驻留那一族缺席（指标包自己记 warn），循环与上游照常出数。
+// 没接线时回 503 而不是空 200——空响应会让抓取端以为「一切正常、零流量」。
+func (s *server) metricsHandler() http.Handler {
+	if s.metrics == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeError(w, http.StatusServiceUnavailable, "metrics_unavailable", "指标还没接线")
+		})
+	}
+	return s.metrics.Handler()
 }
 
 func (s *server) versionHandler(w http.ResponseWriter, _ *http.Request) {

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 )
 
 // defaultHTTPTimeout 是单次调用的上限。测试连接另有 10s 的总预算（settings.TestTimeout）。
@@ -23,16 +25,17 @@ const maxBodyBytes = 1 << 20
 // token 是路径的一段（/bot<token>/getMe），所以任何错误文案都要经过 scrub——
 // 否则「连不上」的原文会带着 token 进 last_test_error 与时间线。
 type client struct {
-	base  *url.URL
-	http  httpClient
-	token string
+	base    *url.URL
+	http    httpClient
+	token   string
+	metrics metrics.Recorder
 }
 
 // newClient 解析入口地址并装上默认 HTTP 客户端。
 //
 // 注入的 *http.Client 在判空之后才装进客户端：nil 指针装进接口会变成非 nil 接口，
 // 之后每一次 Do 都会 panic。
-func newClient(host string, cfg Config, injected *http.Client) (*client, error) {
+func newClient(host string, cfg Config, injected *http.Client, recorder metrics.Recorder) (*client, error) {
 	// host 已由 Integration 归一化（New 里 TrimSpace + 去尾部斜杠），这里只管解析。
 	base, err := url.Parse(host)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
@@ -42,7 +45,7 @@ func newClient(host string, cfg Config, injected *http.Client) (*client, error) 
 	if injected != nil {
 		hc = injected
 	}
-	return &client{base: base, http: hc, token: cfg.BotToken}, nil
+	return &client{base: base, http: hc, token: cfg.BotToken, metrics: recorder}, nil
 }
 
 // botInfo 是 getMe 里向导要用的两样（chip 文案用）。
@@ -99,7 +102,34 @@ func (c *client) sendMessage(ctx context.Context, chatID, text string) error {
 }
 
 // call 发一次请求并读完回执。错误只负责「请求撞上什么」，非 2xx 的含义留给 parse。
+//
+// 上游计量也在这一跳：400/401/403 是凭据/请求本身的永久错（规格 §5.6 立即驻留的那三类），
+// 其余失败（网络、429、5xx）是瞬时，2xx 是 ok。
 func (c *client) call(ctx context.Context, method, name string, payload []byte) ([]byte, int, error) {
+	body, status, err := c.request(ctx, method, name, payload)
+	c.observe(status, err)
+	return body, status, err
+}
+
+// observe 记一次请求的结局（规格 §9 的 telegram 上游）。
+func (c *client) observe(status int, err error) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+	result := metrics.ResultOK
+	switch {
+	case err != nil:
+		result = metrics.ResultTransient
+	case status == http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden:
+		result = metrics.ResultPermanent
+	case status < 200 || status >= 300:
+		result = metrics.ResultTransient
+	}
+	c.metrics.RecordUpstream(metrics.UpstreamTelegram, result)
+}
+
+// request 是 call 去掉计量后的那一半。
+func (c *client) request(ctx context.Context, method, name string, payload []byte) ([]byte, int, error) {
 	u := c.base.JoinPath("bot"+c.token, name)
 	var reader io.Reader
 	if payload != nil {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/organize"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/reconcile"
@@ -104,6 +105,7 @@ type fixture struct {
 	store    *task.Store
 	qbt      *fakeQbt
 	settings *fakeSettings
+	loops    *loops.Registry
 	runner   *reconcile.Runner
 	opts     reconcile.Options
 	now      time.Time
@@ -125,6 +127,7 @@ func newFixture(t *testing.T) *fixture {
 		qbt:      newFakeQbt(),
 		settings: readySettings(),
 		now:      time.Date(2025, 4, 1, 12, 0, 0, 0, time.UTC),
+		loops:    loops.NewRegistry(),
 	}
 	f.opts = reconcile.Options{
 		Store:    f.store,
@@ -132,6 +135,7 @@ func newFixture(t *testing.T) *fixture {
 		Settings: f.settings,
 		Qbt:      f.qbt,
 		Pool:     database.Pool(),
+		Loops:    f.loops,
 		Owner:    "test-owner",
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now:      func() time.Time { return f.now },
@@ -917,5 +921,51 @@ func TestRunOnceReportsProcessingErrors(t *testing.T) {
 
 	if _, err := f.runner.RunOnce(context.Background()); err == nil {
 		t.Fatal("加工错误应当传出来")
+	}
+}
+
+// TestRunOnceRecordsLoopHealth 钉住 reconcile 与 §9 循环指标的接线：
+// 成功推 last_success，失败只涨 error 计数，门禁轮次不算迭代。
+func TestRunOnceRecordsLoopHealth(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	health := f.loops.Health(loops.Reconcile)
+	if health.LastOK == nil || !*health.LastOK {
+		t.Fatalf("LastOK = %v, want true", health.LastOK)
+	}
+	if health.LastSuccessAt == nil {
+		t.Fatal("成功的轮次该写 last_success")
+	}
+	if health.Iterations.OK != 1 || health.Iterations.Error != 0 {
+		t.Errorf("Iterations = %+v, want ok=1 error=0", health.Iterations)
+	}
+	successAt := *health.LastSuccessAt
+
+	f.settings.loadErr = errors.New("库不通")
+	if _, err := f.runner.RunOnce(ctx); err == nil {
+		t.Fatal("读设置失败该让这一轮返回错误")
+	}
+	health = f.loops.Health(loops.Reconcile)
+	if health.LastOK == nil || *health.LastOK {
+		t.Errorf("LastOK = %v, want false", health.LastOK)
+	}
+	if health.LastSuccessAt == nil || !health.LastSuccessAt.Equal(successAt) {
+		t.Errorf("LastSuccessAt = %v, want 停在 %v（失败不刷新它）", health.LastSuccessAt, successAt)
+	}
+	if health.Iterations.OK != 1 || health.Iterations.Error != 1 {
+		t.Errorf("Iterations = %+v, want ok=1 error=1", health.Iterations)
+	}
+
+	f.settings.loadErr = nil
+	f.settings.snapshot.Initialized = false
+	if _, err := f.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce(gated): %v", err)
+	}
+	if health := f.loops.Health(loops.Reconcile); health.Iterations.OK != 1 || health.Iterations.Error != 1 {
+		t.Errorf("门禁轮次不该计入迭代: %+v", health.Iterations)
 	}
 }

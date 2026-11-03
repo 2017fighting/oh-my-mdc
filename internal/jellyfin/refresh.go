@@ -65,7 +65,7 @@ func (i *Integration) Refresh(ctx context.Context, cfg Config, number string) (R
 	if err != nil {
 		return RefreshResult{}, err
 	}
-	c, err := newClient(cfg, i.http)
+	c, err := newClient(cfg, i.http, i.metrics)
 	if err != nil {
 		return RefreshResult{}, err
 	}

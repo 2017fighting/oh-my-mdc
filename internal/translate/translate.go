@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -81,16 +82,19 @@ const probePrompt = "ping"
 type Options struct {
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 openai 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // Integration 是 AI 翻译集成门面：一个 settings.Tester + 一个 Translator。
 type Integration struct {
-	http *http.Client
+	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造 AI 翻译集成门面。
 func New(opts Options) *Integration {
-	return &Integration{http: opts.HTTP}
+	return &Integration{http: opts.HTTP, metrics: opts.Metrics}
 }
 
 // Test 实现 settings.Tester：1 token 的极小补全（规格 §5.7/§8.4）。
@@ -103,7 +107,7 @@ func (i *Integration) Test(ctx context.Context, _ settings.Section, input settin
 		return settings.TestResult{Code: Classify(err), Detail: err.Error()}
 	}
 
-	c, err := newClient(cfg, i.http)
+	c, err := newClient(cfg, i.http, i.metrics)
 	if err != nil {
 		return settings.TestResult{Code: Classify(err), Detail: err.Error()}
 	}
@@ -131,7 +135,7 @@ func (i *Integration) Translate(ctx context.Context, cfg Config, in Text) (Text,
 		return Text{}, err
 	}
 
-	c, err := newClient(cfg, i.http)
+	c, err := newClient(cfg, i.http, i.metrics)
 	if err != nil {
 		return Text{}, err
 	}

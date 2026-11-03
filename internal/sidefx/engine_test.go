@@ -13,6 +13,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
@@ -102,6 +103,7 @@ type fixture struct {
 	remover   *fakeRemover
 	refresher *fakeRefresher
 	settings  *fakeSettings
+	loops     *loops.Registry
 	engine    *sidefx.Engine
 }
 
@@ -128,6 +130,7 @@ func newFixtureWith(t *testing.T, notifier sidefx.Notifier) *fixture {
 		remover:   &fakeRemover{},
 		refresher: &fakeRefresher{},
 		settings:  readySettings(),
+		loops:     loops.NewRegistry(),
 	}
 	f.engine = sidefx.NewEngine(sidefx.Options{
 		Outbox:    f.outbox,
@@ -136,6 +139,7 @@ func newFixtureWith(t *testing.T, notifier sidefx.Notifier) *fixture {
 		Refresher: f.refresher,
 		Notifier:  notifier,
 		Tasks:     f.store,
+		Loops:     f.loops,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return f
@@ -501,4 +505,50 @@ func hasEvent(events []task.Event, kind task.EventKind, reasonPrefix string) boo
 		}
 	}
 	return false
+}
+
+// TestRunOnceRecordsLoopHealth 钉住 sidefx 与 §9 循环指标的接线：
+// 成功推 last_success，失败只涨 error 计数，门禁轮次不算迭代。
+func TestRunOnceRecordsLoopHealth(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.engine.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	health := f.loops.Health(loops.Sidefx)
+	if health.LastOK == nil || !*health.LastOK {
+		t.Fatalf("LastOK = %v, want true", health.LastOK)
+	}
+	if health.LastSuccessAt == nil {
+		t.Fatal("成功的轮次该写 last_success")
+	}
+	if health.Iterations.OK != 1 || health.Iterations.Error != 0 {
+		t.Errorf("Iterations = %+v, want ok=1 error=0", health.Iterations)
+	}
+	successAt := *health.LastSuccessAt
+
+	f.settings.loadErr = errors.New("库不通")
+	if _, err := f.engine.RunOnce(ctx); err == nil {
+		t.Fatal("读设置失败该让这一轮返回错误")
+	}
+	health = f.loops.Health(loops.Sidefx)
+	if health.LastOK == nil || *health.LastOK {
+		t.Errorf("LastOK = %v, want false", health.LastOK)
+	}
+	if health.LastSuccessAt == nil || !health.LastSuccessAt.Equal(successAt) {
+		t.Errorf("LastSuccessAt = %v, want 停在 %v（失败不刷新它）", health.LastSuccessAt, successAt)
+	}
+	if health.Iterations.OK != 1 || health.Iterations.Error != 1 {
+		t.Errorf("Iterations = %+v, want ok=1 error=1", health.Iterations)
+	}
+
+	f.settings.loadErr = nil
+	f.settings.snapshot.Initialized = false
+	if _, err := f.engine.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce(gated): %v", err)
+	}
+	if health := f.loops.Health(loops.Sidefx); health.Iterations.OK != 1 || health.Iterations.Error != 1 {
+		t.Errorf("门禁轮次不该计入迭代: %+v", health.Iterations)
+	}
 }

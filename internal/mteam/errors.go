@@ -75,6 +75,14 @@ func Classify(err error) settings.TestCode {
 	return settings.CodeNetwork
 }
 
+// IsPermanent 报告这次失败是否**永久**（重试无用，要人换 key / 改代码）。
+//
+// 它就是规格 §9 上游指标 `mdc_upstream_requests_total{result="permanent"}` 的
+// M-Team 分类钩子，判据与 sidefx 的驻留处置同源（settings.IsPermanentCode）。
+func IsPermanent(err error) bool {
+	return settings.IsPermanentCode(Classify(err))
+}
+
 // IsNotFound 报告这次失败是不是「M-Team 上没有这部片」。
 //
 // 它是**答案**而不是故障：调用方据此降级磁力，但不该把它记成一条故障告警 ——

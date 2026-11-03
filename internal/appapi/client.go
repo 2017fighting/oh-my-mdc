@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 )
 
 // Identity 是每次请求都要带上的设备与版本信息。
@@ -186,6 +188,8 @@ type Client struct {
 	Lang string
 	// HTTP 允许注入测试用的 transport。为零值时使用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次请求的结局（规格 §9 的 javdb 上游）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 func (c *Client) httpClient() *http.Client {
@@ -299,7 +303,17 @@ func (c *Client) newRequest(ctx context.Context, method, path string, params, fo
 }
 
 // do 发请求并把响应体解析成信封，返回其中的 data。
+//
+// 上游计量挂在这一次出口上：每一次真正发出的请求都记一条，结局按 IsPermanent 分流
+// （auth = 凭据失效、protocol = 签名/信封不兼容都算永久；其余等一会儿就好）。
 func (c *Client) do(req *http.Request, path string) (json.RawMessage, error) {
+	raw, err := c.send(req, path)
+	metrics.ObserveUpstream(c.Metrics, metrics.UpstreamJavDB, err, IsPermanent)
+	return raw, err
+}
+
+// send 是 do 去掉计量后的那一半。
+func (c *Client) send(req *http.Request, path string) (json.RawMessage, error) {
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, &TransportError{Path: path, Err: err}
@@ -413,11 +427,25 @@ func Classify(err error) string {
 // IsPermanent 报告一次上游错误是不是**永久**的（重试无用，要人介入/改代码）。
 //
 // 这是规格 §9 的上游指标钩子：`mdc_upstream_requests_total{result="permanent"}`
-// 用它判定。permanent = 凭据失效（auth，如 JWTVerificationError）或协议/签名不兼容
-// （protocol，如 InvalidSignature）；network 是 transient，等一会儿重试就好。
+// 用它判定，而 `UpstreamCredentialsInvalid` 只数 permanent —— 所以 5xx/429 必须
+// 留在 transient 里：一次 Cloudflare 502 不该伪装成「去换 token」。
+//
+// permanent = 凭据失效（auth，如 JWTVerificationError）或协议/签名不兼容
+// （protocol，如 InvalidSignature）；network 与 5xx/429 是 transient。
 func IsPermanent(err error) bool {
-	code := Classify(err)
-	return code == CodeAuth || code == CodeProtocol
+	switch Classify(err) {
+	case CodeAuth:
+		return true
+	case CodeProtocol:
+		var protoErr *ProtocolError
+		if errors.As(err, &protoErr) &&
+			(protoErr.Status >= 500 || protoErr.Status == http.StatusTooManyRequests) {
+			return false
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func truncate(s string, n int) string {

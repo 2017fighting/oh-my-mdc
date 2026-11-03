@@ -21,6 +21,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/organize"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
@@ -80,29 +81,37 @@ func run(logger *slog.Logger) error {
 	var taskStore *task.Store
 	var sidefxOutbox *sidefx.Outbox
 	var loopsRegistry *loops.Registry
+	var metricsRegistry *metrics.Registry
 	var reconcileRunner *reconcile.Runner
 	var retryRunner *retry.Runner
 	// loopDone 是循环退出的信号：关连接池之前要先等它们，别把在途查询踩掉。
 	var loopDone []chan struct{}
+	// 登记处不依赖数据库：库连不上时循环一个都不跑，但 /metrics 仍该把「没跑过」
+	// 与上游零流量照实报出来（liveness 与可观测性都不折叠数据库）。
+	loopsRegistry = loops.NewRegistry()
 	if database != nil {
 		pinger = database
 
-		// JavDB 集成门面：既是设置域的「测试读取」实现，也是向导探测/代建清单的客户端。
-		javdbIntegration = javdb.New(javdb.Options{})
-		// M-Team 集成门面：设置域的「测试检索」实现 + poll 的取种来源（可选集成）。
-		mteamIntegration = mteam.New(mteam.Options{})
-		// qBittorrent 集成门面：设置域的「测试连接」实现 + 向导的 autorun 对比/落地。
-		qbtIntegration = qbittorrent.New(qbittorrent.Options{})
-		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（由 sidefx 引擎消费）。
-		jellyfinIntegration = jellyfin.New(jellyfin.Options{})
-		// Telegram 集成门面：设置域的「两步测试」实现 + sidefx 的通知执行者。
-		telegramIntegration = telegram.New(telegram.Options{})
-		// AI 翻译集成门面（可选集成）：设置域的「1 token 测试」实现 + 刮削的译文来源。
-		translateIntegration = translate.New(translate.Options{})
 		// 任务域读模型与副作用出箱：面板与 poll 循环共用。
 		taskStore = task.NewStore(database.Pool())
 		sidefxOutbox = sidefx.New(database.Pool())
-		loopsRegistry = loops.NewRegistry()
+		// 可观测性单点（规格 §9）：循环读登记处、驻留现数库里的行、上游由各客户端喂。
+		// 它在所有集成之前装配，好让每一次上游请求都记到同一份计数上。
+		metricsRegistry = metrics.New(loopsRegistry, sidefxOutbox, logger)
+
+		// JavDB 集成门面：既是设置域的「测试读取」实现，也是向导探测/代建清单的客户端。
+		javdbIntegration = javdb.New(javdb.Options{Metrics: metricsRegistry})
+		// M-Team 集成门面：设置域的「测试检索」实现 + poll 的取种来源（可选集成）。
+		mteamIntegration = mteam.New(mteam.Options{Metrics: metricsRegistry})
+		// qBittorrent 集成门面：设置域的「测试连接」实现 + 向导的 autorun 对比/落地。
+		qbtIntegration = qbittorrent.New(qbittorrent.Options{Metrics: metricsRegistry})
+		// Jellyfin 集成门面：设置域的「测试可写」实现 + 目录级刷新（由 sidefx 引擎消费）。
+		jellyfinIntegration = jellyfin.New(jellyfin.Options{Metrics: metricsRegistry})
+		// Telegram 集成门面：设置域的「两步测试」实现 + sidefx 的通知执行者。
+		telegramIntegration = telegram.New(telegram.Options{Metrics: metricsRegistry})
+		// AI 翻译集成门面（可选集成）：设置域的「1 token 测试」实现 + 刮削的译文来源。
+		translateIntegration = translate.New(translate.Options{Metrics: metricsRegistry})
+
 		settingsStore = settings.NewStore(database.Pool(),
 			settings.WithTester("javdb", javdbIntegration),
 			settings.WithTester("qbittorrent", qbtIntegration),
@@ -127,7 +136,7 @@ func run(logger *slog.Logger) error {
 					Store:    taskStore,
 					Outbox:   sidefxOutbox,
 					Settings: settingsStore,
-					DMM:      dmm.New(dmm.Options{}),
+					DMM:      dmm.New(dmm.Options{Metrics: metricsRegistry}),
 					JavDB:    javdbIntegration,
 					// 可选集成：未配置/禁用时刮削一次都不问它（P6-3）。
 					Translator: translateIntegration,
@@ -246,6 +255,11 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
+	// 库连不上时上面那一段没执行：指标照常出循环与上游两族，驻留那族缺席。
+	if metricsRegistry == nil {
+		metricsRegistry = metrics.New(loopsRegistry, nil, logger)
+	}
+
 	// nil 指针装进接口会变成非 nil 接口：引擎没起来时明确传 nil。
 	var hooks server.Hooks
 	if reconcileRunner != nil {
@@ -267,6 +281,7 @@ func run(logger *slog.Logger) error {
 		Tasks:    taskStore,
 		Sidefx:   sidefxOutbox,
 		Loops:    loopsRegistry,
+		Metrics:  metricsRegistry,
 		Hooks:    hooks,
 		Retrier:  retrier,
 		Logger:   logger,

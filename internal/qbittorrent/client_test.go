@@ -488,7 +488,7 @@ func TestGarbagePreferencesIsProtocol(t *testing.T) {
 func mustLogin(t *testing.T, fake *fakeQbt) *client {
 	t.Helper()
 
-	c, err := newClient(fake.config(), nil)
+	c, err := newClient(fake.config(), nil, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

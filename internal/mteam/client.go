@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 )
 
 const (
@@ -41,6 +43,7 @@ type client struct {
 	baseURL string
 	apiKey  string
 	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // search 按番号搜一次（`mode` 固定 adult）。
@@ -105,6 +108,13 @@ func (c *client) download(ctx context.Context, id string) ([]byte, error) {
 //     真正的种子在那一跳之后；而 API 端点恰好相反 —— 那边任何 302 都是
 //     Cloudflare 按 UA 拦人。两边共用一个策略的话，必然有一边是错的。
 func (c *client) fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	raw, err := c.fetchOnce(ctx, rawURL)
+	metrics.ObserveUpstream(c.metrics, metrics.UpstreamMTeam, err, IsPermanent)
+	return raw, err
+}
+
+// fetchOnce 是 fetch 去掉计量后的那一半。
+func (c *client) fetchOnce(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, protocolError("download", "构造取种子的请求失败: "+err.Error(), err)
@@ -143,7 +153,16 @@ func (c *client) fetch(ctx context.Context, rawURL string) ([]byte, error) {
 }
 
 // do 发一次 POST，把成功响应的 data 解进 out。
+//
+// 这是 API 端点的上游计量出口：每次真正发出的请求记一条（结局按 IsPermanent 分流）。
 func (c *client) do(ctx context.Context, path, contentType string, body io.Reader, out any) error {
+	err := c.post(ctx, path, contentType, body, out)
+	metrics.ObserveUpstream(c.metrics, metrics.UpstreamMTeam, err, IsPermanent)
+	return err
+}
+
+// post 是 do 去掉计量后的那一半。
+func (c *client) post(ctx context.Context, path, contentType string, body io.Reader, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base()+path, body)
 	if err != nil {
 		return protocolError(path, "构造请求失败: "+err.Error(), err)

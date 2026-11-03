@@ -322,7 +322,8 @@ func TestListsReadsEveryPageUntilEmpty(t *testing.T) {
 }
 
 // TestClassifyAndPermanentLockTheMetricHook 钉住 §9 上游指标的分类钩子：
-// auth/protocol 是 permanent（重试无用），business 归 400，network 是 transient。
+// auth 与「协议/签名不兼容」是 permanent（重试无用），business 归 400，
+// network 与 5xx/429 是 transient（上游一时不对，不该触发凭据告警）。
 func TestClassifyAndPermanentLockTheMetricHook(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -334,7 +335,7 @@ func TestClassifyAndPermanentLockTheMetricHook(t *testing.T) {
 		{"签名不兼容", &APIError{Action: "InvalidSignature"}, CodeProtocol, true},
 		{"业务错", &APIError{Message: "同名"}, CodeBusiness, false},
 		{"本地校验", &ValidationError{Message: "短"}, CodeBusiness, false},
-		{"裸 5xx", &ProtocolError{Path: "/x", Status: 500}, CodeProtocol, true},
+		{"裸 5xx", &ProtocolError{Path: "/x", Status: 500}, CodeProtocol, false},
 		{"网络", &TransportError{Path: "/x", Err: context.DeadlineExceeded}, CodeNetwork, false},
 	}
 	for _, tc := range cases {

@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -60,6 +61,8 @@ type Options struct {
 	Referer string
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 dmm 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // Client 是 DMM 播放器 GraphQL 客户端。
@@ -67,6 +70,7 @@ type Client struct {
 	api     string
 	referer string
 	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造客户端。
@@ -83,7 +87,7 @@ func New(opts Options) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultTimeout}
 	}
-	return &Client{api: host + "/graphql", referer: referer, http: httpClient}
+	return &Client{api: host + "/graphql", referer: referer, http: httpClient, metrics: opts.Metrics}
 }
 
 // Actress 是一位女优（内容单的 actresses[] 一项）。
@@ -281,6 +285,13 @@ func contentOf(entry *ppvContent, review *reviewSummary) Content {
 // 是否接受未知，所以不试）。错误先看信封再不看状态码 —— GraphQL 的失败是
 // HTTP 200 + `errors` 键。
 func (c *Client) post(ctx context.Context, query string) (json.RawMessage, error) {
+	raw, err := c.send(ctx, query)
+	metrics.ObserveUpstream(c.metrics, metrics.UpstreamDMM, err, IsPermanent)
+	return raw, err
+}
+
+// send 是 post 去掉计量后的那一半。
+func (c *Client) send(ctx context.Context, query string) (json.RawMessage, error) {
 	body, err := json.Marshal(map[string]string{"query": query})
 	if err != nil {
 		return nil, protocolError("graphql", "拼请求体失败: "+err.Error(), err)
@@ -561,6 +572,20 @@ func (e *Error) Unwrap() error { return e.Err }
 func IsRegionBlocked(err error) bool {
 	var dmmErr *Error
 	return errors.As(err, &dmmErr) && dmmErr.Region
+}
+
+// IsPermanent 报告一次调用失败是否**永久**（规格 §9 的 permanent 钩子）。
+//
+// DMM 是匿名播放器 API，没有凭据可失效，所以它的失败（地区阻断、schema 漂移、
+// 网络抖）在 settings.IsPermanentCode 的口径下全是瞬时——permanent 恒为 false。
+// 这里仍然走同一个分类函数，好让「哪类错算永久」只有一个定义；将来 DMM 若引入
+// 凭据类失败，这里不用改。
+func IsPermanent(err error) bool {
+	var dmmErr *Error
+	if errors.As(err, &dmmErr) {
+		return settings.IsPermanentCode(dmmErr.Code)
+	}
+	return false
 }
 
 func protocolError(op, detail string, err error) error {

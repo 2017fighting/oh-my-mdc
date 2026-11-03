@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -141,12 +142,13 @@ func splitTags(raw string) []string {
 // 只放实测确认过的传输事实：登录拿 SID cookie、请求带 Referer（qbt 的 CSRF 检查）、
 // 4.6.5 的纯文本与 5.x 的 JSON 双解析都在这里。
 type client struct {
-	base *url.URL
-	http *http.Client
-	sid  string
+	base    *url.URL
+	http    *http.Client
+	sid     string
+	metrics metrics.Recorder
 }
 
-func newClient(cfg Config, httpClient *http.Client) (*client, error) {
+func newClient(cfg Config, httpClient *http.Client, recorder metrics.Recorder) (*client, error) {
 	raw := strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
 	if raw == "" {
 		return nil, ValidationError{Message: "qBittorrent 节还没设置地址"}
@@ -158,7 +160,7 @@ func newClient(cfg Config, httpClient *http.Client) (*client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
-	return &client{base: base, http: httpClient}, nil
+	return &client{base: base, http: httpClient, metrics: recorder}, nil
 }
 
 // origin 是 Referer 要用的值：qbt 会校验写请求的 Referer 与 WebUI 地址同源。
@@ -172,11 +174,19 @@ func (c *client) login(ctx context.Context, cfg Config) error {
 	form.Set("username", cfg.Username)
 	form.Set("password", cfg.Password)
 
-	status, body, header, err := c.do(ctx, http.MethodPost, "/api/v2/auth/login",
+	// 登录自己计量，不走 do：4.6.5 用 HTTP 200 + "Fails." 表示密码错，
+	// 状态码看不出凭据失效，只有 parseLoginResponse 的判词认得出来。
+	status, body, header, err := c.send(ctx, http.MethodPost, loginPath,
 		strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
 	if err != nil {
+		c.observe(status, err)
 		return err
 	}
+	if parseErr := parseLoginResponse(status, body); parseErr != nil {
+		c.observe(status, parseErr)
+		return parseErr
+	}
+	c.observe(status, nil)
 
 	for _, cookieHeader := range header.Values("Set-Cookie") {
 		header := http.Header{"Cookie": {cookieHeader}}
@@ -185,8 +195,11 @@ func (c *client) login(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	return parseLoginResponse(status, body)
+	return nil
 }
+
+// loginPath 是登录端点：它是唯一由调用方（而不是状态码）判结局的请求。
+const loginPath = "/api/v2/auth/login"
 
 // parseLoginResponse 双解析登录回执（规格 §5.4）：
 //
@@ -482,7 +495,43 @@ func (c *client) get(ctx context.Context, path string, query url.Values) (int, [
 //
 // 它只负责「请求有没有发出去、回没回来」，非 2xx 的含义留给调用方
 // （404 在 properties 里是「不在」，在别处是错）。
+//
+// 上游计量也在这里：每个请求一条（登录除外——它的 200 也可能是密码错，见 login）。
 func (c *client) do(ctx context.Context, method, path string, body io.Reader, contentType string) (int, []byte, http.Header, error) {
+	status, raw, header, err := c.send(ctx, method, path, body, contentType)
+	c.observe(status, err)
+	return status, raw, header, err
+}
+
+// observe 记一次请求的结局（规格 §9 的 qbittorrent 上游）。
+//
+// 判据在状态码这一层：401/403 是凭据类永久错（会话失效或被 WebUI 拒之门外），
+// 其余 4xx 与 429/5xx、传输错都是瞬时。唯一的例外是 404：它在 properties 里是
+// 「这个种子不在」的正常答案，按状态码只能算请求走通了。
+func (c *client) observe(status int, err error) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+	result := metrics.ResultOK
+	switch {
+	case err != nil:
+		if settings.IsPermanentCode(Classify(err)) {
+			result = metrics.ResultPermanent
+		} else {
+			result = metrics.ResultTransient
+		}
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		result = metrics.ResultPermanent
+	case status == http.StatusNotFound:
+		// 「不在」是答案，不是故障。
+	case status >= 400:
+		result = metrics.ResultTransient
+	}
+	c.metrics.RecordUpstream(metrics.UpstreamQbittorrent, result)
+}
+
+// send 是 do 去掉计量后的那一半。
+func (c *client) send(ctx context.Context, method, path string, body io.Reader, contentType string) (int, []byte, http.Header, error) {
 	u := c.origin() + path
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {

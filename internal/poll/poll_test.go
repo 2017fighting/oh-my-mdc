@@ -11,6 +11,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
+	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/poll"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
@@ -112,6 +113,7 @@ type fixture struct {
 	torrents *fakeTorrents
 	settings *fakeSettings
 	runner   *poll.Runner
+	loops    *loops.Registry
 	// torrentsDir 是 .torrent 备份目录（每个 fixture 一个临时目录）。
 	torrentsDir string
 }
@@ -133,6 +135,7 @@ func newFixture(t *testing.T) *fixture {
 
 	torrentsDir := t.TempDir()
 	store := task.NewStore(database.Pool())
+	registry := loops.NewRegistry()
 	runner := poll.New(poll.Options{
 		Store:       store,
 		Outbox:      sidefx.New(database.Pool()),
@@ -142,6 +145,7 @@ func newFixture(t *testing.T) *fixture {
 		Torrents:    torrents,
 		TorrentsDir: torrentsDir,
 		Pool:        database.Pool(),
+		Loops:       registry,
 		Owner:       "test-owner",
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -153,6 +157,7 @@ func newFixture(t *testing.T) *fixture {
 		torrents:    torrents,
 		settings:    settingsFake,
 		runner:      runner,
+		loops:       registry,
 		torrentsDir: torrentsDir,
 	}
 }
@@ -562,4 +567,50 @@ func hasEvent(row task.TaskRow, kind task.EventKind) bool {
 		}
 	}
 	return false
+}
+
+// TestRunOnceRecordsLoopHealth 钉住 poll 与 §9 循环指标的接线：成功的轮次推 last_success、
+// 失败的轮次只涨 error 计数（last_success 停在原处），门禁没开的轮次什么都不记。
+func TestRunOnceRecordsLoopHealth(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	health := f.loops.Health(loops.Poll)
+	if health.LastOK == nil || !*health.LastOK {
+		t.Fatalf("LastOK = %v, want true", health.LastOK)
+	}
+	if health.LastSuccessAt == nil {
+		t.Fatal("成功的轮次该写 last_success")
+	}
+	if health.Iterations.OK != 1 || health.Iterations.Error != 0 {
+		t.Errorf("Iterations = %+v, want ok=1 error=0", health.Iterations)
+	}
+	successAt := *health.LastSuccessAt
+
+	f.source.listErr = errors.New("JavDB 挂了")
+	if _, err := f.runner.RunOnce(ctx); err == nil {
+		t.Fatal("清单读失败该让这一轮返回错误")
+	}
+	health = f.loops.Health(loops.Poll)
+	if health.LastOK == nil || *health.LastOK {
+		t.Errorf("LastOK = %v, want false", health.LastOK)
+	}
+	if health.LastSuccessAt == nil || !health.LastSuccessAt.Equal(successAt) {
+		t.Errorf("LastSuccessAt = %v, want 停在 %v（失败不刷新它）", health.LastSuccessAt, successAt)
+	}
+	if health.Iterations.OK != 1 || health.Iterations.Error != 1 {
+		t.Errorf("Iterations = %+v, want ok=1 error=1", health.Iterations)
+	}
+
+	// 门禁没开（未初始化）：这一轮不算一次迭代。
+	f.settings.snapshot.Initialized = false
+	if _, err := f.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce(gated): %v", err)
+	}
+	if health := f.loops.Health(loops.Poll); health.Iterations.OK != 1 || health.Iterations.Error != 1 {
+		t.Errorf("门禁轮次不该计入迭代: %+v", health.Iterations)
+	}
 }

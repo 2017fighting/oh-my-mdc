@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -18,12 +19,13 @@ import (
 // 只放实测确认过的传输事实：每请求带 X-Emby-Token（规格 §5.5 点名的鉴权头）、
 // 地址可以带子路径（反向代理的 /jellyfin 前缀）而端点仍拼在它下面。
 type client struct {
-	base  *url.URL
-	http  *http.Client
-	token string
+	base    *url.URL
+	http    *http.Client
+	token   string
+	metrics metrics.Recorder
 }
 
-func newClient(cfg Config, httpClient *http.Client) (*client, error) {
+func newClient(cfg Config, httpClient *http.Client, recorder metrics.Recorder) (*client, error) {
 	raw := strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
 	base, err := url.Parse(raw)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
@@ -32,7 +34,7 @@ func newClient(cfg Config, httpClient *http.Client) (*client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
-	return &client{base: base, http: httpClient, token: strings.TrimSpace(cfg.APIKey)}, nil
+	return &client{base: base, http: httpClient, token: strings.TrimSpace(cfg.APIKey), metrics: recorder}, nil
 }
 
 // systemInfo 读 GET /System/Info：规格 §5.5 把「带 token 读得到」定为「可写」判定。
@@ -105,7 +107,40 @@ func (c *client) post(ctx context.Context, path string, body []byte) (int, []byt
 // do 是一次 Jellyfin 调用的公共部分：拼地址、带 token、读完响应体。
 //
 // 它只负责「请求有没有发出去、回没回来」，非 2xx 的含义留给调用方。
+// 上游计量也在这里：每个请求一条。
 func (c *client) do(ctx context.Context, method, path string, body io.Reader) (int, []byte, error) {
+	status, raw, err := c.send(ctx, method, path, body)
+	c.observe(status, err)
+	return status, raw, err
+}
+
+// observe 记一次请求的结局（规格 §9 的 jellyfin 上游）。
+//
+// 401/403 是凭据类永久错（token 被拒或权限不够）；429/5xx 与传输错是瞬时；
+// 其余 4xx 在 Jellyfin 是「这次请求它不收」（protocol），按 §9 的口径不算凭据失效，
+// 归瞬时重试。
+func (c *client) observe(status int, err error) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+	result := metrics.ResultOK
+	switch {
+	case err != nil:
+		if settings.IsPermanentCode(Classify(err)) {
+			result = metrics.ResultPermanent
+		} else {
+			result = metrics.ResultTransient
+		}
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		result = metrics.ResultPermanent
+	case status < 200 || status >= 300:
+		result = metrics.ResultTransient
+	}
+	c.metrics.RecordUpstream(metrics.UpstreamJellyfin, result)
+}
+
+// send 是 do 去掉计量后的那一半。
+func (c *client) send(ctx context.Context, method, path string, body io.Reader) (int, []byte, error) {
 	u := c.base.JoinPath(path)
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {

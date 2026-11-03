@@ -276,3 +276,53 @@ func TestDueSkipsJobsScheduledInTheFuture(t *testing.T) {
 		t.Fatalf("pending = %+v, want 一条 attempts=1 的排队待办", pending)
 	}
 }
+
+// TestStuckByKindMatchesResidentRows 钉住 /metrics 的 mdc_side_effect_stuck{kind}：
+// 数与库里的驻留行一致，三种 kind 恒在（0 也出现），别的 kind 照实报。
+func TestStuckByKindMatchesResidentRows(t *testing.T) {
+	outbox, _ := newOutbox(t)
+	ctx := context.Background()
+
+	// 三种 kind 各来一条待办；只有 notify 那一条驻留（done_at/next_attempt_at 都 NULL）。
+	for _, kind := range []string{"notify", "list_removal", "jellyfin_refresh"} {
+		if err := outbox.Enqueue(ctx, sidefx.Kind(kind), kind+":seed", nil); err != nil {
+			t.Fatalf("入箱 %s: %v", kind, err)
+		}
+	}
+	jobs, err := outbox.List(ctx, "", 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, job := range jobs {
+		if string(job.Kind) == "notify" {
+			if err := outbox.Stick(ctx, job.ID, "重试耗尽"); err != nil {
+				t.Fatalf("Stick: %v", err)
+			}
+		}
+	}
+
+	counts, err := outbox.StuckByKind(ctx)
+	if err != nil {
+		t.Fatalf("StuckByKind: %v", err)
+	}
+	if counts["notify"] != 1 {
+		t.Errorf("notify = %d, want 1", counts["notify"])
+	}
+	for _, kind := range []string{"list_removal", "jellyfin_refresh"} {
+		if counts[kind] != 0 {
+			t.Errorf("%s = %d, want 0（在排队但没驻留）", kind, counts[kind])
+		}
+	}
+
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	resident, err := outbox.StuckCount(ctx)
+	if err != nil {
+		t.Fatalf("StuckCount: %v", err)
+	}
+	if total != resident {
+		t.Errorf("按 kind 求和 = %d, 与驻留行数 %d 不一致", total, resident)
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -26,16 +27,19 @@ import (
 type Options struct {
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 qbittorrent 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // Integration 是 qBittorrent 集成门面：一个 settings.Tester + 加种/收编/tag 操作。
 type Integration struct {
-	http *http.Client
+	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造 qBittorrent 集成门面。
 func New(opts Options) *Integration {
-	return &Integration{http: opts.HTTP}
+	return &Integration{http: opts.HTTP, metrics: opts.Metrics}
 }
 
 // Outcome 是一次加种的结局。三种都是「这个版本可以继续走流程」。
@@ -250,7 +254,7 @@ func (i *Integration) TransitionTag(ctx context.Context, cfg Config, hash, from,
 
 // login 建客户端并登录一次（每次调用一个 SID，不跨调用复用）。
 func (i *Integration) login(ctx context.Context, cfg Config) (*client, error) {
-	c, err := newClient(cfg, i.http)
+	c, err := newClient(cfg, i.http, i.metrics)
 	if err != nil {
 		return nil, err
 	}

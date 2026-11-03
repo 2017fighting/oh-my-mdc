@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -60,13 +61,14 @@ type client struct {
 	apiKey   string
 	model    string
 	http     *http.Client
+	metrics  metrics.Recorder
 }
 
 // newClient 校验入口地址并装配客户端。
 //
 // base_url 是「OpenAI 兼容端点的根」（用户填 https://api.openai.com/v1），所以这里
 // 补上 /chat/completions：让用户填到补全路径是一次性的坑，不如实现兜住。
-func newClient(cfg Config, httpClient *http.Client) (*client, error) {
+func newClient(cfg Config, httpClient *http.Client, recorder metrics.Recorder) (*client, error) {
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	if base == "" {
 		return nil, ValidationError{Code: settings.CodeBusiness, Message: "AI 翻译节还没保存 base_url"}
@@ -81,13 +83,23 @@ func newClient(cfg Config, httpClient *http.Client) (*client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
-	return &client{endpoint: base + chatPath, apiKey: cfg.APIKey, model: cfg.Model, http: httpClient}, nil
+	return &client{endpoint: base + chatPath, apiKey: cfg.APIKey, model: cfg.Model, http: httpClient, metrics: recorder}, nil
 }
 
 // complete 发一次对话补全，返回模型的文本内容。
 //
 // maxTokens 为 0 表示不设上限（正式翻译）；测试连接传 1。
+//
+// 上游计量挂在这一次出口上：401/403 是凭据类永久错（换 key），
+// 400/404/422 也是永久（改 base_url/model），网络/429/5xx 与信封错是瞬时。
 func (c *client) complete(ctx context.Context, messages []chatMessage, maxTokens int) (string, error) {
+	text, err := c.request(ctx, messages, maxTokens)
+	metrics.ObserveUpstream(c.metrics, metrics.UpstreamOpenAI, err, IsPermanent)
+	return text, err
+}
+
+// request 是 complete 去掉计量后的那一半。
+func (c *client) request(ctx context.Context, messages []chatMessage, maxTokens int) (string, error) {
 	payload, err := json.Marshal(chatRequest{
 		Model:       c.model,
 		Temperature: 0,

@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -38,12 +39,15 @@ type Options struct {
 	Host string
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 javdb 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // Integration 是 JavDB 集成门面：一个 settings.Tester + 向导辅助操作。
 type Integration struct {
-	host string
-	http *http.Client
+	host    string
+	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造 JavDB 集成门面。
@@ -52,7 +56,7 @@ func New(opts Options) *Integration {
 	if host == "" {
 		host = DefaultHost
 	}
-	return &Integration{host: host, http: opts.HTTP}
+	return &Integration{host: host, http: opts.HTTP, metrics: opts.Metrics}
 }
 
 // client 用一份设置原文装配 appapi 客户端。
@@ -65,6 +69,7 @@ func (i *Integration) client(token string) *appapi.Client {
 		Identity: appapi.DefaultIdentity(),
 		Signer:   appapi.NewSigner(),
 		HTTP:     i.http,
+		Metrics:  i.metrics,
 	}
 }
 

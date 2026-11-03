@@ -89,6 +89,43 @@ func (o *Outbox) StuckCount(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+// StuckByKind 数驻留待办（done_at IS NULL AND next_attempt_at IS NULL），按 kind 分组。
+//
+// 三种 kind 恒在（0 也出现）：/metrics 的 mdc_side_effect_stuck{kind} 与面板「需人工」
+// 都读它，缺一个 kind 会让「这一族有没有驻留」变成一个要猜的问题。
+// 库里出现了别的 kind（旧版本留下的行）也照实报，不吞。
+func (o *Outbox) StuckByKind(ctx context.Context) (map[string]int, error) {
+	// 该有哪些 kind 由 kindSpecs 说了算（policy.go）：增一类待办不需要来这里补一遍。
+	counts := make(map[string]int, len(kindSpecs))
+	for kind := range kindSpecs {
+		counts[string(kind)] = 0
+	}
+
+	rows, err := o.pool.Query(ctx,
+		`SELECT kind, count(*) FROM side_effect
+		 WHERE done_at IS NULL AND next_attempt_at IS NULL
+		 GROUP BY kind`)
+	if err != nil {
+		return nil, fmt.Errorf("sidefx: 按 kind 数驻留待办: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			kind  string
+			count int
+		)
+		if err := rows.Scan(&kind, &count); err != nil {
+			return nil, fmt.Errorf("sidefx: 读驻留待办计数: %w", err)
+		}
+		counts[kind] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sidefx: 读驻留待办计数: %w", err)
+	}
+	return counts, nil
+}
+
 func marshalPayload(payload any) ([]byte, error) {
 	if payload == nil {
 		return []byte("{}"), nil

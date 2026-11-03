@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -40,12 +41,15 @@ type Options struct {
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	// 注入的客户端也会被覆写重定向策略（见 apiClient/cdnClient）。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 mteam 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // Integration 是 M-Team 集成门面：一个 settings.Tester + 取种。
 type Integration struct {
-	host string
-	http *http.Client
+	host    string
+	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造 M-Team 集成门面。
@@ -54,7 +58,7 @@ func New(opts Options) *Integration {
 	if host == "" {
 		host = DefaultHost
 	}
-	return &Integration{host: host, http: opts.HTTP}
+	return &Integration{host: host, http: opts.HTTP, metrics: opts.Metrics}
 }
 
 // Torrent 是一次取种的产物：选中的那一条 + 它的字节 + 本地算出的 infohash。
@@ -150,7 +154,7 @@ func (i *Integration) Resolve(ctx context.Context, apiKey, number string) (Torre
 
 // client 用一份 api key 装配 HTTP 客户端。
 func (i *Integration) client(apiKey string) *client {
-	return &client{baseURL: i.host, apiKey: apiKey, http: i.http}
+	return &client{baseURL: i.host, apiKey: apiKey, http: i.http, metrics: i.metrics}
 }
 
 // 编译期确认门面满足测试接缝。

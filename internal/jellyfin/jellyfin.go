@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -52,16 +53,19 @@ type settingsInput interface {
 type Options struct {
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 jellyfin 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // Integration 是 Jellyfin 集成门面：一个 settings.Tester + 目录级刷新。
 type Integration struct {
-	http *http.Client
+	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造 Jellyfin 集成门面。
 func New(opts Options) *Integration {
-	return &Integration{http: opts.HTTP}
+	return &Integration{http: opts.HTTP, metrics: opts.Metrics}
 }
 
 // SystemInfo 是 GET /System/Info 里本项目要用到的两项（chip 文案用）。
@@ -88,7 +92,7 @@ func (i *Integration) Test(ctx context.Context, _ settings.Section, input settin
 		return testResult(err)
 	}
 
-	c, err := newClient(cfg, i.http)
+	c, err := newClient(cfg, i.http, i.metrics)
 	if err != nil {
 		return testResult(err)
 	}

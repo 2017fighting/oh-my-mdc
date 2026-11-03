@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
 
@@ -100,6 +101,8 @@ type Options struct {
 	Host string
 	// HTTP 允许注入测试用的 transport；空则用带超时的默认客户端。
 	HTTP *http.Client
+	// Metrics 记每次上游请求的结局（规格 §9 的 telegram 指标）；nil 时什么都不记。
+	Metrics metrics.Recorder
 }
 
 // httpClient 是本包对 *http.Client 的最小要求（测试替换用）。
@@ -109,8 +112,9 @@ type httpClient interface {
 
 // Integration 是 Telegram 集成门面：一个 settings.Tester + 一个 Notifier。
 type Integration struct {
-	host string
-	http *http.Client
+	host    string
+	http    *http.Client
+	metrics metrics.Recorder
 }
 
 // New 构造 Telegram 集成门面。
@@ -119,7 +123,7 @@ func New(opts Options) *Integration {
 	if host == "" {
 		host = DefaultHost
 	}
-	return &Integration{host: host, http: opts.HTTP}
+	return &Integration{host: host, http: opts.HTTP, metrics: opts.Metrics}
 }
 
 // testMessage 是「测试连接」第二步发出去的那条消息（固定文案，无用户内容）。
@@ -140,7 +144,7 @@ func (i *Integration) Test(ctx context.Context, _ settings.Section, input settin
 		return testResult(ValidationError{Code: settings.CodeChatUnavailable, Message: "Telegram 节还没设置 chat id"})
 	}
 
-	c, err := newClient(i.host, cfg, i.http)
+	c, err := newClient(i.host, cfg, i.http, i.metrics)
 	if err != nil {
 		return testResult(err)
 	}
@@ -187,7 +191,7 @@ func (i *Integration) Notify(ctx context.Context, cfg Config, event string, payl
 		return err
 	}
 
-	c, err := newClient(i.host, cfg, i.http)
+	c, err := newClient(i.host, cfg, i.http, i.metrics)
 	if err != nil {
 		return err
 	}
