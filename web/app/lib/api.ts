@@ -328,10 +328,14 @@ export const api = {
    * 人工重试（规格 §6.1 人工重试行）：force=false 是「重试」，force=true 是「强制重刮」。
    * 版本侧的结局（被拒、加种失败）是 200 里的逐版结果，不是 HTTP 错误。
    */
-  retryTask: (movieID: string, force = false) =>
+  /**
+   * 重试 / 强制重刮。infohashes 为空就是整个任务（抽屉用），
+   * 给了就只动这几条（面板的行是版本组，按钮写几条就只动几条）。
+   */
+  retryTask: (movieID: string, force = false, infohashes?: string[]) =>
     request<TaskRetryResult>(`/api/tasks/${encodeURIComponent(movieID)}/retry`, {
       method: "POST",
-      body: JSON.stringify({ force }),
+      body: JSON.stringify(infohashes?.length ? { force, infohashes } : { force }),
     }),
 
   /** 「需要人工」区的任务侧两半：失败版本与停滞下载（规格 §8.2）。 */

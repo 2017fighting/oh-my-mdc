@@ -17,14 +17,16 @@ import (
 
 // stubRetrier 记录调用参数并回一份固定结果。
 type stubRetrier struct {
-	movieID string
-	force   bool
-	result  retry.Result
-	err     error
+	movieID    string
+	infohashes []string
+	force      bool
+	result     retry.Result
+	err        error
 }
 
-func (s *stubRetrier) Retry(_ context.Context, movieID string, force bool) (retry.Result, error) {
+func (s *stubRetrier) Retry(_ context.Context, movieID string, infohashes []string, force bool) (retry.Result, error) {
 	s.movieID = movieID
+	s.infohashes = infohashes
 	s.force = force
 	return s.result, s.err
 }
@@ -58,6 +60,9 @@ func TestTaskRetryPassesForceAndReturnsPerVersionOutcomes(t *testing.T) {
 	rec := jsonOf(t, send(t, handler, http.MethodPost, "/api/tasks/YwrO3B/retry", `{"force":true}`))
 	if stub.movieID != "YwrO3B" || !stub.force {
 		t.Errorf("Retry(%q, force=%v), want (YwrO3B, true)", stub.movieID, stub.force)
+	}
+	if len(stub.infohashes) != 0 {
+		t.Errorf("infohashes = %v, want 空（没点名就整个任务）", stub.infohashes)
 	}
 	if rec["ok"] != true || rec["movie_id"] != "YwrO3B" || rec["force"] != true {
 		t.Errorf("回执 = %v, want ok/movie_id/force", rec)
@@ -93,6 +98,20 @@ func TestTaskRetryDefaultsToPlainRetry(t *testing.T) {
 		if rec["ok"] != true {
 			t.Errorf("body=%q: 回执 = %v, want ok", body, rec)
 		}
+	}
+}
+
+// TestTaskRetryPassesNamedVersions 钉住「按钮写几条就动几条」：
+// 面板的行是版本组，点名 infohashes 之后后端不能偷偷重试整个任务。
+func TestTaskRetryPassesNamedVersions(t *testing.T) {
+	stub := &stubRetrier{result: retry.Result{MovieID: "YwrO3B"}}
+	handler := retryHandler(t, stub)
+
+	body := `{"force":false,"infohashes":["aaa","bbb"]}`
+	send(t, handler, http.MethodPost, "/api/tasks/YwrO3B/retry", body)
+
+	if len(stub.infohashes) != 2 || stub.infohashes[0] != "aaa" || stub.infohashes[1] != "bbb" {
+		t.Errorf("infohashes = %v, want [aaa bbb]", stub.infohashes)
 	}
 }
 

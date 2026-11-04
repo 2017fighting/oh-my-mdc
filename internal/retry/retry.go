@@ -135,14 +135,34 @@ func New(opts Options) *Runner {
 	}
 }
 
-// Retry 对一条任务的全部版本跑一次人工重试。
+// Retry 对一条任务的人工重试跑一次。
+//
+// infohashes 为空就动这条任务的**全部**版本（抽屉里的「强制重刮」要这个语义）；
+// 给了就只动这几条——面板的行是**版本组**，按钮上写「重试 2 条版本」就必须只动那 2 条。
+// 尤其是组里混着宿主机病因（权限/只读/满盘）的版本时：那种重试毫无意义，
+// 混在全任务重试里就会跟着一起被再放一遍（remedy.ts 刚立了不许给假动作的规矩）。
 //
 // 逐条处理、逐条留结论：某一条被拒（租约被别人拿着、qbt 仍在下载）不影响其它版本。
 // 返回的 error 只描述**引擎本身**的故障（数据库不可用），版本侧的结论都在 Result 里。
-func (r *Runner) Retry(ctx context.Context, movieID string, force bool) (Result, error) {
+func (r *Runner) Retry(ctx context.Context, movieID string, infohashes []string, force bool) (Result, error) {
 	versions, err := r.store.VersionsOf(ctx, movieID)
 	if err != nil {
 		return Result{}, err
+	}
+	if len(infohashes) > 0 {
+		want := make(map[string]struct{}, len(infohashes))
+		for _, hash := range infohashes {
+			want[hash] = struct{}{}
+		}
+		selected := make([]task.Version, 0, len(versions))
+		for _, version := range versions {
+			if _, ok := want[version.Infohash]; ok {
+				selected = append(selected, version)
+			}
+		}
+		// 点名了却一条也对不上（旧的页面、手改的请求）：回空结果，
+		// 面板会说「这条任务还没有版本」，而不是偷偷重试整个任务。
+		versions = selected
 	}
 
 	result := Result{MovieID: movieID, Versions: make([]Outcome, 0, len(versions))}

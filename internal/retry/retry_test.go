@@ -254,7 +254,7 @@ func TestRetryRewindsFailedScrapeToProcessingStart(t *testing.T) {
 	f := newFixture(t)
 	f.seedVersion(t, hash, func(id string) { f.failedScrape(t, id) })
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestRetryIsIdempotentOnAProcessingVersion(t *testing.T) {
 	})
 
 	for round := 0; round < 2; round++ {
-		if _, err := f.runner.Retry(context.Background(), movieID, false); err != nil {
+		if _, err := f.runner.Retry(context.Background(), movieID, nil, false); err != nil {
 			t.Fatalf("第 %d 次 Retry: %v", round+1, err)
 		}
 	}
@@ -308,7 +308,7 @@ func TestRetrySkipsFinishedVersionsUnlessForced(t *testing.T) {
 	f := newFixture(t)
 	f.seedVersion(t, hash, func(id string) { f.finished(t, id) })
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestRetryForceRescrapesFinishedVersionAndKeepsTheComparisonBaseline(t *test
 	f.exec(t, `UPDATE task SET raw_snapshot = '{"javdb":{"movie":{"id":"YwrO3B","title":"旧标题"}},"dmm_content":{"ppvContent":{"title":"旧日文标题"}}}'::jsonb
 		WHERE movie_id = $1`, movieID)
 
-	result, err := f.runner.Retry(context.Background(), movieID, true)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, true)
 	if err != nil {
 		t.Fatalf("Retry(force): %v", err)
 	}
@@ -393,7 +393,7 @@ func TestRetryWithForceAlsoSkipsReuseForAFailedVersion(t *testing.T) {
 			WHERE infohash = $1`, id)
 	})
 
-	result, err := f.runner.Retry(context.Background(), movieID, true)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, true)
 	if err != nil {
 		t.Fatalf("Retry(force): %v", err)
 	}
@@ -416,7 +416,7 @@ func TestRetryReaddsFailedDownloadingFromStoredMagnet(t *testing.T) {
 		 WHERE infohash = $1`, id)
 	})
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestRetryReaddsTorrentDeliveryFromItsBackup(t *testing.T) {
 		 WHERE infohash = $1`, id, backup)
 	})
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestRetryRefetchesAMissingTorrentBackup(t *testing.T) {
 		 WHERE infohash = $1`, id, missing)
 	})
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestRetryReportsAFailedReaddWhenTheTorrentIsGone(t *testing.T) {
 			 WHERE infohash = $1`, id, missing)
 		})
 
-		result, err := f.runner.Retry(context.Background(), movieID, false)
+		result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 		if err != nil {
 			t.Fatalf("Retry: %v", err)
 		}
@@ -593,7 +593,7 @@ func TestRetryReportsAFailedReaddWhenTheTorrentIsGone(t *testing.T) {
 			 WHERE infohash = $1`, id, missing)
 		})
 
-		result, err := f.runner.Retry(context.Background(), movieID, false)
+		result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 		if err != nil {
 			t.Fatalf("Retry: %v", err)
 		}
@@ -629,7 +629,7 @@ func TestRetryRefusesToRedownloadWhatQbtIsStillDownloading(t *testing.T) {
 	})
 	f.qbt.found[hash] = qbittorrent.TorrentStatus{Hash: hash, Progress: 0.42, State: "downloading"}
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestRetryKeepsFailedWhenReaddFails(t *testing.T) {
 	})
 	f.qbt.ensureErr = errors.New("qBittorrent 拒绝了加种：boom")
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestRetryKeepsFailedWhenReaddFails(t *testing.T) {
 
 	// 再试一次：这次加种成功，版本回下载中。
 	f.qbt.ensureErr = nil
-	result, err = f.runner.Retry(context.Background(), movieID, false)
+	result, err = f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("第二次 Retry: %v", err)
 	}
@@ -697,7 +697,7 @@ func TestRetryDoesNotStealALeasedVersion(t *testing.T) {
 		t.Fatalf("Claim(别人): %v", err)
 	}
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -714,7 +714,7 @@ func TestRetryDoesNotStealALeasedVersion(t *testing.T) {
 func TestRetryWithoutTaskIsNotFound(t *testing.T) {
 	f := newFixture(t)
 
-	if _, err := f.runner.Retry(context.Background(), "no-such-movie", false); !errors.Is(err, task.ErrTaskNotFound) {
+	if _, err := f.runner.Retry(context.Background(), "no-such-movie", nil, false); !errors.Is(err, task.ErrTaskNotFound) {
 		t.Fatalf("Retry(未知任务) = %v, want ErrTaskNotFound", err)
 	}
 }
@@ -730,7 +730,7 @@ func TestRetryDoesNotReAnnounceAnAlreadyTrackedTorrent(t *testing.T) {
 	})
 	f.qbt.found[hash] = qbittorrent.TorrentStatus{Hash: hash, Progress: 1, State: "uploading"}
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -752,7 +752,7 @@ func TestRetryReaddsAStaleDownloadingVersionWhoseSeedIsGone(t *testing.T) {
 	f := newFixture(t)
 	f.seedVersion(t, hash, nil)
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -776,7 +776,7 @@ func TestRetryNeverTouchesATorrentQbtIsStillDownloadingEvenWhenPending(t *testin
 	})
 	f.qbt.found[hash] = qbittorrent.TorrentStatus{Hash: hash, Progress: 0.5, State: "downloading"}
 
-	result, err := f.runner.Retry(context.Background(), movieID, false)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, false)
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -801,7 +801,7 @@ func TestRetryWithForceOnADownloadingVersionFlagsTheNextScrape(t *testing.T) {
 		 WHERE infohash = $1`, id)
 	})
 
-	result, err := f.runner.Retry(context.Background(), movieID, true)
+	result, err := f.runner.Retry(context.Background(), movieID, nil, true)
 	if err != nil {
 		t.Fatalf("Retry(force): %v", err)
 	}
@@ -811,5 +811,48 @@ func TestRetryWithForceOnADownloadingVersionFlagsTheNextScrape(t *testing.T) {
 	}
 	if version := f.version(t, hash); !version.ForceRescrape {
 		t.Error("库里的 force_rescrape = false, want true")
+	}
+}
+
+// TestRetryOnlyTouchesTheNamedVersions 钉住面板那一行的爆炸半径。
+//
+// 面板的行是**版本组**，按钮上写「重试 2 条版本」时后端必须只动那 2 条：
+// 同组里还有一条宿主机病因（权限/只读/满盘）的版本时，它不该被顺手再放一遍——
+// remedy 模块刚立过「重试不会变好就别给按钮」的规矩，接口不能反着来。
+func TestRetryOnlyTouchesTheNamedVersions(t *testing.T) {
+	f := newFixture(t)
+	f.seedVersion(t, hash, func(id string) { f.failedScrape(t, id) })
+	f.seedVersion(t, otherHash, func(id string) {
+		f.exec(t, `UPDATE task_version
+		 SET status = 'failed', error_phase = 'organize',
+		     error_reason = 'permission denied: /media/movies/ABP-123', attempts = 2, next_attempt_at = NULL
+		 WHERE infohash = $1`, id)
+	})
+
+	result, err := f.runner.Retry(context.Background(), movieID, []string{hash}, false)
+	if err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	if len(result.Versions) != 1 || result.Versions[0].Infohash != hash {
+		t.Fatalf("结果 = %+v, want 只有点名的 %s", result.Versions, hash)
+	}
+
+	// 没被点名的那条原封不动：状态仍是 failed，时间线上没有它的 manual_retry。
+	untouched := f.version(t, otherHash)
+	if untouched.Status != task.StatusFailed || untouched.Attempts != 2 {
+		t.Errorf("未点名的版本 = (%q, attempts=%d), want (failed, 2)", untouched.Status, untouched.Attempts)
+	}
+	retries := f.manualRetries(t)
+	if len(retries) != 1 || retries[0].Infohash != hash {
+		t.Errorf("manual_retry 事件 = %+v, want 只有 %s 一条", retries, hash)
+	}
+
+	// 点名了但一条也对不上：回空结果，不退回「整个任务」。
+	none, err := f.runner.Retry(context.Background(), movieID, []string{"deadbeef"}, false)
+	if err != nil {
+		t.Fatalf("Retry(陌生 infohash): %v", err)
+	}
+	if len(none.Versions) != 0 {
+		t.Errorf("结果 = %+v, want 空（点名的版本不属于这个任务）", none.Versions)
 	}
 }

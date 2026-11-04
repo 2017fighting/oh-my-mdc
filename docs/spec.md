@@ -320,7 +320,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `GET /api/overview` | `{initialized, paused, counts:{downloading,processing,finished,failed}, loops:{poll/reconcile/sidefx:{last_run_at,last_ok}}}`。`counts.failed` 是**全部版本都失败**的任务数（与 `?state=failed` 同一口径）；「有几件事要动手」不在这里，它是 `/api/attention` 的行数——两个口径分开报，不再合成一个 `needs_attention` |
 | `GET /api/tasks?state=&q=&page=` | 任务行（`task_state` 视图 + 版本摘要 chip 数据） |
 | `GET /api/tasks/{movie_id}` | 任务 + 版本列表 + 最近事件（抽屉数据） |
-| `POST /api/tasks/{movie_id}/retry` | `{force: bool=false}`，语义照 §6.1 人工重试行；回执 `{results:[{infohash, action, from_state, to_state, reason, force_rescrape}]}`——逐版结果，版本侧被拒/失败不是 HTTP 错误 |
+| `POST /api/tasks/{movie_id}/retry` | `{force: bool=false, infohashes?: [..]}`，语义照 §6.1 人工重试行；`infohashes` 省略＝整个任务（抽屉的强制重刮），给了就**只动这几条版本**（面板的行是版本组，按钮写几条就只动几条）；回执 `{results:[{infohash, action, from_state, to_state, reason, force_rescrape}]}`——逐版结果，版本侧被拒/失败不是 HTTP 错误 |
 | `GET /api/events?movie_id=&limit=` | 事件时间线 |
 | `GET /api/attention` | 「需要人工」区的任务侧两半（#26 落地 §8.2 时新增）：`{failed:[{movie_id,number,infohash,phase,reason,at}], stalled:[…], failed_truncated, stalled_truncated}`；每半上限 50 行，被截断时 `*_truncated=true`（面板据此写「50+」）。驻留副作用由下面那一条提供 |
 | `GET /api/side-effects?state=pending\|stuck` | 副作用队列（stuck = §4.2 驻留） |

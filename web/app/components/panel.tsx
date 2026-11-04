@@ -489,7 +489,13 @@ function NeedsAttention({
                         kind="failed"
                         now={now}
                         busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
-                        onRetry={() => void taskRetry.retry(group.movieID, false, group.number)}
+                        onRetry={(infohashes) =>
+                          void taskRetry.retry(group.movieID, false, {
+                            title: group.number,
+                            infohashes,
+                            names: versionNames(group),
+                          })
+                        }
                         onOpenTask={() => onOpenTask(group.movieID)}
                       />
                     ))}
@@ -508,7 +514,13 @@ function NeedsAttention({
                         kind="stalled"
                         now={now}
                         busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
-                        onRetry={() => void taskRetry.retry(group.movieID, false, group.number)}
+                        onRetry={(infohashes) =>
+                          void taskRetry.retry(group.movieID, false, {
+                            title: group.number,
+                            infohashes,
+                            names: versionNames(group),
+                          })
+                        }
                         onOpenTask={() => onOpenTask(group.movieID)}
                       />
                     ))}
@@ -684,13 +696,16 @@ function VersionGroup({
   kind: "failed" | "stalled";
   now: number;
   busy: boolean;
-  onRetry: () => void;
+  /** 只把这条组里还有救的版本交出去：按钮上的数字就是会动的条数。 */
+  onRetry: (infohashes: string[]) => void;
   onOpenTask: () => void;
 }) {
   const remedyOf = (item: AttentionItem) =>
     kind === "failed" ? remedyForFailure(item) : remedyForStalled();
-  // 一组里只要有一条还有救，就给重试；宿主机那一条自己不给（补法已经写了原因）。
-  const retryable = group.items.some((item) => remedyOf(item).retryable);
+  // 宿主机病因（权限/只读/满盘）那条自己也重试不好：不点名、不进按钮，也不跟着被重试。
+  // 以前只要组里有一条有救，按钮就会把整个任务一起重新发下去，那条永远失败的版本
+  // 于是从「重试不会变好」的规矩里滑了过去。
+  const retryTargets = group.items.filter((item) => remedyOf(item).retryable);
 
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
@@ -736,10 +751,14 @@ function VersionGroup({
         </ul>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-        {retryable ? (
-          <RowAction variant="outline" disabled={busy} onClick={onRetry}>
+        {retryTargets.length > 0 ? (
+          <RowAction
+            variant="outline"
+            disabled={busy}
+            onClick={() => onRetry(retryTargets.map((item) => item.infohash))}
+          >
             <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
-            {group.items.length > 1 ? `重试全部 ${group.items.length} 条版本` : "重试"}
+            {retryTargets.length > 1 ? `重试 ${retryTargets.length} 条版本` : "重试"}
           </RowAction>
         ) : null}
         <RowAction variant="ghost" onClick={onOpenTask}>
@@ -811,8 +830,30 @@ function versionIdentity(item: AttentionItem): string {
   return item.label ? `${item.label} · ${source}` : source;
 }
 
+/**
+ * versionNames 是 infohash → 身份标签的映射。
+ *
+ * 回执按「中文 / 破解」说话，不拿 8 位哈希当名字：屏幕上没有任何地方写着哈希，
+ * 多版本回执里的 `3f9ac1b7：回到加工开头` 是一条人对不上的信息。
+ */
+function versionNames(group: FailureGroup): Record<string, string> {
+  return Object.fromEntries(
+    group.items.map((item) => [item.infohash, item.label || sourceLabel(item.source)]),
+  );
+}
+
 /** RetryNotice 是一次任务重试的结果提示：成功用 ok，被拒/失败用 warn。 */
 type RetryNotice = { tone: "ok" | "warn"; text: string };
+
+/** RetryPlan 是一次重试的作用域：叫什么名字、只动哪几条、它们各自叫什么。 */
+type RetryPlan = {
+  /** 回执上的名字（番号）；不给就用 movie_id。 */
+  title?: string;
+  /** 只动这几条版本；不给＝整个任务（抽屉的强制重刮要这个语义）。 */
+  infohashes?: string[];
+  /** infohash → 身份标签，回执按它说话。 */
+  names?: Record<string, string>;
+};
 
 /**
  * useTaskRetry 是人工重试（规格 §6.1 / P13）的共用逻辑：忙位、错误、逐版结论。
@@ -845,7 +886,8 @@ function useTaskRetry(
   }, []);
 
   const retry = React.useCallback(
-    async (movieID: string, force: boolean, title = movieID) => {
+    async (movieID: string, force: boolean, plan?: RetryPlan) => {
+      const title = plan?.title ?? movieID;
       // 按下时元素还在；刷新之后它就没了，所以先把它的引用拿在手上。
       const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const key = taskRetryKey(movieID, force);
@@ -861,8 +903,8 @@ function useTaskRetry(
         return next;
       });
       try {
-        const result = await api.retryTask(movieID, force);
-        const notice = summarizeRetry(result.results);
+        const result = await api.retryTask(movieID, force, plan?.infohashes);
+        const notice = summarizeRetry(result.results, plan?.names);
         setNotices((current) => ({ ...current, [movieID]: notice }));
         onReceipt?.({ title, ...notice });
         await onRefresh();
@@ -910,32 +952,39 @@ function taskRetryKey(movieID: string, force: boolean): string {
  * 回执现在落在出事的那一行里，所以单版本时不再报 8 位哈希（那一行已经写了番号）；
  * 只有一任务多版本时，哈希才是分流的关键。
  */
-function summarizeRetry(results: TaskRetryOutcome[]): RetryNotice {
+function summarizeRetry(
+  results: TaskRetryOutcome[],
+  names?: Record<string, string>,
+): RetryNotice {
   if (results.length === 0) {
     return { tone: "warn", text: "这条任务还没有版本，没有可重试的东西。" };
   }
+
+  // 名字优先用版本自己的判别词；抽屉（没有 names）仍然回落到短哈希。
+  const prefixOf = (result: TaskRetryOutcome) =>
+    names?.[result.infohash] || (results.length > 1 ? shortHash(result.infohash) : "");
 
   const blocked = results.filter((result) => result.action === "skipped" || result.action === "failed");
   if (blocked.length > 0) {
     return {
       tone: "warn",
-      text: blocked.map((result) => labelResult(result, results.length > 1)).join("；"),
+      text: blocked.map((result) => labelResult(result, prefixOf(result))).join("；"),
     };
   }
 
   // 不再前缀「已下发：」：回执与抽屉的提示都自己带结局语气词，
   // 正文只说发生了什么（「回到加工开头」），一句话只有一个说话人。
-  const done = results.map((result) => labelResult(result, results.length > 1));
+  const done = results.map((result) => labelResult(result, prefixOf(result)));
   return { tone: "ok", text: done.join("；") };
 }
 
-/** labelResult 拼一条版本结局：只有多于一条版本时才前缀哈希。 */
-function labelResult(result: TaskRetryOutcome, showHash = false): string {
+/** labelResult 拼一条版本结局：有名字就前缀上去，没有就不前缀。 */
+function labelResult(result: TaskRetryOutcome, prefix = ""): string {
   const body =
     result.action === "skipped" || result.action === "failed"
       ? result.reason
       : retryActionLabel(result.action);
-  return showHash ? `${shortHash(result.infohash)}：${body}` : body;
+  return prefix ? `${prefix}：${body}` : body;
 }
 
 function retryActionLabel(action: TaskRetryOutcome["action"]): string {

@@ -39,7 +39,7 @@ type Pinger interface {
 //
 // 只有一件事：对一条任务的全部版本跑一次重试，逐条回结论（规格 §6.1 人工重试行）。
 type Retrier interface {
-	Retry(ctx context.Context, movieID string, force bool) (retry.Result, error)
+	Retry(ctx context.Context, movieID string, infohashes []string, force bool) (retry.Result, error)
 }
 
 // Hooks 是 qBittorrent autorun 回调的接缝（真实实现是 reconcile.Runner）。

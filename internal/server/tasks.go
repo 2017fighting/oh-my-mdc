@@ -293,9 +293,13 @@ func toAttentionItem(item task.AttentionItem) attentionItem {
 const maxRetryBody = 4 << 10
 
 // retryRequest 是 POST /api/tasks/{movie_id}/retry 的请求体（规格 §8.4）。
-// 缺省（空请求体或只有 {}）就是 force=false。
+//
+// 缺省（空请求体或只有 {}）就是 force=false、整个任务。
+// 给了 infohashes 就**只动这几条版本**：面板的行是版本组，按钮上写「重试 2 条版本」
+// 就得只动那 2 条（尤其是组里混着宿主机病因的版本时，它们不该被一起再放一遍）。
 type retryRequest struct {
-	Force bool `json:"force"`
+	Force      bool     `json:"force"`
+	Infohashes []string `json:"infohashes"`
 }
 
 // taskRetryBody 是 POST /api/tasks/{movie_id}/retry 的回执。
@@ -342,7 +346,7 @@ func (s *server) taskRetry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := s.retrier.Retry(r.Context(), r.PathValue("movie_id"), request.Force)
+	result, err := s.retrier.Retry(r.Context(), r.PathValue("movie_id"), request.Infohashes, request.Force)
 	if err != nil {
 		s.writeTaskError(w, err)
 		return
