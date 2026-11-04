@@ -1,4 +1,5 @@
 import * as React from "react";
+import { Link } from "react-router";
 import { ChevronLeft, ChevronRight, CircleHelp, Loader2, Plus, RefreshCw } from "lucide-react";
 import { cn } from "cn";
 
@@ -182,16 +183,36 @@ const steps: StepSpec[] = [
   },
 ];
 
+/** 八节的地址顺序：`/settings/<section>` 认的就是这张表。 */
+export const SECTION_ORDER: SectionName[] = steps.map((step) => step.section);
+
+/** isSectionName 收窄地址里的一段，认不出的一律回落第一节。 */
+export function isSectionName(value: string | undefined): value is SectionName {
+  return value !== undefined && (SECTION_ORDER as string[]).includes(value);
+}
+
+/**
+ * Wizard 是集成设置的八节（规格 §8.1）：一屏一节，一步一张表。
+ *
+ * 节由地址决定（`/settings/<section>`），不是内存里的步号：于是「去 Telegram 设置」
+ * 落到 Telegram 那一节，可书签、可刷新。未初始化时同一条路由渲染成向导——多一个
+ * 门禁卡、步骤徽章与上一步/下一步；初始化之后它就是八个可寻址的分区。
+ */
 export function Wizard({
   snapshot,
+  section: sectionName,
+  initialized,
   onRefresh,
-  onDone,
 }: {
   snapshot: ConfigSnapshot;
+  section: SectionName;
+  initialized: boolean;
   onRefresh: () => Promise<void>;
-  onDone: () => void;
 }) {
-  const [stepIndex, setStepIndex] = React.useState(0);
+  const stepIndex = Math.max(
+    0,
+    steps.findIndex((candidate) => candidate.section === sectionName),
+  );
   const [notice, setNotice] = React.useState<{
     tone: "ok" | "warn" | "bad" | "muted";
     text: string;
@@ -201,6 +222,14 @@ export function Wizard({
   const step = steps[stepIndex];
   const section = snapshot.sections[step.section];
   const testedSection = step.test?.section ? snapshot.sections[step.test.section] : section;
+
+  // 换节时把上一节的保存回执收掉：它说的是另一张表的事。
+  // 在渲染期对齐，而不是放进 effect——后者会多跑一轮级联渲染。
+  const [seenSection, setSeenSection] = React.useState(step.section);
+  if (seenSection !== step.section) {
+    setSeenSection(step.section);
+    setNotice(null);
+  }
 
   // 表单不做成 effect 里的状态：草稿带着「它属于哪一节哪个 revision」的钥匙。
   // 换步或保存后（revision 变了）自然回落到服务器最新值 —— 敏感字段永远是空串
@@ -269,16 +298,45 @@ export function Wizard({
     }
   };
 
-  const goTo = (next: number) => {
-    setStepIndex(Math.max(0, Math.min(steps.length - 1, next)));
-    setNotice(null);
-  };
-
   const isLast = stepIndex === steps.length - 1;
+  const railLabel = initialized ? "设置分区" : "向导步骤";
 
   return (
     <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[230px_1fr]">
-      <ol className="hidden space-y-1 lg:block" aria-label="向导步骤">
+      {/* 窄屏：一条可横滑的分区链。以前 lg 以下整条导航是 hidden，手机上「去 Telegram 设置」
+          只能靠六个「下一步」穿过去；现在每一节都是一个地址。 */}
+      {/* min-w-0：grid 子项默认 min-width:auto，横滑链会把整列撑出屏幕。 */}
+      <nav aria-label={railLabel} className="min-w-0 lg:hidden">
+        <ol className="-mx-1 flex gap-1 overflow-x-auto px-1 py-1">
+          {steps.map((candidate, index) => {
+            const configured =
+              candidate.section === "app"
+                ? snapshot.initialized
+                : snapshot.sections[candidate.section].configured;
+            const current = index === stepIndex;
+            return (
+              <li key={candidate.section} className="shrink-0">
+                <Link
+                  to={`/settings/${candidate.section}`}
+                  aria-current={current ? "step" : undefined}
+                  className={cn(
+                    "flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-[0.8125rem] transition-colors",
+                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                    current
+                      ? "border-border bg-background font-medium"
+                      : "border-transparent text-muted-foreground",
+                  )}
+                >
+                  <StepDot index={index} configured={configured} current={current} />
+                  {candidate.title}
+                </Link>
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
+
+      <ol className="hidden space-y-1 lg:block" aria-label={railLabel}>
         {steps.map((candidate, index) => {
           // 「完成」步没有自己的表：它反映门禁，而不是 app_config 那一行。
           const configured =
@@ -288,32 +346,25 @@ export function Wizard({
           const current = index === stepIndex;
           return (
             <li key={candidate.section}>
-              <button
-                type="button"
-                onClick={() => goTo(index)}
+              <Link
+                to={`/settings/${candidate.section}`}
                 aria-current={current ? "step" : undefined}
                 className={cn(
-                  "flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left text-[0.8125rem] transition-colors",
+                  "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-[0.8125rem] transition-colors",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-                  current ? "bg-accent font-medium" : "text-muted-foreground hover:bg-accent/50",
+                  current
+                    ? "bg-background font-medium ring-1 ring-foreground/10"
+                    : "text-muted-foreground hover:bg-background/60",
                 )}
               >
-                <span
-                  className={cn(
-                    "mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border text-[0.625rem] tabular-nums",
-                    configured && "border-status-done-border bg-status-done-surface text-status-done-text",
-                    current && !configured && "border-primary bg-primary text-primary-foreground",
-                  )}
-                >
-                  {configured ? "✓" : index + 1}
-                </span>
+                <StepDot index={index} configured={configured} current={current} />
                 <span className="leading-snug">
                   {candidate.title}
                   {candidate.optional ? (
                     <span className="ml-1 text-xs opacity-70">可跳过</span>
                   ) : null}
                 </span>
-              </button>
+              </Link>
             </li>
           );
         })}
@@ -336,7 +387,7 @@ export function Wizard({
               </p>
             </div>
             <Badge variant="outline" className="shrink-0">
-              第 {stepIndex + 1} / {steps.length} 步
+              {initialized ? `第 ${stepIndex + 1} / ${steps.length} 节` : `第 ${stepIndex + 1} / ${steps.length} 步`}
             </Badge>
           </div>
           <Separator className="mb-4" />
@@ -373,18 +424,44 @@ export function Wizard({
           <Separator className="my-4" />
 
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={stepIndex === 0}
-              onClick={() => goTo(stepIndex - 1)}
-            >
-              <ChevronLeft aria-hidden />
-              上一步
-            </Button>
+            {initialized ? (
+              // 分区：没有「上一步/下一步」的过路费，每一节自己是一个地址。
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="ghost" size="sm" asChild>
+                  <Link to="/">回到面板</Link>
+                </Button>
+                {step.test ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={test}
+                      disabled={pending !== null || !testedSection.configured}
+                      title={testedSection.configured ? undefined : "先保存本步再测试"}
+                    >
+                      {pending === "test" ? <Loader2 className="animate-spin" aria-hidden /> : null}
+                      {step.test.label}
+                    </Button>
+                    <TestChip state={chip} />
+                  </>
+                ) : null}
+              </div>
+            ) : stepIndex === 0 ? (
+              <Button variant="ghost" size="sm" disabled>
+                <ChevronLeft aria-hidden />
+                上一步
+              </Button>
+            ) : (
+              <Button variant="ghost" size="sm" asChild>
+                <Link to={`/settings/${steps[stepIndex - 1].section}`}>
+                  <ChevronLeft aria-hidden />
+                  上一步
+                </Link>
+              </Button>
+            )}
 
             <div className="flex flex-wrap items-center gap-2">
-              {step.test ? (
+              {!initialized && step.test ? (
                 <>
                   <Button
                     variant="outline"
@@ -405,22 +482,32 @@ export function Wizard({
                 保存本步
               </Button>
 
-              {step.optional ? (
-                <Button variant="ghost" size="sm" onClick={() => goTo(stepIndex + 1)}>
-                  跳过本步
+              {!initialized && step.optional ? (
+                <Button variant="ghost" size="sm" asChild>
+                  <Link to={`/settings/${steps[stepIndex + 1]?.section ?? step.section}`}>跳过本步</Link>
                 </Button>
               ) : null}
 
-              {isLast ? (
-                <Button size="sm" onClick={onDone} disabled={!snapshot.initialized}>
-                  {snapshot.initialized ? "回到面板" : "完成初始化"}
-                </Button>
-              ) : (
-                <Button size="sm" onClick={() => goTo(stepIndex + 1)}>
-                  下一步
-                  <ChevronRight aria-hidden />
-                </Button>
-              )}
+              {!initialized ? (
+                isLast ? (
+                  snapshot.initialized ? (
+                    <Button size="sm" asChild>
+                      <Link to="/">回到面板</Link>
+                    </Button>
+                  ) : (
+                    <Button size="sm" disabled title="主线三件套齐了才能完成初始化">
+                      完成初始化
+                    </Button>
+                  )
+                ) : (
+                  <Button size="sm" asChild>
+                    <Link to={`/settings/${steps[stepIndex + 1].section}`}>
+                      下一步
+                      <ChevronRight aria-hidden />
+                    </Link>
+                  </Button>
+                )
+              ) : null}
             </div>
           </div>
         </Card>
@@ -431,6 +518,30 @@ export function Wizard({
         </p>
       </div>
     </div>
+  );
+}
+
+/** StepDot 是导航里的那一小圈：配好了就是勾，否则是步号。 */
+function StepDot({
+  index,
+  configured,
+  current,
+}: {
+  index: number;
+  configured: boolean;
+  current: boolean;
+}) {
+  return (
+    <span
+      className={cn(
+        "mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border text-[0.625rem] tabular-nums",
+        configured && "border-status-done-border bg-status-done-surface text-status-done-text",
+        current && !configured && "border-primary bg-primary text-primary-foreground",
+      )}
+      aria-hidden
+    >
+      {configured ? "✓" : index + 1}
+    </span>
   );
 }
 

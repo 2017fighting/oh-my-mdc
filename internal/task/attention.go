@@ -20,6 +20,10 @@ type AttentionItem struct {
 	MovieID  string
 	Number   string
 	Infohash string
+	// Source / Label 是版本的判别词（JavDB 磁力、M-Team 种子 / 中文、破解）：
+	// 一部作品的两个版本会同时失败，面板要指出是哪一条，而不是让人记 infohash。
+	Source string
+	Label  string
 	// Phase 是失败发生在哪一步（仅失败行有值）。
 	Phase string
 	// Reason 是给人看的那句话：失败原因，或停滞告警的原文。
@@ -68,7 +72,8 @@ func (s *Store) Attention(ctx context.Context, limit int) (Attention, error) {
 
 func (s *Store) failedItems(ctx context.Context, limit int) ([]AttentionItem, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT v.movie_id, t.number, v.infohash, COALESCE(v.error_phase, ''), v.error_reason, v.updated_at
+		`SELECT v.movie_id, t.number, v.infohash, v.source, v.label,
+		        COALESCE(v.error_phase, ''), v.error_reason, v.updated_at
 		 FROM task_version v
 		 JOIN task t ON t.movie_id = v.movie_id
 		 WHERE v.status = 'failed'
@@ -82,7 +87,8 @@ func (s *Store) failedItems(ctx context.Context, limit int) ([]AttentionItem, er
 	items := []AttentionItem{}
 	for rows.Next() {
 		var item AttentionItem
-		if err := rows.Scan(&item.MovieID, &item.Number, &item.Infohash, &item.Phase, &item.Reason, &item.At); err != nil {
+		if err := rows.Scan(&item.MovieID, &item.Number, &item.Infohash, &item.Source, &item.Label,
+			&item.Phase, &item.Reason, &item.At); err != nil {
 			return nil, fmt.Errorf("task: 扫失败版本: %w", err)
 		}
 		items = append(items, item)
@@ -100,7 +106,7 @@ func (s *Store) failedItems(ctx context.Context, limit int) ([]AttentionItem, er
 // 「重新加种过」的 manual_retry 事件之后还没再告过警。
 func (s *Store) stalledItems(ctx context.Context, limit int) ([]AttentionItem, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT v.movie_id, t.number, v.infohash, e.reason, e.at
+		`SELECT v.movie_id, t.number, v.infohash, v.source, v.label, e.reason, e.at
 		 FROM task_version v
 		 JOIN task t ON t.movie_id = v.movie_id
 		 JOIN LATERAL (
@@ -128,7 +134,8 @@ func (s *Store) stalledItems(ctx context.Context, limit int) ([]AttentionItem, e
 	items := []AttentionItem{}
 	for rows.Next() {
 		var item AttentionItem
-		if err := rows.Scan(&item.MovieID, &item.Number, &item.Infohash, &item.Reason, &item.At); err != nil {
+		if err := rows.Scan(&item.MovieID, &item.Number, &item.Infohash, &item.Source, &item.Label,
+			&item.Reason, &item.At); err != nil {
 			return nil, fmt.Errorf("task: 扫停滞下载: %w", err)
 		}
 		items = append(items, item)

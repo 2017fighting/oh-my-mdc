@@ -163,6 +163,8 @@ export type TaskList = {
   ok: boolean;
   tasks: TaskRow[];
   page: number;
+  /** 同筛选条件下的总条数：面板说「共 N 条」并关掉最后一页的「下一页」。 */
+  total: number;
   page_size: number;
 };
 
@@ -225,6 +227,9 @@ export type AttentionItem = {
   movie_id: string;
   number: string;
   infohash: string;
+  /** 版本的来源与标签：一部作品两个版本同时出事时，行上要能分辨是哪一条。 */
+  source: TaskVersion["source"];
+  label: string;
   /** 仅失败行有值：失败发生在哪一步。 */
   phase?: "downloading" | "scrape" | "organize";
   reason: string;

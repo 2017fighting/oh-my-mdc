@@ -1,25 +1,30 @@
 import * as React from "react";
+import { Link, useLocation, useSearchParams } from "react-router";
 import { LayoutDashboard, Loader2, Plug, Sparkles } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
-import { Panel } from "~/components/panel";
-import { Wizard } from "~/routes/wizard";
+import { Panel, isTaskState, type PanelQuery } from "~/components/panel";
+import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
 import { formatInterval } from "~/lib/time";
 import {
   api,
   type Attention,
   type ConfigSnapshot,
   type Overview,
+  type SectionName,
   type SideEffect,
   type TaskRow,
 } from "~/lib/api";
 
 /**
  * 整站外壳（规格 §8.2/§8.3）：未初始化时只剩向导，面板入口被门禁挡住；
- * 已初始化时面板是默认视图，「集成设置」回到同一份向导（编辑态）。
+ * 已初始化时面板是默认视图，集成设置是可寻址的八节。
+ *
+ * 视图来自 pathname 而不是内存状态：`/` 是面板，`/settings/<section>` 是某一节。
+ * 于是「去 Telegram 设置」是一条真链接——落到 Telegram 那一节、可书签、可刷新。
  *
  * 门禁判据来自 GET /api/config 的 initialized，跟前端本地状态无关：
  * 主线三件套被删掉，下一次刷新就回到向导。
@@ -32,57 +37,54 @@ export function meta() {
   ];
 }
 
-type View = "panel" | "wizard";
-
 export default function Home() {
+  const location = useLocation();
+  const [params, setParams] = useSearchParams();
+
   const [snapshot, setSnapshot] = React.useState<ConfigSnapshot | null>(null);
   const [overview, setOverview] = React.useState<Overview | null>(null);
   const [tasks, setTasks] = React.useState<TaskRow[]>([]);
+  const [total, setTotal] = React.useState(0);
   const [attention, setAttention] = React.useState<Attention | null>(null);
   const [sideEffects, setSideEffects] = React.useState<SideEffect[]>([]);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(50);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
   // 上一次真正读到数据的时刻（客户端时钟）。值班台必须知道自己有多旧，
   // 否则「还没好」与「这是旧快照」在屏幕上长得一模一样。
   const [loadedAt, setLoadedAt] = React.useState<number | null>(null);
-  // 一进站还不知道门禁状态：null 表示「随初始化状态走」（已初始化就进面板）。
-  // 用户点过导航之后才由他决定，免得保存完 Jellyfin 就被拽出向导。
-  const [requestedView, setRequestedView] = React.useState<View | null>(null);
 
-  const apply = React.useCallback(
-    ([config, nextOverview, taskList, nextAttention, nextSideEffects, listPage, listPageSize]: Dashboard) => {
-      setSnapshot(config);
-      setOverview(nextOverview);
-      setTasks(taskList);
-      setAttention(nextAttention);
-      setSideEffects(nextSideEffects);
-      setPageSize(listPageSize);
-      setLoadError(null);
-      setLoadedAt(Date.now());
-      // 删完最后一页的全部任务时退一页，不让空页把人留在空白表格上。
-      if (listPage > 1 && taskList.length === 0) {
-        setPage(listPage - 1);
-      }
-      // 第一次读到门禁状态时定下默认视图；之后一律认用户点过什么，
-      // 免得在向导里保存完 Jellyfin（门禁刚打开）就被拽去面板。
-      setRequestedView((current) => current ?? (config.initialized ? "panel" : "wizard"));
+  // 面板的筛选与页号住在 URL 里：F5 不丢，还能把「只看需人工」发给自己的另一个标签页。
+  const query = readQuery(params);
+  const queryKey = `${query.page}\u0000${query.state}\u0000${query.q}`;
+
+  const writeQuery = React.useCallback(
+    (next: PanelQuery) => {
+      const search = new URLSearchParams();
+      if (next.q) search.set("q", next.q);
+      if (next.state) search.set("state", next.state);
+      if (next.page > 1) search.set("page", String(next.page));
+      // replace：边打字边改地址栏，不该给每一击都留一条历史。
+      setParams(search, { replace: true });
     },
-    [],
+    [setParams],
   );
 
-  const refresh = React.useCallback(async () => {
-    try {
-      apply(await fetchDashboard(page));
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error));
-    }
-  }, [apply, page]);
+  const apply = React.useCallback((loaded: Dashboard) => {
+    setSnapshot(loaded.config);
+    setOverview(loaded.overview);
+    setTasks(loaded.tasks);
+    setTotal(loaded.total);
+    setAttention(loaded.attention);
+    setSideEffects(loaded.sideEffects);
+    setPageSize(loaded.pageSize);
+    setLoadError(null);
+    setLoadedAt(Date.now());
+  }, []);
 
-  // 首次进入与翻页时把设置、概览与任务表拉一次；其余刷新由保存/测试/刷新按钮触发。
+  // 首次进入、翻页、改筛选时拉一次；保存/测试/刷新按钮另有各自的入口。
   React.useEffect(() => {
     let cancelled = false;
-    fetchDashboard(page).then(
+    fetchDashboard(query).then(
       (loaded) => {
         if (!cancelled) apply(loaded);
       },
@@ -93,20 +95,41 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [apply, page]);
+    // query 每次渲染都是新对象，用它的三要素当键。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apply, queryKey]);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      apply(await fetchDashboard(query));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apply, queryKey]);
+
+  // 页号越界（删掉了最后一页的全部任务、或筛选后总数变少）时退到最后一页，
+  // 不让空页把人留在空白表格上。
+  React.useEffect(() => {
+    if (tasks.length > 0 || total === 0 || query.page <= 1) return;
+    const lastPage = Math.max(1, Math.ceil(total / pageSize));
+    if (lastPage !== query.page) writeQuery({ ...query, page: lastPage });
+  }, [tasks.length, total, pageSize, query, writeQuery]);
 
   const initialized = snapshot?.initialized ?? false;
-  // 未初始化＝整站只剩向导，不认任何想进面板的意图；已初始化则认用户的选择。
-  const view: View = initialized && requestedView === "panel" ? "panel" : "wizard";
 
-  // 从向导回到面板时重读一次：改完 Telegram 再回来，得看到改完之后的队列，
+  // 未初始化＝整站只剩向导，不认任何想进面板的意图；已初始化则认地址栏。
+  const route = parseRoute(location.pathname);
+  const view: View = initialized && route.view === "panel" ? "panel" : "settings";
+  const section = route.section ?? SECTION_ORDER[0];
+
+  // 从设置回到面板时重读一次：改完 Telegram 再回来，得看到改完之后的队列，
   // 而不是离开前的快照。首次挂载不重复拉（上面那个 effect 已经拉过了）。
   const previousView = React.useRef<View | null>(null);
   React.useEffect(() => {
     const previous = previousView.current;
     previousView.current = view;
-    // 首次挂载、翻页都不走这里；只有「从向导回到面板」补一次读取。
-    if (previous === "wizard" && view === "panel") void refresh();
+    if (previous === "settings" && view === "panel") void refresh();
   }, [view, refresh]);
 
   const loop = loopState(snapshot, overview);
@@ -119,28 +142,32 @@ export default function Home() {
     sidefx: formatInterval(appConfig.sidefx_interval),
   };
 
+  // 标题只描述**地址**，不预判门禁：读到 snapshot 之前不说「未初始化」。
+  const title = view === "panel" ? "面板" : !snapshot ? "集成设置" : initialized ? "集成设置" : "初始化向导";
+
   return (
     <div id="app-shell" className="mx-auto flex min-h-screen w-full max-w-6xl gap-6 p-6 text-foreground">
       <aside className="hidden w-52 shrink-0 flex-col gap-6 md:flex">
-        <div className="flex items-center gap-2">
+        <Link to="/" className="flex items-center gap-2 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
           <Sparkles className="size-5 text-primary" aria-hidden />
           <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
-        </div>
+        </Link>
 
         <nav className="flex flex-col gap-1 text-sm" aria-label="主导航">
           <NavItem
+            to="/"
             icon={<LayoutDashboard className="size-4" aria-hidden />}
             label="面板"
             current={view === "panel"}
             disabled={!initialized}
             title={initialized ? undefined : "主线三件套不齐，面板进不去"}
-            onClick={() => setRequestedView("panel")}
           />
           <NavItem
+            to={`/settings/${section}`}
             icon={<Plug className="size-4" aria-hidden />}
             label="集成设置"
-            current={view === "wizard"}
-            onClick={() => setRequestedView("wizard")}
+            current={view === "settings"}
+            title={initialized ? "八节各自一个地址" : "初始化前这里是向导"}
           />
         </nav>
 
@@ -156,36 +183,35 @@ export default function Home() {
 
       <main id="main" tabIndex={-1} className="flex min-w-0 flex-1 flex-col gap-6 outline-none">
         <div className="flex flex-col gap-3 md:hidden">
-          <div className="flex items-center gap-2">
+          <Link to="/" className="flex items-center gap-2">
             <Sparkles className="size-5 text-primary" aria-hidden />
             <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
-          </div>
+          </Link>
           <nav
             aria-label="视图切换"
             className="grid grid-cols-2 gap-1 rounded-lg bg-background p-1 ring-1 ring-foreground/10"
           >
             <MobileNavItem
+              to="/"
               icon={<LayoutDashboard className="size-4" aria-hidden />}
               label="面板"
               current={view === "panel"}
               disabled={!initialized}
-              onClick={() => setRequestedView("panel")}
+              title={initialized ? undefined : "主线三件套不齐，面板进不去"}
             />
             <MobileNavItem
+              to={`/settings/${section}`}
               icon={<Plug className="size-4" aria-hidden />}
               label="集成设置"
-              current={view === "wizard"}
-              onClick={() => setRequestedView("wizard")}
+              current={view === "settings"}
             />
           </nav>
         </div>
 
         <header>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h1 className="font-heading text-2xl font-semibold tracking-tight">
-              {view === "wizard" ? (initialized ? "集成设置" : "初始化向导") : "面板"}
-            </h1>
-            {view === "wizard" ? (
+            <h1 className="font-heading text-2xl font-semibold tracking-tight">{title}</h1>
+            {snapshot && view === "settings" ? (
               <Badge variant={initialized ? "secondary" : "outline"}>
                 {initialized ? "已初始化" : "未初始化"}
               </Badge>
@@ -195,7 +221,7 @@ export default function Home() {
         </header>
 
         {loadError ? (
-          <Notice tone="bad">
+          <Notice tone="bad" onClose={() => setLoadError(null)}>
             读不到设置：{loadError}
             <button
               type="button"
@@ -207,127 +233,178 @@ export default function Home() {
           </Notice>
         ) : null}
 
-        {!snapshot ? (
+        {snapshot ? (
+          view === "panel" ? (
+            <Panel
+              overview={overview}
+              tasks={tasks}
+              total={total}
+              attention={attention}
+              sideEffects={sideEffects}
+              query={query}
+              pageSize={pageSize}
+              loadedAt={loadedAt}
+              intervals={intervals}
+              onQuery={writeQuery}
+              onRefresh={refresh}
+            />
+          ) : (
+            <Wizard
+              snapshot={snapshot}
+              section={section}
+              initialized={initialized}
+              onRefresh={refresh}
+            />
+          )
+        ) : loadError ? null : (
           <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" aria-hidden />
             正在读取设置…
           </div>
-        ) : view === "wizard" ? (
-          <Wizard
-            snapshot={snapshot}
-            onRefresh={refresh}
-            onDone={() => setRequestedView("panel")}
-          />
-        ) : (
-          <Panel
-            overview={overview}
-            tasks={tasks}
-            attention={attention}
-            sideEffects={sideEffects}
-            page={page}
-            pageSize={pageSize}
-            loadedAt={loadedAt}
-            intervals={intervals}
-            onPage={setPage}
-            onOpenWizard={() => setRequestedView("wizard")}
-            onRefresh={refresh}
-          />
         )}
       </main>
     </div>
   );
 }
 
+type View = "panel" | "settings";
+
+/**
+ * parseRoute 把 pathname 翻成视图与节。
+ *
+ * 认不出的地址一律回面板（已初始化时）；未初始化时调用方会把它按向导渲染。
+ */
+function parseRoute(pathname: string): { view: View; section: SectionName | null } {
+  const match = /^\/settings(?:\/([a-z_]+))?\/?$/.exec(pathname);
+  if (!match) return { view: "panel", section: null };
+  const candidate = match[1];
+  return { view: "settings", section: isSectionName(candidate) ? candidate : null };
+}
+
+/**
+ * readQuery 把地址栏里的筛选读成面板查询。认不出的值一律回落默认，
+ * 不因为一条手改的 URL 就把整页打成错误。
+ */
+function readQuery(params: URLSearchParams): PanelQuery {
+  const page = Number(params.get("page") ?? "1");
+  const state = params.get("state") ?? "";
+  return {
+    page: Number.isInteger(page) && page > 0 ? page : 1,
+    q: params.get("q") ?? "",
+    state: isTaskState(state) ? state : "",
+  };
+}
+
 function NavItem({
+  to,
   icon,
   label,
   current,
   disabled,
   title,
-  onClick,
 }: {
+  to: string;
   icon: React.ReactNode;
   label: string;
   current: boolean;
   disabled?: boolean;
   title?: string;
-  onClick: () => void;
 }) {
+  const className = cn(
+    "flex items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+    current
+      ? "bg-background font-medium ring-1 ring-foreground/10"
+      : "text-muted-foreground hover:bg-background/60",
+    disabled && "cursor-not-allowed opacity-60",
+  );
+
+  // 禁用态不装成链接：读屏与键盘都不该走进去，但 title 仍说清为什么进不去。
+  if (disabled) {
+    return (
+      <span aria-disabled="true" title={title} className={className}>
+        {icon}
+        {label}
+      </span>
+    );
+  }
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-current={current ? "page" : undefined}
-      className={cn(
-        "flex items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors",
-        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-        current
-          ? "bg-background font-medium ring-1 ring-foreground/10"
-          : "text-muted-foreground hover:bg-background/60",
-        disabled && "cursor-not-allowed opacity-40",
-      )}
-    >
+    <Link to={to} title={title} aria-current={current ? "page" : undefined} className={className}>
       {icon}
       {label}
-    </button>
+    </Link>
   );
 }
 
 /** MobileNavItem 是窄屏的两格视图切换：44px 高，拇指够得着，不和桌面侧栏共用一套尺寸。 */
 function MobileNavItem({
+  to,
   icon,
   label,
   current,
   disabled,
-  onClick,
+  title,
 }: {
+  to: string;
   icon: React.ReactNode;
   label: string;
   current: boolean;
   disabled?: boolean;
-  onClick: () => void;
+  title?: string;
 }) {
+  const className = cn(
+    "flex h-11 items-center justify-center gap-2 rounded-md text-sm transition-colors",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+    current ? "bg-secondary font-medium text-secondary-foreground" : "text-muted-foreground",
+    disabled && "cursor-not-allowed opacity-60",
+  );
+
+  if (disabled) {
+    return (
+      <span aria-disabled="true" title={title} className={className}>
+        {icon}
+        {label}
+      </span>
+    );
+  }
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-current={current ? "page" : undefined}
-      className={cn(
-        "flex h-11 items-center justify-center gap-2 rounded-md text-sm transition-colors",
-        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-        current ? "bg-secondary font-medium text-secondary-foreground" : "text-muted-foreground",
-        disabled && "cursor-not-allowed opacity-40",
-      )}
-    >
+    <Link to={to} title={title} aria-current={current ? "page" : undefined} className={className}>
       {icon}
       {label}
-    </button>
+    </Link>
   );
 }
 
 /** Dashboard 是一次面板读取的全部输入（设置、概览、任务、「需要人工」区、副作用队列、分页）。 */
-type Dashboard = [ConfigSnapshot, Overview, TaskRow[], Attention, SideEffect[], number, number];
+type Dashboard = {
+  config: ConfigSnapshot;
+  overview: Overview;
+  tasks: TaskRow[];
+  total: number;
+  attention: Attention;
+  sideEffects: SideEffect[];
+  page: number;
+  pageSize: number;
+};
 
-async function fetchDashboard(page: number): Promise<Dashboard> {
+async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
   const [config, overview, taskList, attention, sideEffects] = await Promise.all([
     api.config(),
     api.overview(),
-    api.tasks({ page }),
+    api.tasks({ page: query.page, q: query.q || undefined, state: query.state || undefined }),
     api.attention(),
     api.sideEffects(),
   ]);
-  return [
+  return {
     config,
     overview,
-    taskList.tasks,
+    tasks: taskList.tasks,
+    total: taskList.total,
     attention,
-    sideEffects.side_effects,
-    taskList.page,
-    taskList.page_size,
-  ];
+    sideEffects: sideEffects.side_effects,
+    page: taskList.page,
+    pageSize: taskList.page_size,
+  };
 }
 
 /**

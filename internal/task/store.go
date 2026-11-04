@@ -317,6 +317,26 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]TaskRow, error) 
 	return s.attachVersions(ctx, tasks)
 }
 
+// Count 返回与 List 同一筛选条件下的总条数。
+//
+// 面板靠它说「共 N 条」并关掉最后一页的「下一页」：只看「这一页是否满」的话，
+// 恰好整页的最后一页会一直可点，点进去是空页。
+func (s *Store) Count(ctx context.Context, filter ListFilter) (int, error) {
+	var total int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*)
+		 FROM task t
+		 LEFT JOIN task_state ts ON ts.movie_id = t.movie_id
+		 WHERE ($1 = '' OR ts.state = $1)
+		   AND ($2 = '' OR t.movie_id ILIKE '%' || $2 || '%' ESCAPE '\' OR t.number ILIKE '%' || $2 || '%' ESCAPE '\')`,
+		filter.State, escapeLike(strings.TrimSpace(filter.Query)),
+	).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("task: 数任务: %w", err)
+	}
+	return total, nil
+}
+
 // Detail 返回一个任务的抽屉数据：任务 + 版本列表 + 最近事件（规格 §8.4）。
 func (s *Store) Detail(ctx context.Context, movieID string, eventLimit int) (TaskRow, error) {
 	var row TaskRow

@@ -61,10 +61,13 @@ type taskEventBody struct {
 
 // tasksBody 是 GET /api/tasks 的回执。
 type tasksBody struct {
-	OK       bool       `json:"ok"`
-	Tasks    []taskBody `json:"tasks"`
-	Page     int        `json:"page"`
-	PageSize int        `json:"page_size"`
+	OK    bool       `json:"ok"`
+	Tasks []taskBody `json:"tasks"`
+	Page  int        `json:"page"`
+	// Total 是**同筛选条件下**的总条数：面板用它说「共 N 条」并把最后一页的
+	// 「下一页」关掉，而不是靠「这一页满了」猜（满页的最后一页会一直可点）。
+	Total    int `json:"total"`
+	PageSize int `json:"page_size"`
 }
 
 // taskDetailBody 是 GET /api/tasks/{movie_id} 的回执（抽屉数据）。
@@ -99,17 +102,31 @@ func (s *server) tasksList(w http.ResponseWriter, r *http.Request) {
 		page = parsed
 	}
 
-	rows, err := store.List(r.Context(), task.ListFilter{
+	filter := task.ListFilter{
 		State: state,
 		Query: query.Get("q"),
 		Page:  page,
-	})
+	}
+
+	rows, err := store.List(r.Context(), filter)
 	if err != nil {
 		s.writeTaskError(w, err)
 		return
 	}
 
-	body := tasksBody{OK: true, Tasks: make([]taskBody, 0, len(rows)), Page: page, PageSize: task.DefaultPageSize}
+	total, err := store.Count(r.Context(), filter)
+	if err != nil {
+		s.writeTaskError(w, err)
+		return
+	}
+
+	body := tasksBody{
+		OK:       true,
+		Tasks:    make([]taskBody, 0, len(rows)),
+		Page:     page,
+		Total:    total,
+		PageSize: task.DefaultPageSize,
+	}
 	for _, row := range rows {
 		body.Tasks = append(body.Tasks, toTaskBody(row))
 	}
@@ -212,6 +229,8 @@ type attentionItem struct {
 	MovieID  string    `json:"movie_id"`
 	Number   string    `json:"number"`
 	Infohash string    `json:"infohash"`
+	Source   string    `json:"source"`
+	Label    string    `json:"label"`
 	Phase    string    `json:"phase,omitempty"`
 	Reason   string    `json:"reason"`
 	At       time.Time `json:"at"`
@@ -248,6 +267,8 @@ func toAttentionItem(item task.AttentionItem) attentionItem {
 		MovieID:  item.MovieID,
 		Number:   item.Number,
 		Infohash: item.Infohash,
+		Source:   item.Source,
+		Label:    item.Label,
 		Phase:    item.Phase,
 		Reason:   item.Reason,
 		At:       item.At,

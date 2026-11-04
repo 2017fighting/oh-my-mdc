@@ -1,20 +1,20 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ChevronRight, Loader2, RefreshCw, RotateCcw, X } from "lucide-react";
+import { Link } from "react-router";
+import { AlertTriangle, ChevronRight, Loader2, RefreshCw, RotateCcw, Search, X } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
-import { Notice } from "~/components/form";
+import { Notice, TextInput } from "~/components/form";
 import { formatAbsolute, formatClock, formatFuture, formatWhen } from "~/lib/time";
 import {
   remedyForFailure,
   remedyForSideEffect,
   remedyForStalled,
   settingsLabel,
-  type Remedy,
 } from "~/lib/remedy";
 import {
   api,
@@ -33,37 +33,41 @@ import {
 } from "~/lib/api";
 
 /**
- * 面板（规格 §8.2）：统计卡 →「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康。
+ * 面板（规格 §8.2）：统计行 →「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康。
  *
  * 这里只放面板自己的东西；整站外壳（导航、门禁、视图切换）在 routes/home.tsx。
  */
+
+/** 面板的筛选与页号：住在地址栏里（`?q=&state=&page=`），刷新不丢。 */
+export type PanelQuery = { page: number; q: string; state: TaskState | "" };
 
 /** Panel 是面板：统计卡 → 「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康（规格 §8.2）。 */
 export function Panel({
   overview,
   tasks,
+  total,
   attention,
   sideEffects,
-  page,
+  query,
   pageSize,
   loadedAt,
   intervals,
-  onPage,
-  onOpenWizard,
+  onQuery,
   onRefresh,
 }: {
   overview: Overview | null;
   tasks: TaskRow[];
+  /** 同筛选条件下的总条数：分页与空态都靠它，不靠「这一页满了」猜。 */
+  total: number;
   attention: Attention | null;
   sideEffects: SideEffect[];
-  page: number;
+  query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
   loadedAt: number | null;
   /** 三条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
   intervals: { poll: string | null; reconcile: string | null; sidefx: string | null };
-  onPage: (page: number) => void;
-  onOpenWizard: () => void;
+  onQuery: (next: PanelQuery) => void;
   onRefresh: () => Promise<void>;
 }) {
   const [selected, setSelected] = React.useState<string | null>(null);
@@ -100,15 +104,12 @@ export function Panel({
   }, [selected]);
 
   const counts = overview?.counts;
+  // 「需人工」只出现一次，就在卡片上——以前统计条与卡片各算一套（失败任务 vs
+  // 失败版本 + 停滞），同一个屏幕上印出 3 和 4，而它正是要人 glance 的那个数。
   const stats = [
-    { label: "下载中", value: counts?.downloading ?? 0, tone: "" },
-    { label: "加工中", value: counts?.processing ?? 0, tone: "" },
-    { label: "已入库", value: counts?.finished ?? 0, tone: "" },
-    {
-      label: "需人工",
-      value: counts?.needs_attention ?? 0,
-      tone: (counts?.needs_attention ?? 0) > 0 ? "text-status-danger-text" : "",
-    },
+    { label: "下载中", value: counts?.downloading ?? 0 },
+    { label: "加工中", value: counts?.processing ?? 0 },
+    { label: "已入库", value: counts?.finished ?? 0 },
   ];
 
   const refresh = async () => {
@@ -120,7 +121,7 @@ export function Panel({
     }
   };
 
-  const hasMore = tasks.length >= pageSize;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <>
@@ -134,9 +135,7 @@ export function Panel({
           {stats.map((stat) => (
             <span key={stat.label} className="flex items-baseline gap-1.5">
               <span>{stat.label}</span>
-              <span className={cn("font-medium tabular-nums text-foreground", stat.tone)}>
-                {stat.value}
-              </span>
+              <span className="font-medium tabular-nums text-foreground">{stat.value}</span>
             </span>
           ))}
         </section>
@@ -146,7 +145,7 @@ export function Panel({
             {loadedAt ? (
               <>
                 上次读取 <time dateTime={new Date(loadedAt).toISOString()}>{formatClock(loadedAt)}</time>
-                <span className="text-muted-foreground/80">（{formatWhen(loadedAt, now)}）</span>
+                （{formatWhen(loadedAt, now)}）
               </>
             ) : (
               "还没读到过"
@@ -169,7 +168,6 @@ export function Panel({
         stuck={sideEffects.filter((effect) => effect.stuck)}
         now={now}
         onOpenTask={openTask}
-        onOpenWizard={onOpenWizard}
         onRefresh={onRefresh}
       />
 
@@ -178,10 +176,14 @@ export function Panel({
           <CardTitle as="h2" title="一行一任务，按 movie_id 聚合；版本以小 chip 展示。">
             任务
           </CardTitle>
+          <CardDescription className="text-xs tabular-nums">
+            {query.q || query.state ? `筛选后 ${total} 条` : `共 ${total} 条`}
+          </CardDescription>
         </CardHeader>
         <CardContent className="px-0">
+          <TaskFilters query={query} onQuery={onQuery} />
           {tasks.length === 0 ? (
-            <EmptyTasks />
+            <EmptyTasks query={query} onQuery={onQuery} />
           ) : (
             <>
               <ul className="divide-y lg:hidden">
@@ -288,28 +290,26 @@ export function Panel({
             </div>
             </>
           )}
-          {tasks.length > 0 ? (
+          {pageCount > 1 ? (
             <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
               <span className="tabular-nums">
-                第 {page} 页 · 每页 {pageSize} 条
+                第 {query.page} / {pageCount} 页
               </span>
               <div className="flex items-center gap-1.5">
-                <Button
+                <RowAction
                   variant="outline"
-                  className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                  disabled={page <= 1}
-                  onClick={() => onPage(page - 1)}
+                  disabled={query.page <= 1}
+                  onClick={() => onQuery({ ...query, page: query.page - 1 })}
                 >
                   上一页
-                </Button>
-                <Button
+                </RowAction>
+                <RowAction
                   variant="outline"
-                  className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                  disabled={!hasMore}
-                  onClick={() => onPage(page + 1)}
+                  disabled={query.page >= pageCount}
+                  onClick={() => onQuery({ ...query, page: query.page + 1 })}
                 >
                   下一页
-                </Button>
+                </RowAction>
               </div>
             </div>
           ) : null}
@@ -361,13 +361,8 @@ export function Panel({
             );
           })}
           <Separator className="my-1" />
-          <Button
-            variant="link"
-            size="sm"
-            onClick={onOpenWizard}
-            className="h-9 self-start px-0 text-sm md:h-7"
-          >
-            去集成设置
+          <Button variant="link" size="sm" asChild className="h-9 self-start px-0 text-sm md:h-7">
+            <Link to="/settings/app">去集成设置</Link>
           </Button>
         </CardContent>
       </Card>
@@ -387,33 +382,36 @@ export function Panel({
 
 /** NeedsAttention 是「需要人工」区（规格 §8.2：置顶，行内直接动手）。
  *
- * 三半拼在一起：失败的任务（phase + reason）、停滞的下载、驻留的副作用。
- * 每一行先回答「病因是什么」，再决定给哪个动作（`lib/remedy.ts`）：
- * 宿主机问题不给重试、设置问题先指向设置、上游业务错指向上游；只在流水线
- * 自己就有救的时候，才让重试做主角。
+ * 三组行：失败 / 停滞 / 驻留副作用，每组带计数。任务侧的两组再按番号收一次：
+ * 一部作品两个版本同时失败时，出现的是一个番号 + 两颗按钮（而不是两行同款「重试」），
+ * 版本的身份（中文 / 破解 / M-Team 种子）写在每一条失败下面。
+ *
+ * 动作按病因决定（`lib/remedy.ts`）：宿主机问题不给重试、设置问题给一条真链接到
+ * 那一节（`/settings/telegram`），只在流水线自己就有救的时候，才让重试做主角。
  */
 function NeedsAttention({
   attention,
   stuck,
   now,
   onOpenTask,
-  onOpenWizard,
   onRefresh,
 }: {
   attention: Attention | null;
   stuck: SideEffect[];
   now: number;
   onOpenTask: (movieID: string) => void;
-  onOpenWizard: () => void;
   onRefresh: () => Promise<void>;
 }) {
   const failed = attention?.failed ?? [];
   const stalled = attention?.stalled ?? [];
   const total = failed.length + stalled.length + stuck.length;
 
-  const { busy, error, notices, retry, clearError } = useTaskRetry(onRefresh);
+  const taskRetry = useTaskRetry(onRefresh);
   // 任务侧重试与副作用重发是两件事，各有自己的忙位与提示（规格 §8.2 的行内动作）。
   const sideEffect = useSideEffectRetry(onRefresh);
+
+  const failedGroups = groupByNumber(failed);
+  const stalledGroups = groupByNumber(stalled);
 
   return (
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
@@ -426,10 +424,11 @@ function NeedsAttention({
             />
             需要人工
           </CardTitle>
+          {/* 总数只在右上角徽章上说一次：这里再说一遍就是同一个数印两遍。 */}
           <CardDescription aria-live="polite">
             {total === 0
               ? "没有要动手的事：失败、停滞与驻留副作用都会出现在这里。"
-              : `${total} 件要动手的事：失败重试、停滞确认、驻留副作用重发。`}
+              : "失败重试、停滞确认、驻留副作用重发。"}
           </CardDescription>
         </div>
         <CardAction>
@@ -448,152 +447,71 @@ function NeedsAttention({
       </CardHeader>
       {total > 0 ? (
         <CardContent>
-          {error ? (
+          {taskRetry.error ? (
             <div className="mb-2">
-              <Notice tone="bad" onClose={clearError}>
-                {error}
+              <Notice tone="bad" onClose={taskRetry.clearError}>
+                {taskRetry.error}
               </Notice>
             </div>
           ) : null}
 
           <div className="divide-y">
-          {failed.map((item) => {
-            const remedy = remedyForFailure(item);
-            return (
-              <AttentionRow
-                key={`failed-${item.infohash}`}
-                title={item.number}
-                time={item.at}
-                now={now}
-                badge={
-                  <Badge
-                    variant="outline"
-                    className="border-transparent bg-status-danger-surface text-status-danger-text"
-                  >
-                    {phaseLabel(item.phase)}失败
-                  </Badge>
-                }
-                detail={item.reason}
-                remedy={remedy}
-                notice={notices[item.movie_id]}
-                actions={
-                  <>
-                    {remedy.retryable ? (
-                      <Button
-                        variant="outline"
-                        className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                        disabled={busy.has(taskRetryKey(item.movie_id, false))}
-                        onClick={() => void retry(item.movie_id, false)}
-                      >
-                        <RotateCcw
-                          className={cn(
-                            "size-3.5",
-                            busy.has(taskRetryKey(item.movie_id, false)) && "animate-spin",
-                          )}
-                          aria-hidden
-                        />
-                        重试
-                      </Button>
-                    ) : null}
-                    <Button
-                      variant="ghost"
-                      className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                      onClick={() => onOpenTask(item.movie_id)}
-                    >
-                      查看任务
-                    </Button>
-                  </>
-                }
-              />
-            );
-          })}
-
-          {stalled.map((item) => (
-            <AttentionRow
-              key={`stalled-${item.infohash}`}
-              title={item.number}
-              time={item.at}
-              now={now}
-              badge={<Badge variant="outline">下载停滞</Badge>}
-              detail={item.reason}
-              remedy={remedyForStalled()}
-              notice={notices[item.movie_id]}
-              actions={
-                <>
-                  <Button
-                    variant="outline"
-                    className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                    disabled={busy.has(taskRetryKey(item.movie_id, false))}
-                    onClick={() => void retry(item.movie_id, false)}
-                  >
-                    <RotateCcw
-                      className={cn(
-                        "size-3.5",
-                        busy.has(taskRetryKey(item.movie_id, false)) && "animate-spin",
-                      )}
-                      aria-hidden
+            {failedGroups.length > 0 ? (
+              <section aria-label="失败的版本" className="py-3 first:pt-0 last:pb-0">
+                <AttentionHeading label="失败" count={failed.length} />
+                <div className="divide-y">
+                  {failedGroups.map((group) => (
+                    <VersionGroup
+                      key={group.movieID}
+                      group={group}
+                      kind="failed"
+                      now={now}
+                      notice={taskRetry.notices[group.movieID]}
+                      busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
+                      onRetry={() => void taskRetry.retry(group.movieID, false)}
+                      onOpenTask={() => onOpenTask(group.movieID)}
                     />
-                    重试
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                    onClick={() => onOpenTask(item.movie_id)}
-                  >
-                    查看任务
-                  </Button>
-                </>
-              }
-            />
-          ))}
+                  ))}
+                </div>
+              </section>
+            ) : null}
 
-          {stuck.map((effect) => {
-            const remedy = remedyForSideEffect(effect);
-            return (
-              <AttentionRow
-                key={`stuck-${effect.id}`}
-                title={sideEffectTitle(effect)}
-                meta={effect.attempts > 0 ? `已试 ${effect.attempts} 次` : undefined}
-                now={now}
-                badge={
-                  <Badge
-                    variant="outline"
-                    className="border-transparent bg-status-danger-surface text-status-danger-text"
-                  >
-                    副作用驻留
-                  </Badge>
-                }
-                detail={effect.last_error || "自动重试已放弃，等人工重发。"}
-                remedy={remedy}
-                notice={sideEffect.errors[effect.id]}
-                actions={
-                  <>
-                    {remedy.settings ? (
-                      <Button
-                        variant="outline"
-                        className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                        onClick={onOpenWizard}
-                      >
-                        去 {settingsLabel(remedy.settings)} 设置
-                      </Button>
-                    ) : null}
-                    <Button
-                      variant={remedy.settings ? "ghost" : "outline"}
-                      className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
-                      disabled={sideEffect.busy === effect.id}
-                      onClick={() => void sideEffect.retry(effect.id)}
-                    >
-                      <RotateCcw
-                        className={cn("size-3.5", sideEffect.busy === effect.id && "animate-spin")}
-                        aria-hidden
-                      />
-                      重发
-                    </Button>
-                  </>
-                }
-              />
-            );
-          })}
+            {stalledGroups.length > 0 ? (
+              <section aria-label="停滞的下载" className="py-3 first:pt-0 last:pb-0">
+                <AttentionHeading label="停滞" count={stalled.length} />
+                <div className="divide-y">
+                  {stalledGroups.map((group) => (
+                    <VersionGroup
+                      key={group.movieID}
+                      group={group}
+                      kind="stalled"
+                      now={now}
+                      notice={taskRetry.notices[group.movieID]}
+                      busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
+                      onRetry={() => void taskRetry.retry(group.movieID, false)}
+                      onOpenTask={() => onOpenTask(group.movieID)}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {stuck.length > 0 ? (
+              <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
+                <AttentionHeading label="驻留副作用" count={stuck.length} />
+                <div className="divide-y">
+                  {stuck.map((effect) => (
+                    <StuckRow
+                      key={effect.id}
+                      effect={effect}
+                      notice={sideEffect.errors[effect.id]}
+                      busy={sideEffect.busy === effect.id}
+                      onRetry={() => void sideEffect.retry(effect.id)}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
         </CardContent>
       ) : null}
@@ -601,68 +519,180 @@ function NeedsAttention({
   );
 }
 
+/** FailureGroup 是同一个番号下同病的一串版本。 */
+type FailureGroup = { movieID: string; number: string; items: AttentionItem[] };
+
+/** groupByNumber 按番号收行：两版同挂只出现一个番号、一颗按钮。 */
+function groupByNumber(items: AttentionItem[]): FailureGroup[] {
+  const groups: FailureGroup[] = [];
+  for (const item of items) {
+    const last = groups[groups.length - 1];
+    if (last && last.movieID === item.movie_id) last.items.push(item);
+    else groups.push({ movieID: item.movie_id, number: item.number, items: [item] });
+  }
+  return groups;
+}
+
+function AttentionHeading({ label, count }: { label: string; count: number }) {
+  return (
+    <h3 className="mb-1 flex items-baseline gap-1.5 text-xs font-medium text-muted-foreground">
+      {label}
+      <span className="tabular-nums">{count}</span>
+    </h3>
+  );
+}
+
 /**
- * AttentionRow 是「需要人工」区的一行：标题 + 徽章 + 多久了 / 原因 / 补法 / 动作。
+ * VersionGroup 是「一部作品的若干条同病版本」：番号 + 一颗写明爆炸半径的重试
+ * + 逐版的身份、失败步、原因与补法。
  *
- * 原因用正文色 13px——它是这一屏最决定动作的一句话，不该是全页最灰最小的字。
- * 补法（remedy.hint）只在能说清「为什么重试没用」时才出现。
+ * 行按版本切、动作按任务发：所以按钮上要写清它会动几条版本（「重试全部 2 条版本」），
+ * 回执也按任务记一次、落在这组下面。
  */
-function AttentionRow({
-  title,
-  badge,
-  detail,
-  remedy,
-  time,
-  meta,
+function VersionGroup({
+  group,
+  kind,
   now,
   notice,
-  actions,
+  busy,
+  onRetry,
+  onOpenTask,
 }: {
-  title: React.ReactNode;
-  badge?: React.ReactNode;
-  detail: string;
-  remedy: Remedy;
-  /** 事件发生的时刻（任务侧）。 */
-  time?: string;
-  /** 时刻之外的次要元信息，如驻留副作用「已试 3 次」。 */
-  meta?: string;
+  group: FailureGroup;
+  kind: "failed" | "stalled";
   now: number;
   notice?: RetryNotice | string;
-  actions?: React.ReactNode;
+  busy: boolean;
+  onRetry: () => void;
+  onOpenTask: () => void;
 }) {
+  const remedyOf = (item: AttentionItem) =>
+    kind === "failed" ? remedyForFailure(item) : remedyForStalled();
+  // 一组里只要有一条还有救，就给重试；宿主机那一条自己不给（补法已经写了原因）。
+  const retryable = group.items.some((item) => remedyOf(item).retryable);
+
+  return (
+    <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[0.8125rem] font-medium tabular-nums">
+          {group.number}
+          <span className="font-mono text-xs font-normal text-muted-foreground">{group.movieID}</span>
+        </div>
+        <ul className="space-y-2">
+          {group.items.map((item) => {
+            const remedy = remedyOf(item);
+            return (
+              <li key={item.infohash} className="space-y-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                  <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
+                    {versionIdentity(item)}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className={
+                      kind === "failed"
+                        ? "border-transparent bg-status-danger-surface text-status-danger-text"
+                        : "border-status-progress-border bg-status-progress-surface text-status-progress-text"
+                    }
+                  >
+                    {kind === "failed" ? `${phaseLabel(item.phase)}失败` : "下载停滞"}
+                  </Badge>
+                  <span className="text-muted-foreground" title={formatAbsolute(item.at)}>
+                    {formatWhen(item.at, now)}
+                  </span>
+                </div>
+                <p className="text-[0.8125rem] leading-relaxed break-words text-foreground">
+                  {item.reason}
+                </p>
+                {remedy.hint ? (
+                  <p className="text-xs leading-relaxed break-words text-muted-foreground">
+                    {remedy.hint}
+                  </p>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+        {notice ? (
+          <Notice tone={typeof notice === "string" ? "bad" : notice.tone}>
+            {typeof notice === "string" ? notice : notice.text}
+          </Notice>
+        ) : null}
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+        {retryable ? (
+          <RowAction variant="outline" disabled={busy} onClick={onRetry}>
+            <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
+            {group.items.length > 1 ? `重试全部 ${group.items.length} 条版本` : "重试"}
+          </RowAction>
+        ) : null}
+        <RowAction variant="ghost" onClick={onOpenTask}>
+          查看任务
+        </RowAction>
+      </div>
+    </div>
+  );
+}
+
+/** StuckRow 是驻留副作用的一行：它缺的那一样东西在哪一节，就给哪一节的链接。 */
+function StuckRow({
+  effect,
+  notice,
+  busy,
+  onRetry,
+}: {
+  effect: SideEffect;
+  notice?: string;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  const remedy = remedyForSideEffect(effect);
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
       <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] font-medium tabular-nums">
-          {title}
-          {badge}
-          {time ? (
-            <span
-              className="text-xs font-normal text-muted-foreground"
-              title={formatAbsolute(time)}
-            >
-              {formatWhen(time, now)}
-            </span>
-          ) : null}
-          {meta ? (
-            <span className="text-xs font-normal text-muted-foreground">{meta}</span>
-          ) : null}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] font-medium">
+          {sideEffectTitle(effect)}
+          <Badge
+            variant="outline"
+            className="border-transparent bg-status-danger-surface text-status-danger-text"
+          >
+            副作用驻留
+          </Badge>
+          <span className="text-xs font-normal tabular-nums text-muted-foreground">
+            {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
+          </span>
         </div>
-        <p className="text-[0.8125rem] leading-relaxed break-words text-foreground">{detail}</p>
+        <p className="text-[0.8125rem] leading-relaxed break-words text-foreground">
+          {effect.last_error || "自动重试已放弃，等人工重发。"}
+        </p>
         {remedy.hint ? (
           <p className="text-xs leading-relaxed break-words text-muted-foreground">{remedy.hint}</p>
         ) : null}
         {notice ? (
           <div className="pt-0.5">
-            <Notice tone={typeof notice === "string" ? "bad" : notice.tone}>
-              {typeof notice === "string" ? notice : notice.text}
-            </Notice>
+            <Notice tone="bad">{notice}</Notice>
           </div>
         ) : null}
       </div>
-      {actions ? <div className="flex shrink-0 flex-wrap items-center gap-1.5">{actions}</div> : null}
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+        {remedy.settings ? (
+          <RowAction variant="outline" asChild>
+            <Link to={`/settings/${remedy.settings}`}>去 {settingsLabel(remedy.settings)} 设置</Link>
+          </RowAction>
+        ) : null}
+        <RowAction variant={remedy.settings ? "ghost" : "outline"} disabled={busy} onClick={onRetry}>
+          <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
+          重发
+        </RowAction>
+      </div>
     </div>
   );
+}
+
+/** versionIdentity 是一条版本的人话身份：标签（中文/破解）优先，没有就报来源。 */
+function versionIdentity(item: AttentionItem): string {
+  const source = sourceLabel(item.source);
+  return item.label ? `${item.label} · ${source}` : source;
 }
 
 /** RetryNotice 是一次任务重试的结果提示：成功用 ok，被拒/失败用 warn。 */
@@ -741,11 +771,11 @@ function summarizeRetry(results: TaskRetryOutcome[]): RetryNotice {
   if (blocked.length > 0) {
     return {
       tone: "warn",
-      text: blocked.map((result) => labelResult(result)).join("；"),
+      text: blocked.map((result) => labelResult(result, results.length > 1)).join("；"),
     };
   }
 
-  const done = results.map((result) => labelResult(result));
+  const done = results.map((result) => labelResult(result, results.length > 1));
   return { tone: "ok", text: `已下发：${done.join("；")}` };
 }
 
@@ -843,11 +873,11 @@ function SideEffectQueue({
                   className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2 text-[0.8125rem] font-medium">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[0.8125rem] font-medium">
                       {sideEffectTitle(effect)}
-                      <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
+                      <span className="text-xs font-normal tabular-nums text-muted-foreground">
                         {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
-                      </Badge>
+                      </span>
                     </div>
                     <p
                       className="text-xs tabular-nums text-muted-foreground"
@@ -873,7 +903,7 @@ function SideEffectQueue({
                         className={cn("size-3.5", busy === effect.id && "animate-spin")}
                         aria-hidden
                       />
-                      立即重发
+                      重发
                     </Button>
                   </div>
                 </div>
@@ -915,13 +945,119 @@ function sideEffectKindLabel(effect: SideEffect): string {
   }
 }
 
-function EmptyTasks() {
+/**
+ * RowAction 是行内动作的唯一尺寸：md 以下 36px 热区 + 13px 字，md 起收回 28px + 12px。
+ *
+ * 以前这段类名在本文件里抄了十遍，DESIGN 的「md 以下 h-9 / 13px」只以散文存在；
+ * 收成一个组件之后，改规则就是改这一行。
+ */
+function RowAction({ className, variant = "outline", ...props }: React.ComponentProps<typeof Button>) {
+  return (
+    <Button
+      variant={variant}
+      className={cn("h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs", className)}
+      {...props}
+    />
+  );
+}
+
+const STATE_FILTERS: { value: TaskState | ""; label: string }[] = [
+  { value: "", label: "全部" },
+  { value: "downloading", label: "下载中" },
+  { value: "processing", label: "加工中" },
+  { value: "finished", label: "已入库" },
+  { value: "failed", label: "需人工" },
+];
+
+/**
+ * TaskFilters 是任务卡的搜索与状态筛选（规格 §8.4 的 ?state=&q=）。
+ *
+ * 筛选住在地址栏里：F5 不丢，还能把「只看需人工」发给自己的另一个标签页。
+ */
+function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: PanelQuery) => void }) {
+  const [draft, setDraft] = React.useState(query.q);
+  const [seenQ, setSeenQ] = React.useState(query.q);
+
+  // 地址栏是真相：别人改了 URL（或点了「清除筛选」）时输入框要跟上。
+  // 在渲染期对齐（而不是放进 effect），避免一次多余的级联渲染。
+  if (seenQ !== query.q) {
+    setSeenQ(query.q);
+    setDraft(query.q);
+  }
+
+  // 边打字边发请求会把 142 行的库打成连点器：停手 300ms 再查。
+  React.useEffect(() => {
+    if (draft === query.q) return;
+    const timer = window.setTimeout(() => onQuery({ page: 1, q: draft, state: query.state }), 300);
+    return () => window.clearTimeout(timer);
+  }, [draft, query.q, query.state, onQuery]);
+
+  return (
+    <div className="flex flex-col gap-2 border-b px-4 pb-2.5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="relative flex items-center sm:w-64">
+        <Search
+          className="pointer-events-none absolute left-2.5 size-3.5 text-muted-foreground"
+          aria-hidden
+        />
+        <TextInput
+          type="search"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="搜番号或 movie_id"
+          aria-label="搜番号或 movie_id"
+          className="h-9 pl-8 md:h-8"
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="按状态筛选">
+        {STATE_FILTERS.map((filter) => {
+          const current = query.state === filter.value;
+          return (
+            <button
+              key={filter.value || "all"}
+              type="button"
+              aria-pressed={current}
+              onClick={() => onQuery({ page: 1, q: query.q, state: filter.value })}
+              className={cn(
+                "h-9 rounded-lg px-2.5 text-[0.8125rem] transition-colors md:h-7 md:text-xs",
+                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                current
+                  ? "bg-secondary font-medium text-secondary-foreground"
+                  : "text-muted-foreground hover:bg-muted",
+              )}
+            >
+              {filter.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function EmptyTasks({ query, onQuery }: { query: PanelQuery; onQuery: (next: PanelQuery) => void }) {
+  // 筛不到 ≠ 库是空的：最后一页的空页或搜索无结果时，不该拿新装引导糊弄人。
+  if (!query.q && !query.state) {
+    return (
+      <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+        <p>还没有任务。</p>
+        <p className="mt-1 text-xs">
+          在 JavDB 的想看清单里加一部有磁力的片，下一轮轮询就会出现在这里。
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-      <p>还没有任务。</p>
-      <p className="mt-1 text-xs">
-        在 JavDB 的想看清单里加一部有磁力的片，下一轮轮询就会出现在这里。
-      </p>
+      <p>没有匹配的任务。</p>
+      <p className="mt-1 text-xs">换个番号，或把状态筛选放回「全部」。</p>
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-3"
+        onClick={() => onQuery({ page: 1, q: "", state: "" })}
+      >
+        清除筛选
+      </Button>
     </div>
   );
 }
@@ -945,7 +1081,7 @@ const TASK_STATE_LOOK: Record<TaskState, { label: string; className: string }> =
   },
 };
 
-function isTaskState(value: string | undefined): value is TaskState {
+export function isTaskState(value: string | undefined): value is TaskState {
   return value === "downloading" || value === "processing" || value === "finished" || value === "failed";
 }
 
@@ -968,23 +1104,35 @@ function StateBadge({ state }: { state: TaskState | "" }) {
  * 靠红绿区分。所以失败写「失败」两个字，其余状态交给行上的任务徽章与抽屉。
  */
 function VersionChip({ version }: { version: TaskVersion }) {
-  const name = version.label || sourceLabel(version.source);
-  const failed = version.status === "failed";
+  const name = version.label || sourceShortLabel(version.source);
+  const state = versionState(version.status);
   return (
     <Badge
       variant="outline"
-      title={`${name} · ${stateLabel(version.status)} · ${version.infohash}`}
-      aria-label={`${name}，${stateLabel(version.status)}`}
-      className={cn(
-        "h-5 max-w-28 font-normal",
-        failed && "border-status-danger-border text-status-danger-text",
-        version.status === "finished" && "border-status-done-border text-status-done-text",
-      )}
+      title={`${version.label || sourceLabel(version.source)} · ${state.label} · ${version.infohash}`}
+      aria-label={`${version.label || sourceLabel(version.source)}，${state.label}`}
+      className={cn("h-5 max-w-28 font-normal", state.className)}
     >
       <span className="truncate">{name}</span>
-      {failed ? <span className="shrink-0">失败</span> : null}
+      <span className="shrink-0">{state.label}</span>
     </Badge>
   );
+}
+
+/**
+ * versionState 是版本胶囊与抽屉里的那一颗：状态词 + 三件套 token。
+ *
+ * 只换边框色的话，下载中与加工中长得一模一样；而版本级不说「需人工」——
+ * 任务才需人工，这条版本只是失败了。
+ */
+function versionState(status: TaskState): { label: string; className: string } {
+  const look = TASK_STATE_LOOK[isTaskState(status) ? status : "downloading"];
+  return { label: status === "failed" ? "失败" : look.label, className: look.className };
+}
+
+/** 胶囊里用来源的短名：112px 装不下「JavDB 磁力 + 已入库」，全名在 title 里。 */
+function sourceShortLabel(source: TaskVersion["source"]): string {
+  return source === "mteam_torrent" ? "M-Team" : "JavDB";
 }
 
 /**
@@ -1162,13 +1310,11 @@ function TaskDrawer({
         <footer className="space-y-2 border-t px-4 py-3">
           <DrawerActions
             movieID={movieID}
+            versionCount={task?.versions.length ?? 0}
             finishedCount={finishedCount}
             onRetried={reload}
             onRefresh={onRefresh}
           />
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。
-          </p>
         </footer>
       </aside>
     </div>,
@@ -1184,11 +1330,13 @@ function TaskDrawer({
  */
 function DrawerActions({
   movieID,
+  versionCount,
   finishedCount,
   onRetried,
   onRefresh,
 }: {
   movieID: string;
+  versionCount: number;
   finishedCount: number;
   onRetried: () => Promise<void>;
   onRefresh: () => Promise<void>;
@@ -1253,13 +1401,14 @@ function DrawerActions({
           <Button
             className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
             disabled={busy}
+            title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
             onClick={() => void retry(false)}
           >
             <RotateCcw
               className={cn("size-3.5", taskRetry.busy.has(taskRetryKey(movieID, false)) && "animate-spin")}
               aria-hidden
             />
-            重试
+            {versionCount > 1 ? `重试 ${versionCount} 条版本` : "重试"}
           </Button>
           {finishedCount > 0 ? (
             <Button
@@ -1278,17 +1427,25 @@ function DrawerActions({
 }
 
 function VersionCard({ version }: { version: TaskVersion }) {
+  // 抽屉里要回答的第一个问题是「这两条哪条是哪条」，所以判别词（中文/破解/来源）打头，
+  // hash 退成 8 位前缀、全值进 title。
   return (
     <div className="space-y-1.5 py-3 first:pt-0 last:pb-0">
-      <div className="flex items-center justify-between gap-2">
-        <span className="break-all font-mono text-xs leading-relaxed">{version.infohash}</span>
-        <StateBadge state={version.status} />
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-[0.8125rem] font-medium">{version.label || "无标签"}</span>
+            <span className="text-xs text-muted-foreground">{sourceLabel(version.source)}</span>
+          </div>
+          <span className="font-mono text-xs text-muted-foreground" title={version.infohash}>
+            {shortHash(version.infohash)}
+          </span>
+        </div>
+        <Badge variant="outline" className={cn("h-5 shrink-0", versionState(version.status).className)}>
+          {versionState(version.status).label}
+        </Badge>
       </div>
       <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-        <span>{sourceLabel(version.source)}</span>
-        <span aria-hidden>·</span>
-        <span>{version.label || "无标签"}</span>
-        {version.attempts > 1 ? <span aria-hidden>·</span> : null}
         {version.attempts > 1 ? <span>尝试 {version.attempts} 次</span> : null}
         {version.add_pending ? (
           <Badge variant="outline" className="h-5 border-status-progress-border font-normal text-status-progress-text">

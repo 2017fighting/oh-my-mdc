@@ -351,6 +351,10 @@ func TestAttentionDropsAStaleStallAlertAfterAReadd(t *testing.T) {
 	if len(attention.Stalled) != 1 {
 		t.Fatalf("stalled = %d, want 1（告过警的下载在需人工区）", len(attention.Stalled))
 	}
+	// 版本的身份要跟着行一起出来：一部作品两个版本都停住时，人要能分辨是哪一条。
+	if attention.Stalled[0].Label != "中文" || attention.Stalled[0].Source != string(task.SourceJavDBMagnet) {
+		t.Errorf("stalled[0] = %+v, want label=中文 source=javdb_magnet", attention.Stalled[0])
+	}
 
 	// 人工重试重新加种：这条版本从头下载，旧告警不再算数。
 	if err := store.AppendEvent(ctx, task.Event{

@@ -8,6 +8,8 @@ const failed = (reason: string, phase: AttentionItem["phase"] = "organize"): Att
   movie_id: "Smk1Q4",
   number: "MIDE-872",
   infohash: "1".repeat(40),
+  source: "javdb_magnet",
+  label: "中文",
   phase,
   reason,
   at: "2026-11-04T14:00:00Z",

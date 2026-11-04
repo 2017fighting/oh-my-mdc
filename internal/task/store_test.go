@@ -348,6 +348,26 @@ func TestListFiltersAndCounts(t *testing.T) {
 	if counts.NeedsAttention != 0 {
 		t.Errorf("needs_attention = %d, want 0（没有失败任务）", counts.NeedsAttention)
 	}
+
+	// Count 与 List 同一个筛选：面板靠它说「共 N 条」并关掉最后一页的下一页。
+	for _, probe := range []struct {
+		name   string
+		filter task.ListFilter
+		want   int
+	}{
+		{"全部", task.ListFilter{}, 2},
+		{"state=finished", task.ListFilter{State: "finished"}, 1},
+		{"q=ssis", task.ListFilter{Query: "ssis"}, 1},
+		{"q=%", task.ListFilter{Query: "%"}, 0},
+	} {
+		total, err := store.Count(ctx, probe.filter)
+		if err != nil {
+			t.Fatalf("Count(%s): %v", probe.name, err)
+		}
+		if total != probe.want {
+			t.Errorf("Count(%s) = %d, want %d", probe.name, total, probe.want)
+		}
+	}
 }
 
 // TestDetailReportsNotFound 确认抽屉对不存在的任务回一个可识别的错。
