@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 )
@@ -139,15 +142,74 @@ func TestTestConnectionChatUnavailable(t *testing.T) {
 }
 
 // TestTestConnectionNetworkErrorKeepsItsCode：连不上不是 token 的错，别误导用户去换 token。
+//
+// 连接被拒走注入的往返器，不碰真实网络：赌「某端口立刻回 RST」的用例在沙箱里会失效——
+// SYN 被黑洞掉时既没有 RST 也没有回执，外层客户端超时先到，结论就从 network 变成 timeout，
+// 同一份代码本机红、CI 绿。
 func TestTestConnectionNetworkErrorKeepsItsCode(t *testing.T) {
-	integration := New(Options{Host: "http://127.0.0.1:1"})
+	// 装上与正式运行同款的 defaultHTTPTimeout：这是「被拒」形状下最容易把它误判成超时的那层。
+	// 换正式跑测试时，上面还有 settings.TestTimeout 的 10s 总预算，不再叠加一层。
+	transport := &refusedTransport{}
+	integration := New(Options{
+		Host: "http://telegram.invalid", // .invalid 永不解析：万一注入失效也不会真去敲上游
+		HTTP: &http.Client{Timeout: defaultHTTPTimeout, Transport: transport},
+	})
+
 	result := integration.Test(context.Background(), settings.Section{}, testInput(nil))
 
 	if result.OK || result.Code != settings.CodeNetwork {
-		t.Fatalf("Test = %+v, want code=network", result)
+		t.Fatalf("Test = %+v, want code=network（连接被拒是 network，不是 timeout）", result)
 	}
-	if strings.Contains(result.Detail, "secret-token") {
-		t.Errorf("detail = %q, want 不泄露 bot token", result.Detail)
+	if transport.calls == 0 {
+		t.Fatal("注入的往返器一次都没被调用：请求绕过它出去了，这条用例就不再证明任何事")
+	}
+	if !strings.Contains(result.Detail, "连不上") {
+		t.Errorf("detail = %q, want 说清是连不上，而不是含糊的失败", result.Detail)
+	}
+	assertNoTokenLeak(t, result.Detail)
+}
+
+// TestTestConnectionTimeoutKeepsItsCode：真等不到回执才叫 timeout，外层客户端超时只服务这一类。
+// 两种形状各一条：响应头迟迟不来，与响应体读到一半停住（client 在 io.ReadAll 上等）。
+func TestTestConnectionTimeoutKeepsItsCode(t *testing.T) {
+	cases := []struct {
+		name    string
+		respond func(http.ResponseWriter)
+	}{
+		{"等不到响应头", func(http.ResponseWriter) {}},
+		{"响应体读到一半", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"ok":true,`)
+			w.(http.Flusher).Flush()
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				tc.respond(w)
+				<-release // 之后一个字节都不再写：客户端只能等到自己的超时
+			}))
+			t.Cleanup(func() {
+				close(release) // 先放走挂住的 handler，server.Close 才不会等它
+				server.Close()
+			})
+
+			integration := New(Options{
+				Host: server.URL,
+				HTTP: &http.Client{Timeout: 50 * time.Millisecond},
+			})
+			result := integration.Test(context.Background(), settings.Section{}, testInput(nil))
+
+			if result.OK || result.Code != settings.CodeTimeout {
+				t.Fatalf("Test = %+v, want code=timeout（等不到回执）", result)
+			}
+			if !strings.Contains(result.Detail, "超时") {
+				t.Errorf("detail = %q, want 说清是超时", result.Detail)
+			}
+			assertNoTokenLeak(t, result.Detail)
+		})
 	}
 }
 
@@ -265,9 +327,26 @@ func TestErrorNeverLeaksToken(t *testing.T) {
 	integration := New(Options{Host: "https://api.telegram.org", HTTP: &http.Client{Transport: transport}})
 
 	result := integration.Test(context.Background(), settings.Section{}, testInput(nil))
-	if strings.Contains(result.Detail, "secret-token") {
-		t.Errorf("detail = %q, want token 被抹掉", result.Detail)
+	assertNoTokenLeak(t, result.Detail)
+}
+
+// assertNoTokenLeak：token 在请求路径里，net/http 的 *url.Error 会把整条 URL 带出来，
+// 而这些文案会进 last_test_error 与 task_event。
+func assertNoTokenLeak(t *testing.T, detail string) {
+	t.Helper()
+	if strings.Contains(detail, "secret-token") {
+		t.Errorf("detail = %q, want 不泄露 bot token", detail)
 	}
+}
+
+// refusedTransport 复现「端口上没有进程监听」的真实失败形状：net 层拿到 ECONNREFUSED。
+// 必须是真的 ECONNREFUSED 而不是一句自造文案——分类看类型，不看字符串。
+// calls 是注入生效的证据：请求绕过去出网了，这条用例就什么也没证明。
+type refusedTransport struct{ calls int }
+
+func (t *refusedTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
