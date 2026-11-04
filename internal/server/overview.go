@@ -17,10 +17,11 @@ type overviewBody struct {
 }
 
 type countsBody struct {
-	Downloading    int `json:"downloading"`
-	Processing     int `json:"processing"`
-	Finished       int `json:"finished"`
-	NeedsAttention int `json:"needs_attention"`
+	Downloading int `json:"downloading"`
+	Processing  int `json:"processing"`
+	Finished    int `json:"finished"`
+	// Failed 是全部版本都失败的任务数（与面板的「需人工」筛选同一个口径）。
+	Failed int `json:"failed"`
 }
 
 // loopHealth 是一条循环的健康位：最近一次跑的时间与成败。
@@ -37,8 +38,10 @@ type loopsBody struct {
 
 // overview 汇总门禁与面板顶部要用的计数。
 //
-// counts 来自 task_state 视图（任务级状态不落列，ADR-0006）；需人工 = 失败任务 +
-// 驻留副作用（规格 §8.2）。loops 来自进程内健康位：循环没起来/还没跑过时是空位。
+// counts 来自 task_state 视图（任务级状态不落列，ADR-0006）；它只回答「多少任务在某状态」，
+// 不回答「多少件事要动手」——后者是 GET /api/attention 的行数，两个口径分开报，
+// 免得同一个屏幕上出现两个互相矛盾的「需人工」。loops 来自进程内健康位：
+// 循环没起来/还没跑过时是空位。
 func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	store, ok := s.settingsStore(w)
 	if !ok {
@@ -64,19 +67,19 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body.Counts = countsBody{
-			Downloading:    counts.Downloading,
-			Processing:     counts.Processing,
-			Finished:       counts.Finished,
-			NeedsAttention: counts.NeedsAttention,
+			Downloading: counts.Downloading,
+			Processing:  counts.Processing,
+			Finished:    counts.Finished,
+			Failed:      counts.Failed,
 		}
 	}
 	if s.sidefx != nil {
-		stuck, err := s.sidefx.StuckCount(r.Context())
-		if err != nil {
+		// 只校验副作用域可用（读不到就 503），不把 stuck 数拼进 counts：
+		// 那会把「任务数」与「要动手的事」混成一个数。
+		if _, err := s.sidefx.StuckCount(r.Context()); err != nil {
 			writeError(w, http.StatusServiceUnavailable, "db_unavailable", err.Error())
 			return
 		}
-		body.Counts.NeedsAttention += stuck
 	}
 
 	body.Loops = loopsBody{

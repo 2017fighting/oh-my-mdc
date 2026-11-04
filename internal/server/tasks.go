@@ -222,6 +222,10 @@ type attentionBody struct {
 	OK      bool            `json:"ok"`
 	Failed  []attentionItem `json:"failed"`
 	Stalled []attentionItem `json:"stalled"`
+	// FailedTruncated / StalledTruncated：这一半到了上限、后面还有。
+	// 面板据此把数字写成「50+」，而不是把队列的总量说成 50。
+	FailedTruncated  bool `json:"failed_truncated"`
+	StalledTruncated bool `json:"stalled_truncated"`
 }
 
 // attentionItem 是「需要人工」区的一行：失败的版本或停滞的下载。
@@ -240,19 +244,29 @@ type attentionItem struct {
 //
 // 驻留副作用不在这里：它属于副作用域，面板用 GET /api/side-effects?state=stuck
 // 拼进同一个区，两边的行各带自己的操作（重发 / 看任务）。
+// attentionLimit 是「需要人工」区每一半最多回多少行。
+// 超过它的队列会被截断，但回执会带上 *_truncated，面板因此不会把 50 说成总量。
+const attentionLimit = 50
+
 func (s *server) attention(w http.ResponseWriter, r *http.Request) {
 	store, ok := s.tasksStore(w)
 	if !ok {
 		return
 	}
 
-	attention, err := store.Attention(r.Context(), 50)
+	attention, err := store.Attention(r.Context(), attentionLimit)
 	if err != nil {
 		s.writeTaskError(w, err)
 		return
 	}
 
-	body := attentionBody{OK: true, Failed: []attentionItem{}, Stalled: []attentionItem{}}
+	body := attentionBody{
+		OK:               true,
+		Failed:           []attentionItem{},
+		Stalled:          []attentionItem{},
+		FailedTruncated:  attention.FailedTruncated,
+		StalledTruncated: attention.StalledTruncated,
+	}
 	for _, item := range attention.Failed {
 		body.Failed = append(body.Failed, toAttentionItem(item))
 	}

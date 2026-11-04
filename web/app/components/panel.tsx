@@ -104,8 +104,9 @@ export function Panel({
   }, [selected]);
 
   const counts = overview?.counts;
-  // 「需人工」只出现一次，就在卡片上——以前统计条与卡片各算一套（失败任务 vs
-  // 失败版本 + 停滞），同一个屏幕上印出 3 和 4，而它正是要人 glance 的那个数。
+  // 统计行只放任务级状态数。不放「需要人工」：那个数是一行一件事的**行数**，
+  // 它唯一的住处是下面那张卡的徽章与构成说明；counts.failed 是另一个口径
+  // （全部版本都失败的任务），只服务「需人工」筛选，两者不再合成一个数。
   const stats = [
     { label: "下载中", value: counts?.downloading ?? 0 },
     { label: "加工中", value: counts?.processing ?? 0 },
@@ -183,7 +184,7 @@ export function Panel({
         <CardContent className="px-0">
           <TaskFilters query={query} onQuery={onQuery} />
           {tasks.length === 0 ? (
-            <EmptyTasks query={query} onQuery={onQuery} />
+            <EmptyTasks query={query} onQuery={onQuery} failedVersions={attention?.failed.length ?? 0} />
           ) : (
             <>
               <ul className="divide-y lg:hidden">
@@ -404,14 +405,27 @@ function NeedsAttention({
 }) {
   const failed = attention?.failed ?? [];
   const stalled = attention?.stalled ?? [];
-  const total = failed.length + stalled.length + stuck.length;
+  const failedGroups = groupByNumber(failed);
+  const stalledGroups = groupByNumber(stalled);
+  // 被上限切过的那一半只数得到 50，所以数字后面跟一个 +，不把截断说成总量。
+  const cut = {
+    failed: attention?.failed_truncated ?? false,
+    stalled: attention?.stalled_truncated ?? false,
+  };
+
+  // 总数是**行数**：一行就是一个要动手的对象（一个番号的失败版本、一个番号的停滞
+  // 下载，或一条驻留副作用）。这是「我还有几件事」唯一的答案，说明里给它的构成，
+  // 不给第二个总数。
+  const total = failedGroups.length + stalledGroups.length + stuck.length;
+  const broke = [
+    failedGroups.length > 0 && `失败 ${failedGroups.length}${cut.failed ? "+" : ""} 部`,
+    stalledGroups.length > 0 && `停滞 ${stalledGroups.length}${cut.stalled ? "+" : ""} 部`,
+    stuck.length > 0 && `驻留副作用 ${stuck.length} 条`,
+  ].filter(Boolean);
 
   const taskRetry = useTaskRetry(onRefresh);
   // 任务侧重试与副作用重发是两件事，各有自己的忙位与提示（规格 §8.2 的行内动作）。
   const sideEffect = useSideEffectRetry(onRefresh);
-
-  const failedGroups = groupByNumber(failed);
-  const stalledGroups = groupByNumber(stalled);
 
   return (
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
@@ -424,16 +438,17 @@ function NeedsAttention({
             />
             需要人工
           </CardTitle>
-          {/* 总数只在右上角徽章上说一次：这里再说一遍就是同一个数印两遍。 */}
+          {/* 说明只报构成，不重复报总数：徽章上的那个数就在它右上角。 */}
           <CardDescription aria-live="polite">
             {total === 0
               ? "没有要动手的事：失败、停滞与驻留副作用都会出现在这里。"
-              : "失败重试、停滞确认、驻留副作用重发。"}
+              : broke.join(" · ")}
           </CardDescription>
         </div>
         <CardAction>
           <Badge
             variant="outline"
+            aria-label={`${total}${cut.failed || cut.stalled ? "+" : ""} 项需要人工`}
             className={cn(
               "border-transparent tabular-nums",
               total > 0
@@ -441,7 +456,7 @@ function NeedsAttention({
                 : "bg-secondary text-secondary-foreground",
             )}
           >
-            {total}
+            {cut.failed || cut.stalled ? `${total}+` : total}
           </Badge>
         </CardAction>
       </CardHeader>
@@ -537,7 +552,9 @@ function AttentionHeading({ label, count }: { label: string; count: number }) {
   return (
     <h3 className="mb-1 flex items-baseline gap-1.5 text-xs font-medium text-muted-foreground">
       {label}
-      <span className="tabular-nums">{count}</span>
+      <span className="tabular-nums">
+        {count} 条{label === "驻留副作用" ? "" : "版本"}
+      </span>
     </h3>
   );
 }
@@ -1017,6 +1034,11 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
               type="button"
               aria-pressed={current}
               onClick={() => onQuery({ page: 1, q: query.q, state: filter.value })}
+              // 「需人工」筛的是**任务级**状态：全部版本都失败的作品。失败版本本身属于
+              // 上面那张卡，两者口径不同，所以这里把它们说出来。
+              title={
+                filter.value === "failed" ? "任务级：只算全部版本都失败的作品" : undefined
+              }
               className={cn(
                 "h-9 rounded-lg px-2.5 text-[0.8125rem] transition-colors md:h-7 md:text-xs",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
@@ -1034,7 +1056,38 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
   );
 }
 
-function EmptyTasks({ query, onQuery }: { query: PanelQuery; onQuery: (next: PanelQuery) => void }) {
+function EmptyTasks({
+  query,
+  onQuery,
+  failedVersions,
+}: {
+  query: PanelQuery;
+  onQuery: (next: PanelQuery) => void;
+  /** 「需要人工」里的失败版本条数：用来解释「为什么筛需人工是空的」。 */
+  failedVersions: number;
+}) {
+  // 筛「需人工」却是空的，不等于没事：整个任务没失败、但里面的破解版失败时，
+  // 任务状态会随已入库的中文版走。这时候不说清，人会以为上面那张卡在说谎。
+  if (query.state === "failed") {
+    return (
+      <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+        <p>没有全部版本都失败的作品。</p>
+        <p className="mt-1 text-xs leading-relaxed">
+          {failedVersions > 0
+            ? `上面「需要人工」里有 ${failedVersions} 条失败版本：它们所属的作品还有别的版本已入库或在跑，所以任务状态不算失败。`
+            : "失败版本都挂在上面「需要人工」里；这里只算整个任务都失败的作品。"}
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={() => onQuery({ page: 1, q: "", state: "" })}
+        >
+          清除筛选
+        </Button>
+      </div>
+    );
+  }
   // 筛不到 ≠ 库是空的：最后一页的空页或搜索无结果时，不该拿新装引导糊弄人。
   if (!query.q && !query.state) {
     return (

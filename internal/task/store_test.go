@@ -345,9 +345,6 @@ func TestListFiltersAndCounts(t *testing.T) {
 	if counts.Downloading != 1 || counts.Finished != 1 || counts.Failed != 0 {
 		t.Errorf("counts = %+v, want downloading=1 finished=1 failed=0", counts)
 	}
-	if counts.NeedsAttention != 0 {
-		t.Errorf("needs_attention = %d, want 0（没有失败任务）", counts.NeedsAttention)
-	}
 
 	// Count 与 List 同一个筛选：面板靠它说「共 N 条」并关掉最后一页的下一页。
 	for _, probe := range []struct {

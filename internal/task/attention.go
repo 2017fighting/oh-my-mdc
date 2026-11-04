@@ -39,6 +39,12 @@ type Attention struct {
 	Failed []AttentionItem
 	// Stalled 是仍在下载、但已经发过停滞告警的版本（P12-4 的告警兜底面）。
 	Stalled []AttentionItem
+	// FailedTruncated / StalledTruncated 表示这一半被上限切掉了尾巴。
+	//
+	// 面板要据此把数字写成「50+」而不是 50：一个悄悄停在 50 的队列，
+	// 会让「我还有 50 件事」和「我已经清完了」长得一模一样。
+	FailedTruncated  bool
+	StalledTruncated bool
 }
 
 // Attention 读「需要人工」区（规格 §8.2）。
@@ -56,15 +62,24 @@ func (s *Store) Attention(ctx context.Context, limit int) (Attention, error) {
 
 	attention := Attention{Failed: []AttentionItem{}, Stalled: []AttentionItem{}}
 
-	failed, err := s.failedItems(ctx, limit)
+	// 多取一条：取到 limit+1 才说明「后面还有」，limit 恰好是总量时不该误报截断。
+	failed, err := s.failedItems(ctx, limit+1)
 	if err != nil {
 		return Attention{}, err
 	}
+	if len(failed) > limit {
+		failed = failed[:limit]
+		attention.FailedTruncated = true
+	}
 	attention.Failed = failed
 
-	stalled, err := s.stalledItems(ctx, limit)
+	stalled, err := s.stalledItems(ctx, limit+1)
 	if err != nil {
 		return Attention{}, err
+	}
+	if len(stalled) > limit {
+		stalled = stalled[:limit]
+		attention.StalledTruncated = true
 	}
 	attention.Stalled = stalled
 	return attention, nil

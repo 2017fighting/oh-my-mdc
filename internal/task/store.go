@@ -407,7 +407,10 @@ func (s *Store) Events(ctx context.Context, movieID string, limit int) ([]Event,
 	return events, nil
 }
 
-// Counts 按聚合状态数任务（面板统计卡）。
+// Counts 按聚合状态数任务（面板统计行）。
+//
+// Failed 只数「全部版本都失败」的任务；一任务里部分版本失败属于「需要人工」区的
+// 行，由 Attention 报，两者不在这儿相加。
 func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	var counts Counts
 	err := s.pool.QueryRow(ctx,
@@ -420,7 +423,6 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	if err != nil {
 		return Counts{}, fmt.Errorf("task: 数任务状态: %w", err)
 	}
-	counts.NeedsAttention = counts.Failed
 	return counts, nil
 }
 

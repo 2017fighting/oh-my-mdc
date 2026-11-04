@@ -171,15 +171,19 @@ type Event struct {
 	At     time.Time
 }
 
-// Counts 是面板统计卡的四个数（规格 §8.2）。
+// Counts 是面板统计行的任务数（规格 §8.2）。
 //
-// NeedsAttention 由调用方加上驻留副作用数：那属于副作用域，不在任务表里。
+// 只有任务级状态。驻留副作用不进这儿：「有几件事要动手」是 GET /api/attention 的行数，
+// 而这里是「有多少任务处于某状态」，两个口径分开报。
 type Counts struct {
-	Downloading    int
-	Processing     int
-	Finished       int
-	Failed         int
-	NeedsAttention int
+	Downloading int
+	Processing  int
+	Finished    int
+	// Failed 是 task_state 里 state='failed' 的任务数：**全部版本都失败**的番号，
+	// 也是面板「需人工」筛选能筛到的那一批。它与「需要人工」区的行数不是一回事
+	// （一行是一个要动手的对象：失败版本组、停滞组或驻留副作用），两处各有各的口径，
+	// 不再合成一个 needs_attention 让两边互相打架。
+	Failed int
 }
 
 // ListFilter 是 GET /api/tasks 的筛选与翻页（规格 §8.4）。

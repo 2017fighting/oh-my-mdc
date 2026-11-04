@@ -610,7 +610,7 @@ func TestOverviewIsEmptyWithoutTaskDomain(t *testing.T) {
 	if !ok {
 		t.Fatalf("counts = %v, want 对象", body["counts"])
 	}
-	for _, key := range []string{"downloading", "processing", "finished", "needs_attention"} {
+	for _, key := range []string{"downloading", "processing", "finished", "failed"} {
 		if counts[key] != float64(0) {
 			t.Errorf("counts.%s = %v, want 0", key, counts[key])
 		}

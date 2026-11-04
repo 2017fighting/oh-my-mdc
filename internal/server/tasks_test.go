@@ -178,8 +178,8 @@ func TestTaskDetailReturnsVersionsAndTimeline(t *testing.T) {
 	}
 }
 
-// TestOverviewCountsAndLoopHealth 钉住统计卡与循环健康位的接线：
-// counts 来自 task_state 视图，needs_attention 还要算上驻留副作用。
+// TestOverviewCountsAndLoopHealth 钉住统计行与循环健康位的接线：
+// counts 只数任务；驻留副作用不计入 counts（它在 /api/attention 的行里）。
 func TestOverviewCountsAndLoopHealth(t *testing.T) {
 	f := newTaskFixture(t)
 	f.seed(t, "YwrO3B", "ABP-123", "1111111111111111111111111111111111111111")
@@ -205,8 +205,11 @@ func TestOverviewCountsAndLoopHealth(t *testing.T) {
 	if counts["downloading"] != float64(1) || counts["finished"] != float64(1) {
 		t.Errorf("counts = %v, want downloading=1 finished=1", counts)
 	}
-	if counts["needs_attention"] != float64(1) {
-		t.Errorf("needs_attention = %v, want 1（驻留副作用）", counts["needs_attention"])
+	if counts["failed"] != float64(0) {
+		t.Errorf("counts.failed = %v, want 0（上面那条驻留副作用不是失败任务）", counts["failed"])
+	}
+	if _, ok := counts["needs_attention"]; ok {
+		t.Errorf("counts.needs_attention 应当已经移除：与「需要人工」行数是两个口径")
 	}
 
 	loopRows, ok := body["loops"].(map[string]any)

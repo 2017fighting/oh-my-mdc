@@ -100,7 +100,8 @@ export type Overview = {
     downloading: number;
     processing: number;
     finished: number;
-    needs_attention: number;
+    /** 全部版本都失败的任务数：与 `?state=failed` 同一口径，不等于「需要人工」的行数。 */
+    failed: number;
   };
   loops: Record<
     "poll" | "reconcile" | "sidefx",
@@ -240,6 +241,9 @@ export type Attention = {
   ok: boolean;
   failed: AttentionItem[];
   stalled: AttentionItem[];
+  /** 每半上限 50 行；被截断时面板写「50+」，不把 50 说成总量。 */
+  failed_truncated: boolean;
+  stalled_truncated: boolean;
 };
 
 /** autorun 改写的前后对比：GET 只读预览，POST 是人工确认后的落地。 */
