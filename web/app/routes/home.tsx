@@ -7,6 +7,7 @@ import { Badge } from "~/components/ui/badge";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
 import { Panel, isTaskState, type PanelQuery } from "~/components/panel";
+import { attentionRowCount } from "~/lib/attention";
 import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
 import { formatInterval } from "~/lib/time";
 import {
@@ -157,7 +158,21 @@ export default function Home() {
   // 刚打开 / 的那一刻 snapshot 还没回来，view 会短暂算成 settings，于是面板写着
   // 「集成设置」、导航亮着另一边，而屏幕上其实什么都没有。
   const onPanel = route.view === "panel" && (snapshot ? initialized : true);
-  const title = onPanel ? "面板" : !snapshot ? "集成设置" : initialized ? "集成设置" : "初始化向导";
+  // 面板的标题就是那个数：首屏第一眼要回答的是「还有几件事」，不是一个叫「面板」的词。
+  // 全站最大的字留在这里，卡片里的说明只负责把它拆开（失败几部 / 停滞几部 / 驻留几条）。
+  const rows = attentionRowCount(attention, sideEffects);
+  const cut = Boolean(attention?.failed_truncated || attention?.stalled_truncated);
+  const title = onPanel
+    ? !snapshot
+      ? "面板"
+      : rows > 0
+        ? `${rows}${cut ? "+" : ""} 件事需要人工`
+        : "没有要动手的事"
+    : !snapshot
+      ? "集成设置"
+      : initialized
+        ? "集成设置"
+        : "初始化向导";
 
   return (
     <div id="app-shell" className="mx-auto flex min-h-screen w-full max-w-6xl gap-6 p-6 text-foreground">

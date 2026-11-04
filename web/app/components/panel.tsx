@@ -6,7 +6,7 @@ import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
 import { groupByNumber, type FailureGroup } from "~/lib/attention";
@@ -108,10 +108,11 @@ export function Panel({
   // 统计行只放任务级状态数。不放「需要人工」：那个数是一行一件事的**行数**，
   // 它唯一的住处是下面那张卡的徽章与构成说明；counts.failed 是另一个口径
   // （全部版本都失败的任务），只服务「需人工」筛选，两者不再合成一个数。
+  // 统计行只放「还在动」的两个数。已入库是永远不需要动作的那个，挪到右端与新鲜度
+  // 同处：它是背景，不是待办。
   const stats = [
     { label: "下载中", value: counts?.downloading ?? 0 },
     { label: "加工中", value: counts?.processing ?? 0 },
-    { label: "已入库", value: counts?.finished ?? 0 },
   ];
 
   const refresh = async () => {
@@ -143,6 +144,9 @@ export function Panel({
         </section>
 
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span className="tabular-nums">
+            已入库 <span className="font-medium text-foreground">{counts?.finished ?? 0}</span>
+          </span>
           <span className="tabular-nums">
             {loadedAt ? (
               <>
@@ -432,6 +436,10 @@ function NeedsAttention({
   // 作者关心的不是「哪一个子系统的」，而是「我刚才那一按成了没有」。
   const sideEffect = useSideEffectRetry(onRefresh, retryHooks);
 
+  // 没事可做、也没有刚做完的回执：这张卡整块不出现。页面标题已经说了「没有要动手的事」，
+  // 再留一张空卡把同一个意思说第二遍，只是给首屏加了一段家具。
+  if (total === 0 && receipts.length === 0) return null;
+
   return (
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
       <CardHeader>
@@ -443,27 +451,11 @@ function NeedsAttention({
             />
             需要人工
           </CardTitle>
-          {/* 说明只报构成，不重复报总数：徽章上的那个数就在它右上角。 */}
+          {/* 只说构成，不重复总数：那个数已经是页面标题；这里把它拆成 失败 / 停滞 / 驻留。 */}
           <CardDescription aria-live="polite">
-            {total === 0
-              ? "没有要动手的事：失败、停滞与驻留副作用都会出现在这里。"
-              : broke.join(" · ")}
+            {total === 0 ? "已经清完了。" : broke.join(" · ")}
           </CardDescription>
         </div>
-        <CardAction>
-          <Badge
-            variant="outline"
-            aria-label={`${total}${cut.failed || cut.stalled ? "+" : ""} 项需要人工`}
-            className={cn(
-              "border-transparent tabular-nums",
-              total > 0
-                ? "bg-status-danger-surface text-status-danger-text"
-                : "bg-secondary text-secondary-foreground",
-            )}
-          >
-            {cut.failed || cut.stalled ? `${total}+` : total}
-          </Badge>
-        </CardAction>
       </CardHeader>
       {total > 0 || receipts.length > 0 ? (
         <CardContent>

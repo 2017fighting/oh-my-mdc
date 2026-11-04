@@ -1,4 +1,4 @@
-import type { AttentionItem } from "./api";
+import type { Attention, AttentionItem, SideEffect } from "./api";
 
 /**
  * 「需要人工」区按番号收组。
@@ -24,4 +24,20 @@ export function groupByNumber(items: AttentionItem[]): FailureGroup[] {
     byMovie.set(item.movie_id, { movieID: item.movie_id, number: item.number, items: [item] });
   }
   return [...byMovie.values()];
+}
+
+/**
+ * attentionRowCount 是「需要人工」卡片里会显示几行。
+ *
+ * 行 = 一个要动手的对象：一个番号的失败版本、一个番号的停滞下载，或一条驻留副作用。
+ * 页面标题与卡片说明读同一个数，不给第二个口径。
+ */
+export function attentionRowCount(
+  attention: Attention | null,
+  sideEffects: SideEffect[],
+): number {
+  const failed = groupByNumber(attention?.failed ?? []).length;
+  const stalled = groupByNumber(attention?.stalled ?? []).length;
+  const stuck = sideEffects.filter((effect) => effect.stuck).length;
+  return failed + stalled + stuck;
 }
