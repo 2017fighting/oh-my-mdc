@@ -3,7 +3,8 @@ import { AlertTriangle, ChevronRight, Loader2, RefreshCw, RotateCcw, X } from "l
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Button } from "~/components/ui/button";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
 import {
@@ -34,6 +35,9 @@ export function Panel({
   tasks,
   attention,
   sideEffects,
+  page,
+  pageSize,
+  onPage,
   onOpenWizard,
   onRefresh,
 }: {
@@ -41,11 +45,28 @@ export function Panel({
   tasks: TaskRow[];
   attention: Attention | null;
   sideEffects: SideEffect[];
+  page: number;
+  pageSize: number;
+  onPage: (page: number) => void;
   onOpenWizard: () => void;
   onRefresh: () => Promise<void>;
 }) {
   const [selected, setSelected] = React.useState<string | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
+  const contentRef = React.useRef<HTMLDivElement>(null);
+
+  // 抽屉是模态：背景整块 inert，页面不跟着滚，关掉再把焦点还给那一行。
+  React.useEffect(() => {
+    const content = contentRef.current;
+    if (!selected || !content) return;
+    content.setAttribute("inert", "");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      content.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [selected]);
 
   const counts = overview?.counts;
   const stats = [
@@ -64,9 +85,12 @@ export function Panel({
     }
   };
 
+  const hasMore = tasks.length >= pageSize;
+
   return (
     <>
-      <section aria-label="任务统计" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div ref={contentRef} className="flex flex-col gap-6">
+      <section aria-label="任务统计" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         {stats.map((stat) => (
           <Card key={stat.label} size="sm">
             <CardHeader>
@@ -86,33 +110,68 @@ export function Panel({
       />
 
       <Card>
-        <CardHeader className="flex-row items-start justify-between gap-3">
+        <CardHeader>
           <div>
-            <CardTitle>任务</CardTitle>
+            <CardTitle as="h2">任务</CardTitle>
             <CardDescription>一行一任务（按 movie_id 聚合），版本以小 chip 展示。</CardDescription>
           </div>
-          <button
-            type="button"
-            onClick={() => void refresh()}
-            disabled={refreshing}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-input px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted disabled:opacity-60"
-          >
-            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
-            刷新
-          </button>
+          <CardAction>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={() => void refresh()}
+              disabled={refreshing}
+            >
+              <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
+              刷新
+            </Button>
+          </CardAction>
         </CardHeader>
         <CardContent className="px-0">
           {tasks.length === 0 ? (
             <EmptyTasks />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-[13px]">
+            <>
+              <ul className="divide-y lg:hidden">
+                {tasks.map((task) => (
+                  <li key={task.movie_id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelected(task.movie_id)}
+                      aria-label={`打开 ${task.number} 的详情`}
+                      className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                    >
+                      <span className="min-w-0">
+                        <span className="block text-[0.8125rem] font-medium tabular-nums">
+                          {task.number}
+                        </span>
+                        <span className="block font-mono text-xs text-muted-foreground">
+                          {task.movie_id}
+                        </span>
+                        <span className="mt-1.5 flex flex-wrap gap-1">
+                          {task.versions.map((version) => (
+                            <VersionChip key={version.infohash} version={version} />
+                          ))}
+                        </span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <StateBadge state={task.state} />
+                        <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+
+              <div className="hidden overflow-x-auto lg:block">
+              <table className="w-full border-collapse text-[0.8125rem] lg:min-w-[34rem]">
                 <thead>
-                  <tr className="border-y bg-muted/40 text-left text-[11px] font-medium tracking-wide text-muted-foreground">
+                  <tr className="border-y bg-muted/40 text-left text-xs font-medium tracking-wide text-muted-foreground">
                     <th className="px-4 py-2 font-medium">番号</th>
                     <th className="px-4 py-2 font-medium">状态</th>
                     <th className="px-4 py-2 font-medium">版本</th>
-                    <th className="px-4 py-2 font-medium">更新</th>
+                    <th className="hidden px-4 py-2 font-medium md:table-cell">更新</th>
                     <th className="w-8 px-2 py-2" aria-label="打开抽屉" />
                   </tr>
                 </thead>
@@ -120,21 +179,24 @@ export function Panel({
                   {tasks.map((task) => (
                     <tr
                       key={task.movie_id}
-                      tabIndex={0}
-                      role="button"
-                      aria-label={`打开 ${task.number} 的详情`}
                       onClick={() => setSelected(task.movie_id)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setSelected(task.movie_id);
-                        }
-                      }}
-                      className="cursor-pointer border-b transition-colors last:border-b-0 hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none"
+                      className="cursor-pointer border-b transition-colors last:border-b-0 hover:bg-muted/40"
                     >
                       <td className="px-4 py-2.5 align-top">
-                        <div className="font-medium tabular-nums">{task.number}</div>
-                        <div className="font-mono text-[11px] text-muted-foreground">{task.movie_id}</div>
+                        <div className="font-medium tabular-nums">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelected(task.movie_id);
+                            }}
+                            className="inline-flex min-h-6 items-center rounded-sm text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                            aria-label={`打开 ${task.number} 的详情`}
+                          >
+                            {task.number}
+                          </button>
+                        </div>
+                        <div className="font-mono text-xs text-muted-foreground">{task.movie_id}</div>
                       </td>
                       <td className="px-4 py-2.5 align-top">
                         <StateBadge state={task.state} />
@@ -146,7 +208,7 @@ export function Panel({
                           ))}
                         </div>
                       </td>
-                      <td className="px-4 py-2.5 align-top text-xs text-muted-foreground">
+                      <td className="hidden px-4 py-2.5 align-top text-xs text-muted-foreground md:table-cell">
                         {formatTime(task.updated_at)}
                       </td>
                       <td className="px-2 py-2.5 align-top text-muted-foreground">
@@ -157,7 +219,33 @@ export function Panel({
                 </tbody>
               </table>
             </div>
+            </>
           )}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
+            <span className="tabular-nums">
+              第 {page} 页 · 每页 {pageSize} 条
+            </span>
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs"
+                disabled={page <= 1}
+                onClick={() => onPage(page - 1)}
+              >
+                上一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs"
+                disabled={!hasMore}
+                onClick={() => onPage(page + 1)}
+              >
+                下一页
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -165,7 +253,7 @@ export function Panel({
 
       <Card>
         <CardHeader>
-          <CardTitle>循环健康</CardTitle>
+          <CardTitle as="h2">循环健康</CardTitle>
           <CardDescription>
             三条循环（轮询 / 对账 / 副作用）各自单飞；副作用失败退避重试，耗尽后驻留等人工。
           </CardDescription>
@@ -186,15 +274,17 @@ export function Panel({
             );
           })}
           <Separator className="my-1" />
-          <button
-            type="button"
+          <Button
+            variant="link"
+            size="sm"
             onClick={onOpenWizard}
-            className="self-start text-sm font-medium text-primary underline-offset-4 hover:underline"
+            className="h-7 self-start px-0 text-sm"
           >
             去集成设置
-          </button>
+          </Button>
         </CardContent>
       </Card>
+      </div>
 
       {selected ? (
         <TaskDrawer
@@ -233,12 +323,12 @@ function NeedsAttention({
   const taskRetry = useTaskRetry(onRefresh);
 
   return (
-    <Card className={cn(total > 0 && "ring-destructive/30")}>
-      <CardHeader className="flex-row items-start justify-between gap-3">
+    <Card className={cn(total > 0 && "ring-status-danger-border")}>
+      <CardHeader>
         <div>
-          <CardTitle className="flex items-center gap-2">
+          <CardTitle as="h2" className="flex items-center gap-2">
             <AlertTriangle
-              className={cn("size-4", total > 0 ? "text-destructive" : "text-muted-foreground")}
+              className={cn("size-4", total > 0 ? "text-status-danger-text" : "text-muted-foreground")}
               aria-hidden
             />
             需要人工
@@ -249,7 +339,19 @@ function NeedsAttention({
               : `${total} 件要动手的事：失败重试、停滞确认、驻留副作用重发。`}
           </CardDescription>
         </div>
-        <Badge variant={total > 0 ? "destructive" : "secondary"}>{total}</Badge>
+        <CardAction>
+          <Badge
+            variant="outline"
+            className={cn(
+              "border-transparent tabular-nums",
+              total > 0
+                ? "bg-status-danger-surface text-status-danger-text"
+                : "bg-secondary text-secondary-foreground",
+            )}
+          >
+            {total}
+          </Badge>
+        </CardAction>
       </CardHeader>
       {total > 0 ? (
         <CardContent className="space-y-2">
@@ -259,11 +361,19 @@ function NeedsAttention({
             <Notice tone={taskRetry.notice.tone}>{taskRetry.notice.text}</Notice>
           ) : null}
 
+          <div className="divide-y">
           {failed.map((item) => (
             <AttentionRow
               key={`failed-${item.infohash}`}
               title={item.number}
-              badge={<Badge variant="destructive">{phaseLabel(item.phase)}失败</Badge>}
+              badge={
+                <Badge
+                  variant="outline"
+                  className="border-transparent bg-status-danger-surface text-status-danger-text"
+                >
+                  {phaseLabel(item.phase)}失败
+                </Badge>
+              }
               detail={item.reason}
               action={
                 <RetryActions
@@ -297,21 +407,30 @@ function NeedsAttention({
             <AttentionRow
               key={`stuck-${effect.id}`}
               title={sideEffectTitle(effect)}
-              badge={<Badge variant="destructive">副作用驻留</Badge>}
+              badge={
+                <Badge
+                  variant="outline"
+                  className="border-transparent bg-status-danger-surface text-status-danger-text"
+                >
+                  副作用驻留
+                </Badge>
+              }
               detail={effect.last_error || "自动重试已放弃，等人工重发。"}
               action={
-                <button
-                  type="button"
-                  className={MiniActionClass}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
                   disabled={busy === effect.id}
                   onClick={() => void retry(effect.id)}
                 >
                   <RotateCcw className={cn("size-3.5", busy === effect.id && "animate-spin")} aria-hidden />
                   重发
-                </button>
+                </Button>
               }
             />
           ))}
+          </div>
         </CardContent>
       ) : null}
     </Card>
@@ -331,13 +450,13 @@ function AttentionRow({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-2 rounded-lg border p-3">
+    <div className="flex flex-wrap items-start justify-between gap-2 py-3 first:pt-0 last:pb-0">
       <div className="min-w-0 space-y-1">
-        <div className="flex items-center gap-2 text-[13px] font-medium tabular-nums">
+        <div className="flex items-center gap-2 text-[0.8125rem] font-medium tabular-nums">
           {title}
           {badge}
         </div>
-        <p className="text-[11px] leading-relaxed break-words text-muted-foreground">{detail}</p>
+        <p className="text-xs leading-relaxed break-words text-muted-foreground">{detail}</p>
       </div>
       {action}
     </div>
@@ -358,13 +477,13 @@ function RetryActions({
 }) {
   return (
     <div className="flex shrink-0 items-center gap-1.5" data-movie-id={movieID}>
-      <button type="button" className={MiniActionClass} disabled={busy} onClick={onRetry}>
+      <Button variant="outline" size="sm" className="text-xs" disabled={busy} onClick={onRetry}>
         <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
         重试
-      </button>
-      <button type="button" className={MiniActionClass} onClick={onOpen}>
+      </Button>
+      <Button variant="outline" size="sm" className="text-xs" onClick={onOpen}>
         查看任务
-      </button>
+      </Button>
     </div>
   );
 }
@@ -483,7 +602,7 @@ function SideEffectQueue({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>副作用队列</CardTitle>
+        <CardTitle as="h2">副作用队列</CardTitle>
         <CardDescription>
           删清单项、刷 Jellyfin、发通知都走这张表：同目标只排一条，失败退避重试，耗尽后移到「需要人工」。
         </CardDescription>
@@ -493,43 +612,42 @@ function SideEffectQueue({
         {effects.length === 0 ? (
           <p className="text-xs text-muted-foreground">队列是空的。</p>
         ) : (
-          effects.map((effect) => (
-            <div
-              key={effect.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 text-[13px] font-medium">
-                  {sideEffectTitle(effect)}
-                  <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
-                    第 {effect.attempts + 1} 次
-                  </Badge>
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  下次尝试 {formatTime(effect.next_attempt_at)}
-                  {effect.last_error ? ` · 上次：${effect.last_error}` : ""}
-                </p>
-              </div>
-              <button
-                type="button"
-                className={MiniActionClass}
-                disabled={busy === effect.id}
-                onClick={() => void retry(effect.id)}
+          <div className="divide-y">
+            {effects.map((effect) => (
+              <div
+                key={effect.id}
+                className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0"
               >
-                <RotateCcw className={cn("size-3.5", busy === effect.id && "animate-spin")} aria-hidden />
-                提前重试
-              </button>
-            </div>
-          ))
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-[0.8125rem] font-medium">
+                    {sideEffectTitle(effect)}
+                    <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
+                      第 {effect.attempts + 1} 次
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    下次尝试 {formatTime(effect.next_attempt_at)}
+                    {effect.last_error ? ` · 上次：${effect.last_error}` : ""}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
+                  disabled={busy === effect.id}
+                  onClick={() => void retry(effect.id)}
+                >
+                  <RotateCcw className={cn("size-3.5", busy === effect.id && "animate-spin")} aria-hidden />
+                  提前重试
+                </Button>
+              </div>
+            ))}
+          </div>
         )}
       </CardContent>
     </Card>
   );
 }
-
-/** 行内小按钮的唯一 class（重发/提前重试/查看任务共用）。 */
-const MiniActionClass =
-  "inline-flex h-7 shrink-0 items-center gap-1 rounded-lg border border-input px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted disabled:opacity-60";
 
 /** 一条待办的人话标题：番号（有的话）+ 这一条在做什么。 */
 function sideEffectTitle(effect: SideEffect): string {
@@ -573,10 +691,22 @@ function EmptyTasks() {
 
 /** 四个状态名的唯一真相：徽章、时间线、图例都从这里取文案与色调。 */
 const TASK_STATE_LOOK: Record<TaskState, { label: string; className: string }> = {
-  downloading: { label: "下载中", className: "bg-sky-50 text-sky-800 dark:bg-sky-950 dark:text-sky-300" },
-  processing: { label: "加工中", className: "bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-300" },
-  finished: { label: "已入库", className: "bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" },
-  failed: { label: "需人工", className: "bg-destructive/10 text-destructive" },
+  downloading: {
+    label: "下载中",
+    className: "border-status-info-border bg-status-info-surface text-status-info-text",
+  },
+  processing: {
+    label: "加工中",
+    className: "border-status-progress-border bg-status-progress-surface text-status-progress-text",
+  },
+  finished: {
+    label: "已入库",
+    className: "border-status-done-border bg-status-done-surface text-status-done-text",
+  },
+  failed: {
+    label: "需人工",
+    className: "border-status-danger-border bg-status-danger-surface text-status-danger-text",
+  },
 };
 
 function isTaskState(value: string | undefined): value is TaskState {
@@ -589,7 +719,7 @@ function StateBadge({ state }: { state: TaskState | "" }) {
   }
   const badge = TASK_STATE_LOOK[state];
   return (
-    <Badge variant="outline" className={cn("border-transparent", badge.className)}>
+    <Badge variant="outline" className={badge.className}>
       {badge.label}
     </Badge>
   );
@@ -604,8 +734,8 @@ function VersionChip({ version }: { version: TaskVersion }) {
       title={`${name} · ${stateLabel(version.status)} · ${version.infohash}`}
       className={cn(
         "h-5 max-w-28 font-normal",
-        version.status === "failed" && "border-destructive/30 text-destructive",
-        version.status === "finished" && "border-emerald-300 text-emerald-800 dark:border-emerald-800 dark:text-emerald-300",
+        version.status === "failed" && "border-status-danger-border text-status-danger-text",
+        version.status === "finished" && "border-status-done-border text-status-done-text",
       )}
     >
       <span className="truncate">{name}</span>
@@ -629,6 +759,7 @@ function TaskDrawer({
   const [detail, setDetail] = React.useState<TaskDetail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const closeRef = React.useRef<HTMLButtonElement>(null);
+  const dialogRef = React.useRef<HTMLElement>(null);
 
   // 点完重试要重读一次抽屉：版本列表与时间线是重试的产物，得当场看得见。
   const [reloadKey, setReloadKey] = React.useState(0);
@@ -654,13 +785,39 @@ function TaskDrawer({
     };
   }, [movieID, reloadKey]);
 
+  // 模态：开时焦点进抽屉，Tab 在内部循环，Esc 关闭，关掉把焦点还给打开它的那行。
   React.useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const items = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null);
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      // 等背景的 inert 先撤掉：对 inert 子树里的元素调用 focus() 会被忽略。
+      window.setTimeout(() => previous?.focus(), 0);
+    };
   }, [onClose]);
 
   const task = detail?.task;
@@ -672,21 +829,22 @@ function TaskDrawer({
       onClick={onClose}
     >
       <aside
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="任务详情"
+        aria-labelledby="task-drawer-title"
         onClick={(event) => event.stopPropagation()}
         className="flex h-full w-full max-w-lg flex-col overflow-hidden border-l border-border bg-background shadow-2xl"
       >
         <header className="flex items-start justify-between gap-3 border-b px-4 py-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h2 className="font-heading text-lg font-semibold tabular-nums">
+              <h2 id="task-drawer-title" className="font-heading text-lg font-semibold tabular-nums">
                 {task?.number ?? movieID}
               </h2>
               {task ? <StateBadge state={task.state} /> : null}
             </div>
-            <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+            <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
               {task?.movie_id ?? movieID}
             </p>
           </div>
@@ -695,7 +853,7 @@ function TaskDrawer({
             type="button"
             onClick={onClose}
             aria-label="关闭抽屉"
-            className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
             <X className="size-4" aria-hidden />
           </button>
@@ -704,7 +862,7 @@ function TaskDrawer({
         <div className="flex-1 space-y-6 overflow-y-auto px-4 py-4">
           {error ? <Notice tone="bad">读不到任务详情：{error}</Notice> : null}
           {!detail && !error ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" aria-hidden />
               正在读取…
             </div>
@@ -712,16 +870,18 @@ function TaskDrawer({
 
           {task ? (
             <section aria-label="版本列表" className="space-y-2">
-              <h3 className="text-[13px] font-medium">版本（{task.versions.length}）</h3>
-              {task.versions.map((version) => (
-                <VersionCard key={version.infohash} version={version} />
-              ))}
+              <h3 className="text-[0.8125rem] font-medium">版本（{task.versions.length}）</h3>
+              <div className="divide-y">
+                {task.versions.map((version) => (
+                  <VersionCard key={version.infohash} version={version} />
+                ))}
+              </div>
             </section>
           ) : null}
 
           {detail ? (
             <section aria-label="事件时间线" className="space-y-2">
-              <h3 className="text-[13px] font-medium">最近事件</h3>
+              <h3 className="text-[0.8125rem] font-medium">最近事件</h3>
               {detail.events.length === 0 ? (
                 <p className="text-xs text-muted-foreground">还没有事件。</p>
               ) : (
@@ -737,7 +897,7 @@ function TaskDrawer({
 
         <footer className="space-y-2 border-t px-4 py-3">
           <DrawerActions movieID={movieID} onRetried={reload} onRefresh={onRefresh} />
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-xs leading-relaxed text-muted-foreground">
             重试＝回加工开头或按存的 payload 重新加种；已入库的版本只有「强制重刮」才会重跑。
           </p>
         </footer>
@@ -774,48 +934,45 @@ function DrawerActions({
         <Notice tone={taskRetry.notice.tone}>{taskRetry.notice.text}</Notice>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className={PrimaryActionClass}
+        <Button
+          size="sm"
+          className="text-xs"
           disabled={taskRetry.busy !== null}
           onClick={() => void retry(false)}
         >
           <RotateCcw className={cn("size-3.5", taskRetry.busy === taskRetryKey(movieID, false) && "animate-spin")} aria-hidden />
           重试
-        </button>
-        <button
-          type="button"
-          className={MiniActionClass}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-xs"
           disabled={taskRetry.busy !== null}
           onClick={() => void retry(true)}
         >
           <RotateCcw className={cn("size-3.5", taskRetry.busy === taskRetryKey(movieID, true) && "animate-spin")} aria-hidden />
           强制重刮
-        </button>
+        </Button>
       </div>
     </>
   );
 }
 
-/** 抽屉主按钮的唯一 class（与行内小按钮区分主次）。 */
-const PrimaryActionClass =
-  "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60";
-
 function VersionCard({ version }: { version: TaskVersion }) {
   return (
-    <div className="space-y-1.5 rounded-lg border p-3">
+    <div className="space-y-1.5 py-3 first:pt-0 last:pb-0">
       <div className="flex items-center justify-between gap-2">
-        <span className="break-all font-mono text-[11px] leading-relaxed">{version.infohash}</span>
+        <span className="break-all font-mono text-xs leading-relaxed">{version.infohash}</span>
         <StateBadge state={version.status} />
       </div>
-      <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
         <span>{sourceLabel(version.source)}</span>
         <span aria-hidden>·</span>
         <span>{version.label || "无标签"}</span>
         {version.attempts > 1 ? <span aria-hidden>·</span> : null}
         {version.attempts > 1 ? <span>尝试 {version.attempts} 次</span> : null}
         {version.add_pending ? (
-          <Badge variant="outline" className="h-5 border-amber-300 font-normal text-amber-800 dark:border-amber-800 dark:text-amber-300">
+          <Badge variant="outline" className="h-5 border-status-progress-border font-normal text-status-progress-text">
             待加种
           </Badge>
         ) : null}
@@ -825,13 +982,13 @@ function VersionCard({ version }: { version: TaskVersion }) {
           </Badge>
         ) : null}
         {version.force_rescrape ? (
-          <Badge variant="outline" className="h-5 border-amber-300 font-normal text-amber-800 dark:border-amber-800 dark:text-amber-300">
+          <Badge variant="outline" className="h-5 border-status-progress-border font-normal text-status-progress-text">
             待强制重刮
           </Badge>
         ) : null}
       </div>
       {version.error_reason ? (
-        <p className="text-[11px] text-destructive">
+        <p className="text-xs text-status-danger-text">
           失败于{phaseLabel(version.error_phase)}：{version.error_reason}
         </p>
       ) : null}
@@ -844,12 +1001,12 @@ function EventRow({ event }: { event: TaskEvent }) {
     <li className="relative pl-4">
       <span className="absolute top-1.5 left-0 size-1.5 rounded-full bg-border" aria-hidden />
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[12px] font-medium">{eventKindLabel(event.kind)}</span>
-        <time className="shrink-0 text-[11px] text-muted-foreground">{formatTime(event.at)}</time>
+        <span className="text-xs font-medium">{eventKindLabel(event.kind)}</span>
+        <time className="shrink-0 text-xs text-muted-foreground">{formatTime(event.at)}</time>
       </div>
-      <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{event.reason}</p>
+      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{event.reason}</p>
       {event.from_state || event.to_state ? (
-        <p className="mt-0.5 text-[11px] text-muted-foreground">
+        <p className="mt-0.5 text-xs text-muted-foreground">
           {stateLabel(event.from_state)} → {stateLabel(event.to_state)}
         </p>
       ) : null}

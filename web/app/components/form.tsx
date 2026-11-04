@@ -19,9 +19,9 @@ export function Field({
 }) {
   return (
     <label className="block">
-      <span className="text-[13px] font-medium">{label}</span>
+      <span className="text-[0.8125rem] font-medium">{label}</span>
       {hint ? (
-        <span className="ml-2 text-[11px] text-muted-foreground">{hint}</span>
+        <span className="ml-2 text-xs text-muted-foreground">{hint}</span>
       ) : null}
       <span className="mt-1.5 block">{children}</span>
     </label>
@@ -35,8 +35,8 @@ export function TextInput({ className, mono, ...props }: TextInputProps) {
     <input
       {...props}
       className={cn(
-        "h-8 w-full rounded-lg border border-input bg-background px-2.5 text-[13px] outline-none",
-        "placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40",
+        "h-8 w-full rounded-lg border border-input bg-background px-2.5 text-base outline-none sm:text-[0.8125rem]",
+        "placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring",
         "disabled:cursor-not-allowed disabled:opacity-60",
         mono && "font-mono",
         className,
@@ -59,9 +59,9 @@ export function Toggle({
   return (
     <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
       <div>
-        <div className="text-[13px] font-medium">{label}</div>
+        <div className="text-[0.8125rem] font-medium">{label}</div>
         {desc ? (
-          <p className="mt-0.5 max-w-md text-[11px] leading-relaxed text-muted-foreground">
+          <p className="mt-0.5 max-w-md text-xs leading-relaxed text-muted-foreground">
             {desc}
           </p>
         ) : null}
@@ -73,7 +73,9 @@ export function Toggle({
         aria-label={label}
         onClick={() => onChange(!checked)}
         className={cn(
-          "mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
+          "relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
+          "after:absolute after:-inset-x-3 after:-inset-y-3 after:content-['']",
+          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
           checked ? "border-primary bg-primary" : "border-input bg-muted",
         )}
       >
@@ -98,11 +100,11 @@ export type TestChipState =
 
 export function TestChip({ state }: { state: TestChipState }) {
   if (state.kind === "idle") {
-    return <span className="text-[11px] text-muted-foreground">还没测试</span>;
+    return <span className="text-xs text-muted-foreground">还没测试</span>;
   }
   if (state.kind === "testing") {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
         <Loader2 className="size-3 animate-spin" aria-hidden />
         测试中…
       </span>
@@ -113,7 +115,7 @@ export function TestChip({ state }: { state: TestChipState }) {
   return (
     <span
       className={cn(
-        "inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px]",
+        "inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
         look.tone,
       )}
       title={state.detail}
@@ -130,7 +132,7 @@ function chipLook(state: Exclude<TestChipState, { kind: "idle" } | { kind: "test
     case "ok":
       return {
         tone:
-          "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
+          "border-status-done-border bg-status-done-surface text-status-done-text",
         label: `通过${state.durationMs !== undefined ? ` · ${state.durationMs}ms` : ""}`,
         icon: <Check className="size-3 shrink-0" aria-hidden />,
       };
@@ -142,7 +144,7 @@ function chipLook(state: Exclude<TestChipState, { kind: "idle" } | { kind: "test
       };
     case "fail":
       return {
-        tone: "border-destructive/30 bg-destructive/10 text-destructive",
+        tone: "border-status-danger-border bg-status-danger-surface text-status-danger-text",
         label: `失败 · ${errorCodeLabel(state.code)}${state.durationMs !== undefined ? ` · ${state.durationMs}ms` : ""}`,
         icon: <X className="size-3 shrink-0" aria-hidden />,
       };
@@ -176,17 +178,17 @@ export function Notice({
   onClose?: () => void;
 }) {
   const toneClass = {
-    ok: "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
-    warn: "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
-    bad: "border-destructive/30 bg-destructive/10 text-destructive",
+    ok: "border-status-done-border bg-status-done-surface text-status-done-text",
+    warn: "border-status-progress-border bg-status-progress-surface text-status-progress-text",
+    bad: "border-status-danger-border bg-status-danger-surface text-status-danger-text",
     muted: "border-border bg-muted/50 text-foreground",
   }[tone];
 
   return (
     <div
-      role="status"
+      role={tone === "warn" || tone === "bad" ? "alert" : "status"}
       className={cn(
-        "flex items-start gap-2 rounded-lg border px-3 py-2 text-[12px] leading-relaxed",
+        "flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed",
         toneClass,
       )}
     >

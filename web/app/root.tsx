@@ -20,10 +20,17 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#ffffff" />
         <Meta />
         <Links />
       </head>
       <body className="min-h-screen bg-muted/30 antialiased">
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-60 focus:rounded-lg focus:bg-background focus:px-3 focus:py-2 focus:text-sm focus:ring-1 focus:ring-foreground/20"
+        >
+          跳到主内容
+        </a>
         {children}
         <ScrollRestoration />
         <Scripts />
@@ -53,7 +60,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   }
 
   return (
-    <main className="mx-auto max-w-2xl p-6">
+    <main id="main" tabIndex={-1} className="mx-auto max-w-2xl p-6 outline-none">
       <h1 className="text-xl font-semibold">{title}</h1>
       <p className="mt-2 text-muted-foreground">{detail}</p>
       {stack ? (

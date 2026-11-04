@@ -278,7 +278,7 @@ export function Wizard({
 
   return (
     <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[230px_1fr]">
-      <ol className="space-y-1" aria-label="向导步骤">
+      <ol className="hidden space-y-1 lg:block" aria-label="向导步骤">
         {steps.map((candidate, index) => {
           // 「完成」步没有自己的表：它反映门禁，而不是 app_config 那一行。
           const configured =
@@ -293,14 +293,15 @@ export function Wizard({
                 onClick={() => goTo(index)}
                 aria-current={current ? "step" : undefined}
                 className={cn(
-                  "flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left text-[13px] transition-colors",
+                  "flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left text-[0.8125rem] transition-colors",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                   current ? "bg-accent font-medium" : "text-muted-foreground hover:bg-accent/50",
                 )}
               >
                 <span
                   className={cn(
-                    "mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border text-[10px] tabular-nums",
-                    configured && "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
+                    "mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border text-[0.625rem] tabular-nums",
+                    configured && "border-status-done-border bg-status-done-surface text-status-done-text",
                     current && !configured && "border-primary bg-primary text-primary-foreground",
                   )}
                 >
@@ -309,7 +310,7 @@ export function Wizard({
                 <span className="leading-snug">
                   {candidate.title}
                   {candidate.optional ? (
-                    <span className="ml-1 text-[10px] opacity-60">可跳过</span>
+                    <span className="ml-1 text-xs opacity-70">可跳过</span>
                   ) : null}
                 </span>
               </button>
@@ -328,13 +329,13 @@ export function Wizard({
 
         <Card className="p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-heading text-base font-semibold">{step.title}</h2>
               <p className="mt-1 max-w-xl text-xs leading-relaxed text-muted-foreground">
                 {step.help}
               </p>
             </div>
-            <Badge variant="outline">
+            <Badge variant="outline" className="shrink-0">
               第 {stepIndex + 1} / {steps.length} 步
             </Badge>
           </div>
@@ -424,7 +425,7 @@ export function Wizard({
           </div>
         </Card>
 
-        <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
+        <p className="px-1 text-xs leading-relaxed text-muted-foreground">
           并发编辑有 revision 指纹：两个标签页改同一节时，后提交的会拿到冲突提示，不静默互盖。
           敏感字段只回掩码，留空就是保持原值。
         </p>
@@ -481,19 +482,19 @@ function GateCard({ snapshot }: { snapshot: ConfigSnapshot }) {
   const wantWatch = entriesOf(list_registry).find((entry) => entry.purpose === "want_watch");
 
   return (
-    <Card className="border-amber-200 bg-amber-50/60 p-4 dark:border-amber-900 dark:bg-amber-950/40">
+    <Card className="border-status-progress-border bg-status-progress-surface p-4">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-full bg-background/70">
           <CircleHelp className="size-4 text-muted-foreground" aria-hidden />
         </div>
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">还没初始化</h2>
-          <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             主线三件套（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin
             可写）齐了，循环才会启动。Jellyfin 那一项还包括媒体库目录在这台机器上可见
             ——三个容器把同一个 host 目录挂到同一路径。在那之前这个页面只有向导，面板进不去。
           </p>
-          <ul className="mt-2 space-y-1 text-[12px]">
+          <ul className="mt-2 space-y-1 text-xs">
             <CheckLine ok={javdb.configured} label="JavDB token 已保存" />
             <CheckLine
               ok={Boolean(wantWatch)}
@@ -522,8 +523,8 @@ function MainlineChecklist({ snapshot }: { snapshot: ConfigSnapshot }) {
   const { javdb, qbittorrent, jellyfin } = snapshot.sections;
   return (
     <div className="mt-3 rounded-lg border bg-muted/30 p-3">
-      <div className="text-[13px] font-medium">主线三件套</div>
-      <ul className="mt-1.5 space-y-1 text-[12px]">
+      <div className="text-[0.8125rem] font-medium">主线三件套</div>
+      <ul className="mt-1.5 space-y-1 text-xs">
         <CheckLine ok={javdb.configured} label="JavDB 可读，清单已登记" />
         <CheckLine ok={qbittorrent.configured} label="qBittorrent 可连" />
         <CheckLine
@@ -531,7 +532,7 @@ function MainlineChecklist({ snapshot }: { snapshot: ConfigSnapshot }) {
           label="Jellyfin 可写（目录在盘）"
         />
       </ul>
-      <p className="mt-2 text-[11px] text-muted-foreground">
+      <p className="mt-2 text-xs text-muted-foreground">
         M-Team / AI 翻译 / Telegram 缺席只降级对应能力，不影响初始化。
       </p>
     </div>
@@ -543,10 +544,10 @@ function CheckLine({ ok, label }: { ok: boolean; label: string }) {
     <li className="flex items-center gap-2">
       <span
         className={cn(
-          "grid size-4 shrink-0 place-items-center rounded-full border text-[9px]",
+          "grid size-4 shrink-0 place-items-center rounded-full border text-[0.625rem]",
           ok
-            ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
-            : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300",
+            ? "border-status-done-border bg-status-done-surface text-status-done-text"
+            : "border-status-progress-border bg-status-progress-surface text-status-progress-text",
         )}
       >
         {ok ? "✓" : "!"}
@@ -605,8 +606,8 @@ function AutorunAssist({ configured }: { configured: boolean }) {
 
   return (
     <div className="mt-3 rounded-lg border bg-muted/30 p-3">
-      <div className="text-[13px] font-medium">autorun 共存改写</div>
-      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+      <div className="text-[0.8125rem] font-medium">autorun 共存改写</div>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
         qBittorrent 的 autorun 只能写一条命令，本项目用
         <code className="mx-1 font-mono">/bin/sh -c</code>
         把现有命令和回调拼在一起：外层双引号、payload 内单引号、
@@ -644,7 +645,7 @@ function AutorunAssist({ configured }: { configured: boolean }) {
       {plan ? (
         <div className="mt-3 space-y-2">
           {plan.warning ? (
-            <p className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-1.5 text-[11px] leading-relaxed text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            <p className="rounded-md border border-status-progress-border bg-status-progress-surface px-2.5 py-1.5 text-xs leading-relaxed text-status-progress-text">
               {plan.warning}
             </p>
           ) : null}
@@ -652,7 +653,7 @@ function AutorunAssist({ configured }: { configured: boolean }) {
           <AutorunLine label="现在（Before）" value={plan.before || "（空）"} />
           <AutorunLine label="改写后（After）" value={plan.after || "（空）"} highlight />
 
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             {plan.skip
               ? "现值已经包含本项目回调：再保存也不会重复改写（幂等）。"
               : "确认后只写 autorun_program 这一个偏好键；原来的 moviepilot 命令原样保留。"}
@@ -661,9 +662,9 @@ function AutorunAssist({ configured }: { configured: boolean }) {
       ) : null}
 
       {notice ? (
-        <p className="mt-2 text-[11px] text-emerald-700 dark:text-emerald-400">{notice}</p>
+        <p className="mt-2 text-xs text-status-done-text">{notice}</p>
       ) : null}
-      {error ? <p className="mt-2 text-[11px] text-destructive">{error}</p> : null}
+      {error ? <p className="mt-2 text-xs text-status-danger-text">{error}</p> : null}
     </div>
   );
 }
@@ -680,12 +681,12 @@ function AutorunLine({
 }) {
   return (
     <div>
-      <div className="mb-1 text-[11px] text-muted-foreground">{label}</div>
+      <div className="mb-1 text-xs text-muted-foreground">{label}</div>
       <pre
         className={cn(
-          "overflow-x-auto rounded-md border px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre",
+          "overflow-x-auto rounded-md border px-2.5 py-1.5 font-mono text-xs leading-relaxed whitespace-pre",
           highlight
-            ? "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-950/30"
+            ? "border-status-done-border bg-status-done-surface"
             : "bg-background",
         )}
       >
@@ -865,8 +866,8 @@ function ListAssist({
 
   return (
     <div className="mt-3 rounded-lg border bg-muted/30 p-3">
-      <div className="text-[13px] font-medium">从 JavDB 选清单</div>
-      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+      <div className="text-[0.8125rem] font-medium">从 JavDB 选清单</div>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
         探测会列出你自建的清单，按 id 选中登记；也可以一键创建「想看清单」，或手动填 id 兜底。
       </p>
 
@@ -905,14 +906,14 @@ function ListAssist({
               <button
                 type="button"
                 onClick={() => onPick(list.id, list.name)}
-                className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-[12px] hover:bg-accent/50"
+                className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
               >
                 <span className="min-w-0 truncate">
-                  <span className="font-mono text-[11px] text-muted-foreground">{list.id}</span>{" "}
+                  <span className="font-mono text-xs text-muted-foreground">{list.id}</span>{" "}
                   {list.name}
                   {list.is_default ? <span className="ml-1 opacity-60">默认</span> : null}
                 </span>
-                <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
                   {list.movies_count} 项
                 </span>
               </button>
@@ -922,9 +923,9 @@ function ListAssist({
       ) : null}
 
       {notice ? (
-        <p className="mt-2 text-[11px] text-emerald-700 dark:text-emerald-400">{notice}</p>
+        <p className="mt-2 text-xs text-status-done-text">{notice}</p>
       ) : null}
-      {error ? <p className="mt-2 text-[11px] text-destructive">{error}</p> : null}
+      {error ? <p className="mt-2 text-xs text-status-danger-text">{error}</p> : null}
     </div>
   );
 }
@@ -933,13 +934,13 @@ function RegisteredListHint({ entries }: { entries: ListEntry[] }) {
   const wantWatch = entries.find((entry) => entry.purpose === "want_watch");
   if (!wantWatch) {
     return (
-      <p className="mt-3 text-[11px] text-muted-foreground">
+      <p className="mt-3 text-xs text-muted-foreground">
         还没登记清单：填 id 保存后，轮询只认这个 id，名字改了也不影响。
       </p>
     );
   }
   return (
-    <p className="mt-3 text-[11px] text-muted-foreground">
+    <p className="mt-3 text-xs text-muted-foreground">
       当前登记：<span className="font-mono">#{wantWatch.list_id}</span>
       {wantWatch.name ? ` · ${wantWatch.name}` : ""}（用途 want_watch）
     </p>

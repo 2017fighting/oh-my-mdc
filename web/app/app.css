@@ -3,36 +3,14 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
-@custom-variant dark (&:is(.dark *));
-
 /* 中文优先的字体栈：西文用 Geist，汉字落到系统黑体（规格 §5/#5 研究结论）。 */
 @theme {
   --font-sans: 'Geist Variable', 'PingFang SC', 'Microsoft YaHei',
     'Noto Sans SC', ui-sans-serif, system-ui, sans-serif;
 }
 
-html,
-body {
-  @media (prefers-color-scheme: dark) {
-    color-scheme: dark;
-  }
-}
-
 @theme inline {
   --font-heading: var(--font-sans);
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar: var(--sidebar);
-  --color-chart-5: var(--chart-5);
-  --color-chart-4: var(--chart-4);
-  --color-chart-3: var(--chart-3);
-  --color-chart-2: var(--chart-2);
-  --color-chart-1: var(--chart-1);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -51,6 +29,19 @@ body {
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  /* 状态语义色：版本四态 + 测试/提示的三档结论。彩色只作信号，不作装修。 */
+  --color-status-info-surface: var(--status-info-surface);
+  --color-status-info-text: var(--status-info-text);
+  --color-status-info-border: var(--status-info-border);
+  --color-status-progress-surface: var(--status-progress-surface);
+  --color-status-progress-text: var(--status-progress-text);
+  --color-status-progress-border: var(--status-progress-border);
+  --color-status-done-surface: var(--status-done-surface);
+  --color-status-done-text: var(--status-done-text);
+  --color-status-done-border: var(--status-done-border);
+  --color-status-danger-surface: var(--status-danger-surface);
+  --color-status-danger-text: var(--status-danger-text);
+  --color-status-danger-border: var(--status-danger-border);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -72,71 +63,72 @@ body {
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  /* 0.50 而不是 0.556：页面底是 bg-muted/30（#f5f5f5），0.556 只有 4.35:1。 */
+  --muted-foreground: oklch(0.5 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  /* 焦点环要 ≥3:1：0.708 的旧环叠在白底上只有 1.4:1。 */
+  --ring: oklch(0.55 0 0);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --status-info-surface: oklch(0.977 0.013 236.62);
+  --status-info-text: oklch(0.443 0.11 240.79);
+  --status-info-border: oklch(0.901 0.058 230.902);
+  --status-progress-surface: oklch(0.987 0.022 95.277);
+  --status-progress-text: oklch(0.414 0.112 45.904);
+  --status-progress-border: oklch(0.924 0.12 95.746);
+  --status-done-surface: oklch(0.979 0.021 166.113);
+  --status-done-text: oklch(0.432 0.095 166.913);
+  --status-done-border: oklch(0.905 0.093 164.15);
+  --status-danger-surface: oklch(0.971 0.013 17.38);
+  --status-danger-text: oklch(0.505 0.213 27.518);
+  --status-danger-border: oklch(0.885 0.062 18.334);
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
   }
   body {
     @apply bg-background text-foreground;
   }
   html {
     @apply font-sans;
+    caret-color: var(--foreground);
+    scrollbar-color: oklch(0.78 0 0) transparent;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+  ::selection {
+    background-color: oklch(0.205 0 0 / 14%);
+  }
+  /* 兜底焦点环：自定义控件不写 focus-visible 类时也看得见（≥3:1，2px）。 */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+/* 减弱动效：过渡直接落地，按下位移取消；加载旋转是进度信号，只放慢不消灭。 */
+@media (prefers-reduced-motion: reduce) {
+  .transition-colors,
+  .transition-all,
+  .transition-transform {
+    transition-duration: 0.01ms;
+  }
+  [data-slot="button"]:active {
+    translate: none;
+  }
+  .animate-spin {
+    animation-duration: 2.4s;
   }
 }
