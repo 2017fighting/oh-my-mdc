@@ -1,0 +1,522 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-04T12:00:00+08:00",
+  "title": "Design System: oh-my-mdc",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "primary",
+        "displayName": "墨色 Ink",
+        "canonical": "oklch(0.205 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "ink-foreground": {
+        "role": "primary",
+        "displayName": "纸白字 Ink Foreground",
+        "canonical": "oklch(0.985 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "纸白 Paper",
+        "canonical": "oklch(1 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "text-ink": {
+        "role": "neutral",
+        "displayName": "文字墨 Text Ink",
+        "canonical": "oklch(0.145 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "surface-muted": {
+        "role": "neutral",
+        "displayName": "暖灰底 Muted Canvas",
+        "canonical": "oklch(0.97 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "text-muted": {
+        "role": "neutral",
+        "displayName": "次级墨 Muted Ink",
+        "canonical": "oklch(0.5 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "发丝灰 Hairline",
+        "canonical": "oklch(0.922 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "focus-ring": {
+        "role": "neutral",
+        "displayName": "焦点灰 Focus Ring",
+        "canonical": "oklch(0.55 0 0)",
+        "tonalRamp": [
+          "oklch(0.150 0 0.000)",
+          "oklch(0.270 0 0.000)",
+          "oklch(0.390 0 0.000)",
+          "oklch(0.510 0 0.000)",
+          "oklch(0.630 0 0.000)",
+          "oklch(0.750 0 0.000)",
+          "oklch(0.870 0 0.000)",
+          "oklch(0.950 0 0.000)"
+        ]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "危险红 Danger",
+        "canonical": "oklch(0.577 0.245 27.325)",
+        "tonalRamp": [
+          "oklch(0.150 0.0857 27.325)",
+          "oklch(0.270 0.1470 27.325)",
+          "oklch(0.390 0.2082 27.325)",
+          "oklch(0.510 0.2450 27.325)",
+          "oklch(0.630 0.2450 27.325)",
+          "oklch(0.750 0.1960 27.325)",
+          "oklch(0.870 0.1225 27.325)",
+          "oklch(0.950 0.0490 27.325)"
+        ]
+      },
+      "status-info-surface": {
+        "role": "semantic",
+        "displayName": "信号蓝 · 底",
+        "canonical": "oklch(0.977 0.013 236.62)",
+        "tonalRamp": [
+          "oklch(0.150 0.0045 236.620)",
+          "oklch(0.270 0.0078 236.620)",
+          "oklch(0.390 0.0110 236.620)",
+          "oklch(0.510 0.0130 236.620)",
+          "oklch(0.630 0.0130 236.620)",
+          "oklch(0.750 0.0104 236.620)",
+          "oklch(0.870 0.0065 236.620)",
+          "oklch(0.950 0.0026 236.620)"
+        ]
+      },
+      "status-info-text": {
+        "role": "semantic",
+        "displayName": "信号蓝 · 字",
+        "canonical": "oklch(0.443 0.11 240.79)",
+        "tonalRamp": [
+          "oklch(0.150 0.0385 240.790)",
+          "oklch(0.270 0.0660 240.790)",
+          "oklch(0.390 0.0935 240.790)",
+          "oklch(0.510 0.1100 240.790)",
+          "oklch(0.630 0.1100 240.790)",
+          "oklch(0.750 0.0880 240.790)",
+          "oklch(0.870 0.0550 240.790)",
+          "oklch(0.950 0.0220 240.790)"
+        ]
+      },
+      "status-info-border": {
+        "role": "semantic",
+        "displayName": "信号蓝 · 边",
+        "canonical": "oklch(0.901 0.058 230.902)",
+        "tonalRamp": [
+          "oklch(0.150 0.0203 230.902)",
+          "oklch(0.270 0.0348 230.902)",
+          "oklch(0.390 0.0493 230.902)",
+          "oklch(0.510 0.0580 230.902)",
+          "oklch(0.630 0.0580 230.902)",
+          "oklch(0.750 0.0464 230.902)",
+          "oklch(0.870 0.0290 230.902)",
+          "oklch(0.950 0.0116 230.902)"
+        ]
+      },
+      "status-progress-surface": {
+        "role": "semantic",
+        "displayName": "信号琥珀 · 底",
+        "canonical": "oklch(0.987 0.022 95.277)",
+        "tonalRamp": [
+          "oklch(0.150 0.0077 95.277)",
+          "oklch(0.270 0.0132 95.277)",
+          "oklch(0.390 0.0187 95.277)",
+          "oklch(0.510 0.0220 95.277)",
+          "oklch(0.630 0.0220 95.277)",
+          "oklch(0.750 0.0176 95.277)",
+          "oklch(0.870 0.0110 95.277)",
+          "oklch(0.950 0.0044 95.277)"
+        ]
+      },
+      "status-progress-text": {
+        "role": "semantic",
+        "displayName": "信号琥珀 · 字",
+        "canonical": "oklch(0.414 0.112 45.904)",
+        "tonalRamp": [
+          "oklch(0.150 0.0392 45.904)",
+          "oklch(0.270 0.0672 45.904)",
+          "oklch(0.390 0.0952 45.904)",
+          "oklch(0.510 0.1120 45.904)",
+          "oklch(0.630 0.1120 45.904)",
+          "oklch(0.750 0.0896 45.904)",
+          "oklch(0.870 0.0560 45.904)",
+          "oklch(0.950 0.0224 45.904)"
+        ]
+      },
+      "status-progress-border": {
+        "role": "semantic",
+        "displayName": "信号琥珀 · 边",
+        "canonical": "oklch(0.924 0.12 95.746)",
+        "tonalRamp": [
+          "oklch(0.150 0.0420 95.746)",
+          "oklch(0.270 0.0720 95.746)",
+          "oklch(0.390 0.1020 95.746)",
+          "oklch(0.510 0.1200 95.746)",
+          "oklch(0.630 0.1200 95.746)",
+          "oklch(0.750 0.0960 95.746)",
+          "oklch(0.870 0.0600 95.746)",
+          "oklch(0.950 0.0240 95.746)"
+        ]
+      },
+      "status-done-surface": {
+        "role": "semantic",
+        "displayName": "信号翠 · 底",
+        "canonical": "oklch(0.979 0.021 166.113)",
+        "tonalRamp": [
+          "oklch(0.150 0.0073 166.113)",
+          "oklch(0.270 0.0126 166.113)",
+          "oklch(0.390 0.0179 166.113)",
+          "oklch(0.510 0.0210 166.113)",
+          "oklch(0.630 0.0210 166.113)",
+          "oklch(0.750 0.0168 166.113)",
+          "oklch(0.870 0.0105 166.113)",
+          "oklch(0.950 0.0042 166.113)"
+        ]
+      },
+      "status-done-text": {
+        "role": "semantic",
+        "displayName": "信号翠 · 字",
+        "canonical": "oklch(0.432 0.095 166.913)",
+        "tonalRamp": [
+          "oklch(0.150 0.0332 166.913)",
+          "oklch(0.270 0.0570 166.913)",
+          "oklch(0.390 0.0808 166.913)",
+          "oklch(0.510 0.0950 166.913)",
+          "oklch(0.630 0.0950 166.913)",
+          "oklch(0.750 0.0760 166.913)",
+          "oklch(0.870 0.0475 166.913)",
+          "oklch(0.950 0.0190 166.913)"
+        ]
+      },
+      "status-done-border": {
+        "role": "semantic",
+        "displayName": "信号翠 · 边",
+        "canonical": "oklch(0.905 0.093 164.15)",
+        "tonalRamp": [
+          "oklch(0.150 0.0325 164.150)",
+          "oklch(0.270 0.0558 164.150)",
+          "oklch(0.390 0.0790 164.150)",
+          "oklch(0.510 0.0930 164.150)",
+          "oklch(0.630 0.0930 164.150)",
+          "oklch(0.750 0.0744 164.150)",
+          "oklch(0.870 0.0465 164.150)",
+          "oklch(0.950 0.0186 164.150)"
+        ]
+      },
+      "status-danger-surface": {
+        "role": "semantic",
+        "displayName": "信号红 · 底",
+        "canonical": "oklch(0.971 0.013 17.38)",
+        "tonalRamp": [
+          "oklch(0.150 0.0045 17.380)",
+          "oklch(0.270 0.0078 17.380)",
+          "oklch(0.390 0.0110 17.380)",
+          "oklch(0.510 0.0130 17.380)",
+          "oklch(0.630 0.0130 17.380)",
+          "oklch(0.750 0.0104 17.380)",
+          "oklch(0.870 0.0065 17.380)",
+          "oklch(0.950 0.0026 17.380)"
+        ]
+      },
+      "status-danger-text": {
+        "role": "semantic",
+        "displayName": "信号红 · 字",
+        "canonical": "oklch(0.505 0.213 27.518)",
+        "tonalRamp": [
+          "oklch(0.150 0.0745 27.518)",
+          "oklch(0.270 0.1278 27.518)",
+          "oklch(0.390 0.1810 27.518)",
+          "oklch(0.510 0.2130 27.518)",
+          "oklch(0.630 0.2130 27.518)",
+          "oklch(0.750 0.1704 27.518)",
+          "oklch(0.870 0.1065 27.518)",
+          "oklch(0.950 0.0426 27.518)"
+        ]
+      },
+      "status-danger-border": {
+        "role": "semantic",
+        "displayName": "信号红 · 边",
+        "canonical": "oklch(0.885 0.062 18.334)",
+        "tonalRamp": [
+          "oklch(0.150 0.0217 18.334)",
+          "oklch(0.270 0.0372 18.334)",
+          "oklch(0.390 0.0527 18.334)",
+          "oklch(0.510 0.0620 18.334)",
+          "oklch(0.630 0.0620 18.334)",
+          "oklch(0.750 0.0496 18.334)",
+          "oklch(0.870 0.0310 18.334)",
+          "oklch(0.950 0.0124 18.334)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "页面标题，每页一个。"
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "卡片标题；抽屉标题 18px。"
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "导航、说明、按钮、正文。"
+      },
+      "dense": {
+        "displayName": "Dense",
+        "purpose": "表格单元格、表单标签、行内动作。"
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "徽章、chip、时间戳、页脚。"
+      },
+      "data": {
+        "displayName": "Data",
+        "purpose": "番号、infohash、token 掩码、命令。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "drawer",
+        "value": "0 25px 50px -12px rgb(0 0 0 / 0.25)",
+        "purpose": "仅右侧任务抽屉；全站唯一阴影。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "颜色与状态过渡的默认缓动。"
+      },
+      {
+        "name": "duration-fast",
+        "value": "150ms",
+        "purpose": "hover / 选中 / 焦点过渡。"
+      },
+      {
+        "name": "spin",
+        "value": "1s linear infinite",
+        "purpose": "加载指示；减弱动效时放慢到 2.4s，不消灭。"
+      },
+      {
+        "name": "reduced-motion",
+        "value": "transition-duration: 0.01ms",
+        "purpose": "prefers-reduced-motion 下过渡直接落地，按下位移取消。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      },
+      {
+        "name": "xl",
+        "value": "1280px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "墨底纸字，每屏一个主操作：抽屉底部的「重试」。",
+      "html": "<button class=\"ds-btn-primary\">重试</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 12px;border:1px solid transparent;border-radius:10px;background:var(--primary,oklch(0.205 0 0));color:var(--primary-foreground,oklch(0.985 0 0));font:500 14px/1.43 \"Geist Variable\",\"PingFang SC\",\"Microsoft YaHei\",\"Noto Sans SC\",system-ui,sans-serif;cursor:pointer;transition:background-color .15s cubic-bezier(.4,0,.2,1)}.ds-btn-primary:hover{background:color-mix(in oklab,var(--primary,oklch(0.205 0 0)) 80%,transparent)}.ds-btn-primary:focus-visible{outline:2px solid var(--ring,oklch(0.55 0 0));outline-offset:2px}.ds-btn-primary:active{translate:0 1px}.ds-btn-primary:disabled{opacity:.5;pointer-events:none}"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "第二动作：保存本步、测试读取、刷新、重发。",
+      "html": "<button class=\"ds-btn-outline\">保存本步</button>",
+      "css": ".ds-btn-outline{display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 10px;border:1px solid var(--input,oklch(0.922 0 0));border-radius:10px;background:var(--background,oklch(1 0 0));color:var(--foreground,oklch(0.145 0 0));font:500 12px/1.33 \"Geist Variable\",\"PingFang SC\",\"Microsoft YaHei\",\"Noto Sans SC\",system-ui,sans-serif;cursor:pointer;transition:background-color .15s cubic-bezier(.4,0,.2,1)}.ds-btn-outline:hover{background:var(--muted,oklch(0.97 0 0))}.ds-btn-outline:focus-visible{outline:2px solid var(--ring,oklch(0.55 0 0));outline-offset:2px}.ds-btn-outline:disabled{opacity:.5;pointer-events:none}"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "chip",
+      "refersTo": "badge-status",
+      "description": "状态三件套：底、字、边同族。红色示例为「需人工」。",
+      "html": "<span class=\"ds-badge-danger\">需人工</span>",
+      "css": ".ds-badge-danger{display:inline-flex;align-items:center;height:20px;padding:0 8px;border:1px solid var(--status-danger-border,oklch(0.885 0.062 18.334));border-radius:26px;background:var(--status-danger-surface,oklch(0.971 0.013 17.38));color:var(--status-danger-text,oklch(0.505 0.213 27.518));font:500 12px/1.33 \"Geist Variable\",\"PingFang SC\",\"Microsoft YaHei\",\"Noto Sans SC\",system-ui,sans-serif;white-space:nowrap}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "向导与设置里的单行输入；移动端 16px 防聚焦放大。",
+      "html": "<input class=\"ds-input\" placeholder=\"已保存：ab***yz\" />",
+      "css": ".ds-input{height:32px;width:100%;box-sizing:border-box;padding:0 10px;border:1px solid var(--input,oklch(0.922 0 0));border-radius:10px;background:var(--background,oklch(1 0 0));color:var(--foreground,oklch(0.145 0 0));font:400 13px/1.5 \"Geist Variable\",\"PingFang SC\",\"Microsoft YaHei\",\"Noto Sans SC\",system-ui,sans-serif;outline:none}.ds-input::placeholder{color:var(--muted-foreground,oklch(0.5 0 0));font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.ds-input:focus-visible{border-color:var(--ring,oklch(0.55 0 0));box-shadow:0 0 0 2px var(--ring,oklch(0.55 0 0))}.ds-input:disabled{opacity:.6;cursor:not-allowed}"
+    },
+    {
+      "name": "Nav Item",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "桌面侧栏一项；当前项白底加 1px 淡墨 ring。",
+      "html": "<button class=\"ds-nav-item ds-nav-item--current\">面板</button>",
+      "css": ".ds-nav-item{display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;border:1px solid transparent;border-radius:10px;background:transparent;color:var(--muted-foreground,oklch(0.5 0 0));font:400 14px/1.43 \"Geist Variable\",\"PingFang SC\",\"Microsoft YaHei\",\"Noto Sans SC\",system-ui,sans-serif;text-align:left;cursor:pointer;transition:background-color .15s cubic-bezier(.4,0,.2,1)}.ds-nav-item:hover{background:oklch(1 0 0 / 60%)}.ds-nav-item:focus-visible{outline:2px solid var(--ring,oklch(0.55 0 0));outline-offset:2px}.ds-nav-item--current{background:var(--background,oklch(1 0 0));color:var(--foreground,oklch(0.145 0 0));font-weight:500;box-shadow:inset 0 0 0 1px oklch(0.145 0 0 / 10%)}"
+    },
+    {
+      "name": "Switch",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "可选集成的开关：视觉 36×20，热区 60×44。",
+      "html": "<button class=\"ds-switch\" role=\"switch\" aria-checked=\"true\" aria-label=\"启用 M-Team\"><span class=\"ds-switch-knob\"></span></button>",
+      "css": ".ds-switch{position:relative;display:inline-flex;align-items:center;width:36px;height:20px;padding:0;border:1px solid var(--primary,oklch(0.205 0 0));border-radius:999px;background:var(--primary,oklch(0.205 0 0));cursor:pointer;transition:background-color .15s cubic-bezier(.4,0,.2,1)}.ds-switch::after{content:\"\";position:absolute;inset:-12px}.ds-switch:focus-visible{outline:2px solid var(--ring,oklch(0.55 0 0));outline-offset:2px}.ds-switch-knob{width:14px;height:14px;border-radius:999px;background:var(--background,oklch(1 0 0));translate:18px 0}"
+    }
+  ],
+  "narrative": {
+    "northStar": "值班台（The Quiet Duty Desk）",
+    "overview": "这是一个人的值班台：默认安静，只有「要人动手」的事被推到最前面，其余信息按可扫描的密度排开。所有强调都来自墨色——近黑的按钮、当前视图、表格里的番号；彩色不是品牌的，是信标灯，只在四个版本状态和三种测试结论上亮起。页面底是 30% 的灰，卡片是白的，两者之间只隔一圈 1px 的淡墨，全站唯一的阴影留给右侧抽屉。\n\n绝大多数时间无事发生，一旦出事就必须在几秒内看出是哪部片、卡在哪一步、按哪个按钮。界面不追求表达，追求「不误读」。中文是主语言，西文与数字落在 Geist 上，汉字回落到系统黑体，两者同一字面高度。",
+    "keyCharacteristics": [
+      "注意力排序固定：需要人工 → 任务 → 副作用 → 循环健康。",
+      "近黑墨色是唯一强调色；彩色 100% 用于状态语义。",
+      "深度靠发丝线，不靠阴影；抽屉是唯一的例外。",
+      "12px 是字号下限；表格与表单元信息落在 12–13px。",
+      "圆角三档分工：控件 10px、卡片 14px、徽章胶囊。",
+      "全中文文案，四个状态词与五个按钮词是固定词汇。"
+    ],
+    "rules": [
+      {
+        "name": "The Ink-Only Rule",
+        "body": "近黑墨色是唯一强调色。想加一个彩色品牌色，先改这套系统，不要在某个页面上先斩后奏。",
+        "section": "colors"
+      },
+      {
+        "name": "The Signal-Only Color Rule",
+        "body": "彩色只允许出现在状态上：四个版本状态、三种测试结论、告警。彩色不用于装饰、标题、图标或分区。",
+        "section": "colors"
+      },
+      {
+        "name": "The Three-Part State Rule",
+        "body": "每个状态是三件套：-surface 底、-text 字、-border 边。禁止只换文字颜色，或者拿 Tailwind 调色板直取。",
+        "section": "colors"
+      },
+      {
+        "name": "The 12px Floor Rule",
+        "body": "正文与元信息不低于 12px；12px 只给徽章与最次的时间戳。字号一律用 rem，用户调大默认字号时必须跟着放大。",
+        "section": "typography"
+      },
+      {
+        "name": "The Mono-for-Identity Rule",
+        "body": "等宽字体只承载可逐字符核对的标识与命令，不用于「显得技术」的普通文案。",
+        "section": "typography"
+      },
+      {
+        "name": "The One-Action Rule",
+        "body": "每张卡片只留一个主操作位（右上 CardAction）。卡片头是两列网格，动作放 CardAction，不要用 flex-row 覆盖它。",
+        "section": "layout"
+      },
+      {
+        "name": "The Hairline Depth Rule",
+        "body": "分层靠 1px 线与背景色差，不靠阴影。除抽屉外任何元素出现阴影，都算新加了一层不存在的结构。",
+        "section": "elevation"
+      },
+      {
+        "name": "The Pill-Means-Status Rule",
+        "body": "胶囊形只用于状态与计数徽章；普通标签用 8px 方块圆角。",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do 用四个状态 token（--status-*）表达下载中/加工中/已入库/需人工，三件套一起用。",
+      "Do 把卡片动作放进 CardAction，保持标题—描述—动作的两列网格。",
+      "Do 12px 起排版，全部用 rem；表格用 13px，表头与时间戳 12px。",
+      "Do 用发丝线分隔列表行；卡片里不再套卡片。",
+      "Do 用 2px --ring 焦点环，覆盖按钮、行内动作、导航、步骤条与行内可点文字。",
+      "Do 数字用 tabular-nums（番号、时间、计数、页码）。",
+      "Do 中文优先字体栈，西文 Geist，汉字系统黑体。",
+      "Do 空状态给下一步（「在 JavDB 的想看清单里加一部有磁力的片」）。"
+    ],
+    "donts": [
+      "Don't 加彩色品牌强调；彩色只作状态信号。",
+      "Don't 复活深色主题：.dark 与 dark: 变体已删除。要加，先补切换入口并逐状态校对对比度。",
+      "Don't 给卡片、行、按钮加阴影；阴影只属于抽屉。",
+      "Don't 用 1px 以上的左/右彩色边条做强调。",
+      "Don't 用 flex-row 覆盖 CardHeader 的网格，或把动作塞进标题 div。",
+      "Don't 用 emoji、字符或 Unifont 图形代替 Lucide 图标。",
+      "Don't 把彩色换成 Tailwind 调色板直取；状态色只有 token。",
+      "Don't 用 9–11px 正文；也不要写死 px 字号。",
+      "Don't 在表格行上挂 role=\"button\"；行保持 row，可点区域用单元格内的真按钮。"
+    ]
+  }
+}
