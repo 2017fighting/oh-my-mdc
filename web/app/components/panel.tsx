@@ -407,6 +407,8 @@ function NeedsAttention({
   const stalled = attention?.stalled ?? [];
   const failedGroups = groupByNumber(failed);
   const stalledGroups = groupByNumber(stalled);
+  // 回执住在卡片上而不是行里：行会在按下成功之后消失，回执却是那一刻唯一的证据。
+  const { receipts, push: receiptOf, dismiss: dismissReceipt, listRef: receiptsRef } = useReceipts();
   // 被上限切过的那一半只数得到 50，所以数字后面跟一个 +，不把截断说成总量。
   const cut = {
     failed: attention?.failed_truncated ?? false,
@@ -423,9 +425,11 @@ function NeedsAttention({
     stuck.length > 0 && `驻留副作用 ${stuck.length} 条`,
   ].filter(Boolean);
 
-  const taskRetry = useTaskRetry(onRefresh);
-  // 任务侧重试与副作用重发是两件事，各有自己的忙位与提示（规格 §8.2 的行内动作）。
-  const sideEffect = useSideEffectRetry(onRefresh);
+  const retryHooks = { onReceipt: receiptOf, focusFallback: receiptsRef };
+  const taskRetry = useTaskRetry(onRefresh, retryHooks);
+  // 任务侧重试与副作用重发是两件事，各有自己的忙位；回执则合并成一条流：
+  // 作者关心的不是「哪一个子系统的」，而是「我刚才那一按成了没有」。
+  const sideEffect = useSideEffectRetry(onRefresh, retryHooks);
 
   return (
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
@@ -460,8 +464,10 @@ function NeedsAttention({
           </Badge>
         </CardAction>
       </CardHeader>
-      {total > 0 ? (
+      {total > 0 || receipts.length > 0 ? (
         <CardContent>
+          <ReceiptList receipts={receipts} now={now} listRef={receiptsRef} onDismiss={dismissReceipt} />
+
           {taskRetry.error ? (
             <div className="mb-2">
               <Notice tone="bad" onClose={taskRetry.clearError}>
@@ -470,67 +476,167 @@ function NeedsAttention({
             </div>
           ) : null}
 
-          <div className="divide-y">
-            {failedGroups.length > 0 ? (
-              <section aria-label="失败的版本" className="py-3 first:pt-0 last:pb-0">
-                <AttentionHeading label="失败" count={failed.length} />
-                <div className="divide-y">
-                  {failedGroups.map((group) => (
-                    <VersionGroup
-                      key={group.movieID}
-                      group={group}
-                      kind="failed"
-                      now={now}
-                      notice={taskRetry.notices[group.movieID]}
-                      busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
-                      onRetry={() => void taskRetry.retry(group.movieID, false)}
-                      onOpenTask={() => onOpenTask(group.movieID)}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null}
+          {total > 0 ? (
+            <div className="divide-y">
+              {failedGroups.length > 0 ? (
+                <section aria-label="失败的版本" className="py-3 first:pt-0 last:pb-0">
+                  <AttentionHeading label="失败" count={failed.length} />
+                  <div className="divide-y">
+                    {failedGroups.map((group) => (
+                      <VersionGroup
+                        key={group.movieID}
+                        group={group}
+                        kind="failed"
+                        now={now}
+                        busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
+                        onRetry={() => void taskRetry.retry(group.movieID, false, group.number)}
+                        onOpenTask={() => onOpenTask(group.movieID)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
-            {stalledGroups.length > 0 ? (
-              <section aria-label="停滞的下载" className="py-3 first:pt-0 last:pb-0">
-                <AttentionHeading label="停滞" count={stalled.length} />
-                <div className="divide-y">
-                  {stalledGroups.map((group) => (
-                    <VersionGroup
-                      key={group.movieID}
-                      group={group}
-                      kind="stalled"
-                      now={now}
-                      notice={taskRetry.notices[group.movieID]}
-                      busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
-                      onRetry={() => void taskRetry.retry(group.movieID, false)}
-                      onOpenTask={() => onOpenTask(group.movieID)}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null}
+              {stalledGroups.length > 0 ? (
+                <section aria-label="停滞的下载" className="py-3 first:pt-0 last:pb-0">
+                  <AttentionHeading label="停滞" count={stalled.length} />
+                  <div className="divide-y">
+                    {stalledGroups.map((group) => (
+                      <VersionGroup
+                        key={group.movieID}
+                        group={group}
+                        kind="stalled"
+                        now={now}
+                        busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
+                        onRetry={() => void taskRetry.retry(group.movieID, false, group.number)}
+                        onOpenTask={() => onOpenTask(group.movieID)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
-            {stuck.length > 0 ? (
-              <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
-                <AttentionHeading label="驻留副作用" count={stuck.length} />
-                <div className="divide-y">
-                  {stuck.map((effect) => (
-                    <StuckRow
-                      key={effect.id}
-                      effect={effect}
-                      notice={sideEffect.errors[effect.id]}
-                      busy={sideEffect.busy === effect.id}
-                      onRetry={() => void sideEffect.retry(effect.id)}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null}
-          </div>
+              {stuck.length > 0 ? (
+                <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
+                  <AttentionHeading label="驻留副作用" count={stuck.length} />
+                  <div className="divide-y">
+                    {stuck.map((effect) => (
+                      <StuckRow
+                        key={effect.id}
+                        effect={effect}
+                        notice={sideEffect.errors[effect.id]}
+                        busy={sideEffect.busy === effect.id}
+                        onRetry={() => void sideEffect.retry(effect.id, sideEffectTitle(effect))}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          ) : null}
         </CardContent>
       ) : null}
     </Card>
+  );
+}
+
+/** ReceiptDraft 是一条新回执（还没编号）：番号或待办名 + 结局 + 一句后果。 */
+type ReceiptDraft = RetryNotice & { title: string };
+
+/** Receipt 是已经发出的一条回执。 */
+type Receipt = ReceiptDraft & { id: number; at: number };
+
+/** 回执留 3 条、活 10 分钟：足够看见刚才那几下，又不至于把卡片变成一块日志。 */
+const RECEIPT_LIMIT = 3;
+const RECEIPT_TTL = 10 * 60_000;
+
+/**
+ * useReceipts 是「动完手」的回执队列。
+ *
+ * 它必须挂在卡片上，不能挂在行里：重试成功之后那一行就从树上消失了，而回执正是
+ * 那一刻唯一的证据。以前回执写在行里，于是被拒时有话、成功时无话。
+ */
+function useReceipts() {
+  const [receipts, setReceipts] = React.useState<Receipt[]>([]);
+  const nextID = React.useRef(1);
+  const listRef = React.useRef<HTMLDivElement>(null);
+
+  const push = React.useCallback((draft: ReceiptDraft) => {
+    setReceipts((current) =>
+      [{ ...draft, id: nextID.current++, at: Date.now() }, ...current].slice(0, RECEIPT_LIMIT),
+    );
+  }, []);
+
+  const dismiss = React.useCallback((id: number) => {
+    setReceipts((current) => current.filter((receipt) => receipt.id !== id));
+  }, []);
+
+  // 回执自己退场：不用人清理，但退场前有整整十分钟可被读到。
+  React.useEffect(() => {
+    if (receipts.length === 0) return;
+    const timer = window.setInterval(() => {
+      const cutoff = Date.now() - RECEIPT_TTL;
+      setReceipts((current) =>
+        current.some((receipt) => receipt.at < cutoff)
+          ? current.filter((receipt) => receipt.at >= cutoff)
+          : current,
+      );
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [receipts.length]);
+
+  return { receipts, push, dismiss, listRef };
+}
+
+/** ReceiptList 是卡片顶部的回执行：一行一条，语气词打头，能逐条收起。 */
+function ReceiptList({
+  receipts,
+  now,
+  listRef,
+  onDismiss,
+}: {
+  receipts: Receipt[];
+  now: number;
+  listRef: React.RefObject<HTMLDivElement | null>;
+  onDismiss: (id: number) => void;
+}) {
+  if (receipts.length === 0) return null;
+  return (
+    <div
+      ref={listRef}
+      tabIndex={-1}
+      role="status"
+      aria-label="操作回执"
+      className="mb-3 divide-y rounded-lg bg-muted/50 px-3 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+    >
+      {receipts.map((receipt) => (
+        <div key={receipt.id} className="flex items-start gap-2 py-1.5 text-xs leading-relaxed">
+          <span
+            className={cn(
+              "shrink-0 font-medium",
+              receipt.tone === "ok" ? "text-status-done-text" : "text-status-progress-text",
+            )}
+          >
+            {receipt.tone === "ok" ? "已下发" : "没成"}
+          </span>
+          <span className="min-w-0 flex-1 break-words">
+            <span className="font-medium tabular-nums">{receipt.title}</span>
+            <span> · {receipt.text}</span>
+            <span className="ml-1.5 tabular-nums text-muted-foreground">
+              {formatWhen(receipt.at, now)}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={() => onDismiss(receipt.id)}
+            aria-label={`收起回执：${receipt.title}`}
+            className="-m-1 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:size-6"
+          >
+            <X className="size-3" aria-hidden />
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -564,13 +670,12 @@ function AttentionHeading({ label, count }: { label: string; count: number }) {
  * + 逐版的身份、失败步、原因与补法。
  *
  * 行按版本切、动作按任务发：所以按钮上要写清它会动几条版本（「重试全部 2 条版本」），
- * 回执也按任务记一次、落在这组下面。
+ * 回执记在卡片上（`ReceiptList`），不在这一行里——按下成功之后这一行就没了。
  */
 function VersionGroup({
   group,
   kind,
   now,
-  notice,
   busy,
   onRetry,
   onOpenTask,
@@ -578,7 +683,6 @@ function VersionGroup({
   group: FailureGroup;
   kind: "failed" | "stalled";
   now: number;
-  notice?: RetryNotice | string;
   busy: boolean;
   onRetry: () => void;
   onOpenTask: () => void;
@@ -630,11 +734,6 @@ function VersionGroup({
             );
           })}
         </ul>
-        {notice ? (
-          <Notice tone={typeof notice === "string" ? "bad" : notice.tone}>
-            {typeof notice === "string" ? notice : notice.text}
-          </Notice>
-        ) : null}
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-1.5">
         {retryable ? (
@@ -719,9 +818,18 @@ type RetryNotice = { tone: "ok" | "warn"; text: string };
  * useTaskRetry 是人工重试（规格 §6.1 / P13）的共用逻辑：忙位、错误、逐版结论。
  *
  * 忙位按行记（键 = movie_id + 是否强制），所以别人在看行 B 时行 A 不会被重新
- * 放开；回执也按 movie_id 记，落在出事的那一行里，不往卡片顶部挤。
+ * 放开。结论同时写两份：抽屉里按 movie_id 留一份（那里行不会消失），卡片上传一条
+ * 回执（那里行会消失）。
  */
-function useTaskRetry(onRefresh: () => Promise<void>) {
+function useTaskRetry(
+  onRefresh: () => Promise<void>,
+  hooks?: {
+    onReceipt?: (receipt: ReceiptDraft) => void;
+    /** 行在成功后消失时的焦点去处：回执列表。 */
+    focusFallback?: React.RefObject<HTMLDivElement | null>;
+  },
+) {
+  const { onReceipt, focusFallback } = hooks ?? {};
   const [busy, setBusy] = React.useState<ReadonlySet<string>>(() => new Set());
   const busyRef = React.useRef<ReadonlySet<string>>(new Set());
   const [error, setError] = React.useState<string | null>(null);
@@ -737,7 +845,9 @@ function useTaskRetry(onRefresh: () => Promise<void>) {
   }, []);
 
   const retry = React.useCallback(
-    async (movieID: string, force: boolean) => {
+    async (movieID: string, force: boolean, title = movieID) => {
+      // 按下时元素还在；刷新之后它就没了，所以先把它的引用拿在手上。
+      const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const key = taskRetryKey(movieID, force);
       // 同一行连点不二次下发：两个 POST 会让后到的那张回执顶掉前一张。
       if (busyRef.current.has(key)) return;
@@ -752,8 +862,13 @@ function useTaskRetry(onRefresh: () => Promise<void>) {
       });
       try {
         const result = await api.retryTask(movieID, force);
-        setNotices((current) => ({ ...current, [movieID]: summarizeRetry(result.results) }));
+        const notice = summarizeRetry(result.results);
+        setNotices((current) => ({ ...current, [movieID]: notice }));
+        onReceipt?.({ title, ...notice });
         await onRefresh();
+        // 行在成功之后从树上消失了：把焦点跟到回执上，不然它静静掉回 body。
+        await afterPaint();
+        if (origin && !origin.isConnected) focusFallback?.current?.focus();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
@@ -763,10 +878,26 @@ function useTaskRetry(onRefresh: () => Promise<void>) {
         setBusy(next);
       }
     },
-    [onRefresh],
+    [onRefresh, onReceipt, focusFallback],
   );
 
   return { busy, error, notices, retry, clearError, clearNotice };
+}
+
+/**
+ * afterPaint 等到这次刷新真的提交到 DOM 之后。
+ *
+ * await 一个 fetch 回来的时刻，React 的 setState 可能还没提交，`isConnected` 此时
+ * 仍是真的；等到双 rAF（下一帧），行已经真的没了，判断才作数。
+ */
+function afterPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== "function") {
+      resolve();
+      return;
+    }
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+  });
 }
 
 /** taskRetryKey 是忙位的键：同一任务的「重试」与「强制重刮」互不复用。 */
@@ -792,8 +923,10 @@ function summarizeRetry(results: TaskRetryOutcome[]): RetryNotice {
     };
   }
 
+  // 不再前缀「已下发：」：回执与抽屉的提示都自己带结局语气词，
+  // 正文只说发生了什么（「回到加工开头」），一句话只有一个说话人。
   const done = results.map((result) => labelResult(result, results.length > 1));
-  return { tone: "ok", text: `已下发：${done.join("；")}` };
+  return { tone: "ok", text: done.join("；") };
 }
 
 /** labelResult 拼一条版本结局：只有多于一条版本时才前缀哈希。 */
@@ -824,13 +957,26 @@ function shortHash(infohash: string): string {
   return infohash.slice(0, 8);
 }
 
-/** useSideEffectRetry 是「重发」的共用逻辑：忙位、逐条错误、刷新面板。 */
-function useSideEffectRetry(onRefresh: () => Promise<void>) {
+/**
+ * useSideEffectRetry 是「重发」的共用逻辑：忙位、逐条错误、刷新面板。
+ *
+ * 重发成功时驻留行会退回队列（或干脆消失），与任务重试一样，证据只能留在卡片上，
+ * 所以它也传回执；副作用队列卡自己传空，那里的行不会跑掉，原地就看得见。
+ */
+function useSideEffectRetry(
+  onRefresh: () => Promise<void>,
+  hooks?: {
+    onReceipt?: (receipt: ReceiptDraft) => void;
+    focusFallback?: React.RefObject<HTMLDivElement | null>;
+  },
+) {
+  const { onReceipt, focusFallback } = hooks ?? {};
   const [busy, setBusy] = React.useState<number | null>(null);
   const [errors, setErrors] = React.useState<Record<number, string>>({});
 
   const retry = React.useCallback(
-    async (id: number) => {
+    async (id: number, title = `副作用 ${id}`) => {
+      const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (busy === id) return;
       setBusy(id);
       setErrors((current) => {
@@ -841,7 +987,10 @@ function useSideEffectRetry(onRefresh: () => Promise<void>) {
       });
       try {
         await api.retrySideEffect(id);
+        onReceipt?.({ title, tone: "ok", text: "已重发，回到副作用队列。" });
         await onRefresh();
+        await afterPaint();
+        if (origin && !origin.isConnected) focusFallback?.current?.focus();
       } catch (cause) {
         setErrors((current) => ({
           ...current,
@@ -851,7 +1000,7 @@ function useSideEffectRetry(onRefresh: () => Promise<void>) {
         setBusy(null);
       }
     },
-    [busy, onRefresh],
+    [busy, onRefresh, onReceipt, focusFallback],
   );
 
   return { busy, errors, retry };
