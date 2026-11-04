@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, ChevronRight, Loader2, RefreshCw, RotateCcw, X } from "lucide-react";
 import { cn } from "cn";
 
@@ -7,6 +8,14 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
+import { formatAbsolute, formatClock, formatFuture, formatWhen } from "~/lib/time";
+import {
+  remedyForFailure,
+  remedyForSideEffect,
+  remedyForStalled,
+  settingsLabel,
+  type Remedy,
+} from "~/lib/remedy";
 import {
   api,
   notifyEventLabels,
@@ -37,6 +46,8 @@ export function Panel({
   sideEffects,
   page,
   pageSize,
+  loadedAt,
+  intervals,
   onPage,
   onOpenWizard,
   onRefresh,
@@ -47,33 +58,57 @@ export function Panel({
   sideEffects: SideEffect[];
   page: number;
   pageSize: number;
+  /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
+  loadedAt: number | null;
+  /** 三条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
+  intervals: { poll: string | null; reconcile: string | null; sidefx: string | null };
   onPage: (page: number) => void;
   onOpenWizard: () => void;
   onRefresh: () => Promise<void>;
 }) {
   const [selected, setSelected] = React.useState<string | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
-  const contentRef = React.useRef<HTMLDivElement>(null);
+  // 相对时间要自己走，否则一屏「3 分钟前」会挂到用户关掉标签页为止。
+  const now = useNow();
 
-  // 抽屉是模态：背景整块 inert，页面不跟着滚，关掉再把焦点还给那一行。
+  // 打开抽屉的人和归还焦点的人都必须是 Panel：触发元素在打开的那一刻是焦点，
+  // 而 inert 一挂上去焦点就被浏览器挪走了，晚一步再记就只记得住「关闭按钮」。
+  const previousFocus = React.useRef<HTMLElement | null>(null);
+  const openTask = React.useCallback((movieID: string) => {
+    previousFocus.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSelected(movieID);
+  }, []);
+
+  // 抽屉是模态：整个外壳 inert，页面不跟着滚；关掉时先撤 inert 再还焦点，
+  // 顺序反了的话 focus() 会被 inert 子树吞掉，人就被扔回页首。
+  // 抽屉 portal 到 body，才能既 inert 外壳、又让自己可点。
   React.useEffect(() => {
-    const content = contentRef.current;
-    if (!selected || !content) return;
-    content.setAttribute("inert", "");
+    if (!selected) return;
+    const shell = document.getElementById("app-shell");
     const previousOverflow = document.body.style.overflow;
+    shell?.setAttribute("inert", "");
     document.body.style.overflow = "hidden";
     return () => {
-      content.removeAttribute("inert");
+      shell?.removeAttribute("inert");
       document.body.style.overflow = previousOverflow;
+      const target = previousFocus.current;
+      previousFocus.current = null;
+      if (target?.isConnected) target.focus();
+      else document.getElementById("main")?.focus();
     };
   }, [selected]);
 
   const counts = overview?.counts;
   const stats = [
-    { label: "下载中", value: counts?.downloading ?? 0, hint: "已交给 qBittorrent、还没下完" },
-    { label: "加工中", value: counts?.processing ?? 0, hint: "刮削与落盘进行中" },
-    { label: "已入库", value: counts?.finished ?? 0, hint: "已硬链进媒体库" },
-    { label: "需人工", value: counts?.needs_attention ?? 0, hint: "失败待重试与驻留副作用" },
+    { label: "下载中", value: counts?.downloading ?? 0, tone: "" },
+    { label: "加工中", value: counts?.processing ?? 0, tone: "" },
+    { label: "已入库", value: counts?.finished ?? 0, tone: "" },
+    {
+      label: "需人工",
+      value: counts?.needs_attention ?? 0,
+      tone: (counts?.needs_attention ?? 0) > 0 ? "text-status-danger-text" : "",
+    },
   ];
 
   const refresh = async () => {
@@ -89,44 +124,60 @@ export function Panel({
 
   return (
     <>
-      <div ref={contentRef} className="flex flex-col gap-6">
-      <section aria-label="任务统计" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        {stats.map((stat) => (
-          <Card key={stat.label} size="sm">
-            <CardHeader>
-              <CardDescription>{stat.label}</CardDescription>
-              <CardTitle className="text-2xl tabular-nums">{stat.value}</CardTitle>
-            </CardHeader>
-            <CardContent className="text-xs text-muted-foreground">{stat.hint}</CardContent>
-          </Card>
-        ))}
-      </section>
+      <div className="flex flex-col gap-6">
+      {/* 统计走一行，把首屏第一块让给「需要人工」；新鲜度与刷新贴在这一行的右端。 */}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+        <section
+          aria-label="任务统计"
+          className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[0.8125rem] text-muted-foreground"
+        >
+          {stats.map((stat) => (
+            <span key={stat.label} className="flex items-baseline gap-1.5">
+              <span>{stat.label}</span>
+              <span className={cn("font-medium tabular-nums text-foreground", stat.tone)}>
+                {stat.value}
+              </span>
+            </span>
+          ))}
+        </section>
+
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span className="tabular-nums">
+            {loadedAt ? (
+              <>
+                上次读取 <time dateTime={new Date(loadedAt).toISOString()}>{formatClock(loadedAt)}</time>
+                <span className="text-muted-foreground/80">（{formatWhen(loadedAt, now)}）</span>
+              </>
+            ) : (
+              "还没读到过"
+            )}
+          </span>
+          <Button
+            variant="outline"
+            className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+            onClick={() => void refresh()}
+            disabled={refreshing}
+          >
+            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
+            刷新
+          </Button>
+        </div>
+      </div>
 
       <NeedsAttention
         attention={attention}
         stuck={sideEffects.filter((effect) => effect.stuck)}
-        onOpenTask={setSelected}
+        now={now}
+        onOpenTask={openTask}
+        onOpenWizard={onOpenWizard}
         onRefresh={onRefresh}
       />
 
       <Card>
         <CardHeader>
-          <div>
-            <CardTitle as="h2">任务</CardTitle>
-            <CardDescription>一行一任务（按 movie_id 聚合），版本以小 chip 展示。</CardDescription>
-          </div>
-          <CardAction>
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-            >
-              <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
-              刷新
-            </Button>
-          </CardAction>
+          <CardTitle as="h2" title="一行一任务，按 movie_id 聚合；版本以小 chip 展示。">
+            任务
+          </CardTitle>
         </CardHeader>
         <CardContent className="px-0">
           {tasks.length === 0 ? (
@@ -138,8 +189,8 @@ export function Panel({
                   <li key={task.movie_id}>
                     <button
                       type="button"
-                      onClick={() => setSelected(task.movie_id)}
-                      aria-label={`打开 ${task.number} 的详情`}
+                      onClick={() => openTask(task.movie_id)}
+                      aria-label={`打开 ${task.number} 的详情，${TASK_STATE_LOOK[isTaskState(task.state) ? task.state : "downloading"].label}，${task.versions.length} 个版本`}
                       className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                     >
                       <span className="min-w-0">
@@ -154,6 +205,12 @@ export function Panel({
                             <VersionChip key={version.infohash} version={version} />
                           ))}
                         </span>
+                        <span
+                          className="mt-1 block text-xs tabular-nums text-muted-foreground"
+                          title={formatAbsolute(task.updated_at)}
+                        >
+                          更新 {formatWhen(task.updated_at, now)}
+                        </span>
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
                         <StateBadge state={task.state} />
@@ -165,13 +222,20 @@ export function Panel({
               </ul>
 
               <div className="hidden overflow-x-auto lg:block">
-              <table className="w-full border-collapse text-[0.8125rem] lg:min-w-[34rem]">
+              <table className="w-full table-fixed border-collapse text-[0.8125rem] lg:min-w-[34rem]">
+                <colgroup>
+                  <col className="w-[11rem]" />
+                  <col className="w-[6.5rem]" />
+                  <col />
+                  <col className="w-[8rem]" />
+                  <col className="w-8" />
+                </colgroup>
                 <thead>
                   <tr className="border-y bg-muted/40 text-left text-xs font-medium tracking-wide text-muted-foreground">
                     <th className="px-4 py-2 font-medium">番号</th>
                     <th className="px-4 py-2 font-medium">状态</th>
                     <th className="px-4 py-2 font-medium">版本</th>
-                    <th className="hidden px-4 py-2 font-medium md:table-cell">更新</th>
+                    <th className="px-4 py-2 font-medium">更新</th>
                     <th className="w-8 px-2 py-2" aria-label="打开抽屉" />
                   </tr>
                 </thead>
@@ -179,7 +243,7 @@ export function Panel({
                   {tasks.map((task) => (
                     <tr
                       key={task.movie_id}
-                      onClick={() => setSelected(task.movie_id)}
+                      onClick={() => openTask(task.movie_id)}
                       className="cursor-pointer border-b transition-colors last:border-b-0 hover:bg-muted/40"
                     >
                       <td className="px-4 py-2.5 align-top">
@@ -188,7 +252,7 @@ export function Panel({
                             type="button"
                             onClick={(event) => {
                               event.stopPropagation();
-                              setSelected(task.movie_id);
+                              openTask(task.movie_id);
                             }}
                             className="inline-flex min-h-6 items-center rounded-sm text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                             aria-label={`打开 ${task.number} 的详情`}
@@ -208,8 +272,11 @@ export function Panel({
                           ))}
                         </div>
                       </td>
-                      <td className="hidden px-4 py-2.5 align-top text-xs text-muted-foreground md:table-cell">
-                        {formatTime(task.updated_at)}
+                      <td
+                        className="px-4 py-2.5 align-top text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+                        title={formatAbsolute(task.updated_at)}
+                      >
+                        {formatWhen(task.updated_at, now)}
                       </td>
                       <td className="px-2 py-2.5 align-top text-muted-foreground">
                         <ChevronRight className="size-4" aria-hidden />
@@ -221,54 +288,74 @@ export function Panel({
             </div>
             </>
           )}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
-            <span className="tabular-nums">
-              第 {page} 页 · 每页 {pageSize} 条
-            </span>
-            <div className="flex items-center gap-1.5">
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                disabled={page <= 1}
-                onClick={() => onPage(page - 1)}
-              >
-                上一页
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                disabled={!hasMore}
-                onClick={() => onPage(page + 1)}
-              >
-                下一页
-              </Button>
+          {tasks.length > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
+              <span className="tabular-nums">
+                第 {page} 页 · 每页 {pageSize} 条
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                  disabled={page <= 1}
+                  onClick={() => onPage(page - 1)}
+                >
+                  上一页
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                  disabled={!hasMore}
+                  onClick={() => onPage(page + 1)}
+                >
+                  下一页
+                </Button>
+              </div>
             </div>
-          </div>
+          ) : null}
         </CardContent>
       </Card>
 
-      <SideEffectQueue effects={sideEffects.filter((effect) => !effect.stuck)} onRefresh={onRefresh} />
+      <SideEffectQueue
+        effects={sideEffects.filter((effect) => !effect.stuck)}
+        now={now}
+        onRefresh={onRefresh}
+      />
 
       <Card>
         <CardHeader>
-          <CardTitle as="h2">循环健康</CardTitle>
+          <CardTitle
+            as="h2"
+            title="三条循环各自单飞：轮询拉清单、对账补 qBittorrent 的漏、副作用队列各自重试。"
+          >
+            循环健康
+          </CardTitle>
           <CardDescription>
-            三条循环（轮询 / 对账 / 副作用）各自单飞；副作用失败退避重试，耗尽后驻留等人工。
+            副作用失败退避重试，耗尽后移到「需要人工」等人工重发。
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-2 text-sm">
+        <CardContent className="flex flex-col gap-1.5 text-[0.8125rem]">
           {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
             const health = overview?.loops?.[loop];
             const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
+            const interval = intervals[loop];
             return (
-              <div key={loop} className="flex items-center justify-between">
-                <span>{label}</span>
-                <span className="text-muted-foreground">
-                  {health?.last_run_at
-                    ? `${formatTime(health.last_run_at)} · ${health.last_ok ? "成功" : "失败"}`
-                    : "还没跑过"}
+              <div key={loop} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                <span>
+                  {label}
+                  {interval ? (
+                    <span className="ml-1.5 text-xs text-muted-foreground">{interval}</span>
+                  ) : null}
+                </span>
+                <span className="flex items-baseline gap-2 text-xs text-muted-foreground">
+                  <span className="tabular-nums" title={formatAbsolute(health?.last_run_at)}>
+                    {health?.last_run_at ? formatWhen(health.last_run_at, now) : "还没跑过"}
+                  </span>
+                  {health?.last_run_at ? (
+                    <span className={health.last_ok ? "" : "text-status-danger-text"}>
+                      {health.last_ok ? "成功" : "失败"}
+                    </span>
+                  ) : null}
                 </span>
               </div>
             );
@@ -278,7 +365,7 @@ export function Panel({
             variant="link"
             size="sm"
             onClick={onOpenWizard}
-            className="h-7 self-start px-0 text-sm"
+            className="h-9 self-start px-0 text-sm md:h-7"
           >
             去集成设置
           </Button>
@@ -301,26 +388,32 @@ export function Panel({
 /** NeedsAttention 是「需要人工」区（规格 §8.2：置顶，行内直接动手）。
  *
  * 三半拼在一起：失败的任务（phase + reason）、停滞的下载、驻留的副作用。
- * 任务侧两半可以当场「重试」（版本侧结局由接口逐条回），驻留副作用当场「重发」。
+ * 每一行先回答「病因是什么」，再决定给哪个动作（`lib/remedy.ts`）：
+ * 宿主机问题不给重试、设置问题先指向设置、上游业务错指向上游；只在流水线
+ * 自己就有救的时候，才让重试做主角。
  */
 function NeedsAttention({
   attention,
   stuck,
+  now,
   onOpenTask,
+  onOpenWizard,
   onRefresh,
 }: {
   attention: Attention | null;
   stuck: SideEffect[];
+  now: number;
   onOpenTask: (movieID: string) => void;
+  onOpenWizard: () => void;
   onRefresh: () => Promise<void>;
 }) {
   const failed = attention?.failed ?? [];
   const stalled = attention?.stalled ?? [];
   const total = failed.length + stalled.length + stuck.length;
 
-  const { busy, error, retry } = useSideEffectRetry(onRefresh);
+  const { busy, error, notices, retry, clearError } = useTaskRetry(onRefresh);
   // 任务侧重试与副作用重发是两件事，各有自己的忙位与提示（规格 §8.2 的行内动作）。
-  const taskRetry = useTaskRetry(onRefresh);
+  const sideEffect = useSideEffectRetry(onRefresh);
 
   return (
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
@@ -333,7 +426,7 @@ function NeedsAttention({
             />
             需要人工
           </CardTitle>
-          <CardDescription>
+          <CardDescription aria-live="polite">
             {total === 0
               ? "没有要动手的事：失败、停滞与驻留副作用都会出现在这里。"
               : `${total} 件要动手的事：失败重试、停滞确认、驻留副作用重发。`}
@@ -354,82 +447,153 @@ function NeedsAttention({
         </CardAction>
       </CardHeader>
       {total > 0 ? (
-        <CardContent className="space-y-2">
-          {error ? <Notice tone="bad">{error}</Notice> : null}
-          {taskRetry.error ? <Notice tone="bad">{taskRetry.error}</Notice> : null}
-          {taskRetry.notice ? (
-            <Notice tone={taskRetry.notice.tone}>{taskRetry.notice.text}</Notice>
+        <CardContent>
+          {error ? (
+            <div className="mb-2">
+              <Notice tone="bad" onClose={clearError}>
+                {error}
+              </Notice>
+            </div>
           ) : null}
 
           <div className="divide-y">
-          {failed.map((item) => (
-            <AttentionRow
-              key={`failed-${item.infohash}`}
-              title={item.number}
-              badge={
-                <Badge
-                  variant="outline"
-                  className="border-transparent bg-status-danger-surface text-status-danger-text"
-                >
-                  {phaseLabel(item.phase)}失败
-                </Badge>
-              }
-              detail={item.reason}
-              action={
-                <RetryActions
-                  movieID={item.movie_id}
-                  busy={taskRetry.busy === taskRetryKey(item.movie_id, false)}
-                  onRetry={() => void taskRetry.retry(item.movie_id, false)}
-                  onOpen={() => onOpenTask(item.movie_id)}
-                />
-              }
-            />
-          ))}
+          {failed.map((item) => {
+            const remedy = remedyForFailure(item);
+            return (
+              <AttentionRow
+                key={`failed-${item.infohash}`}
+                title={item.number}
+                time={item.at}
+                now={now}
+                badge={
+                  <Badge
+                    variant="outline"
+                    className="border-transparent bg-status-danger-surface text-status-danger-text"
+                  >
+                    {phaseLabel(item.phase)}失败
+                  </Badge>
+                }
+                detail={item.reason}
+                remedy={remedy}
+                notice={notices[item.movie_id]}
+                actions={
+                  <>
+                    {remedy.retryable ? (
+                      <Button
+                        variant="outline"
+                        className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                        disabled={busy.has(taskRetryKey(item.movie_id, false))}
+                        onClick={() => void retry(item.movie_id, false)}
+                      >
+                        <RotateCcw
+                          className={cn(
+                            "size-3.5",
+                            busy.has(taskRetryKey(item.movie_id, false)) && "animate-spin",
+                          )}
+                          aria-hidden
+                        />
+                        重试
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                      onClick={() => onOpenTask(item.movie_id)}
+                    >
+                      查看任务
+                    </Button>
+                  </>
+                }
+              />
+            );
+          })}
 
           {stalled.map((item) => (
             <AttentionRow
               key={`stalled-${item.infohash}`}
               title={item.number}
+              time={item.at}
+              now={now}
               badge={<Badge variant="outline">下载停滞</Badge>}
-              detail={`${item.reason}（状态仍是下载中，qbt 里还在下就不会重下）`}
-              action={
-                <RetryActions
-                  movieID={item.movie_id}
-                  busy={taskRetry.busy === taskRetryKey(item.movie_id, false)}
-                  onRetry={() => void taskRetry.retry(item.movie_id, false)}
-                  onOpen={() => onOpenTask(item.movie_id)}
-                />
+              detail={item.reason}
+              remedy={remedyForStalled()}
+              notice={notices[item.movie_id]}
+              actions={
+                <>
+                  <Button
+                    variant="outline"
+                    className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                    disabled={busy.has(taskRetryKey(item.movie_id, false))}
+                    onClick={() => void retry(item.movie_id, false)}
+                  >
+                    <RotateCcw
+                      className={cn(
+                        "size-3.5",
+                        busy.has(taskRetryKey(item.movie_id, false)) && "animate-spin",
+                      )}
+                      aria-hidden
+                    />
+                    重试
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                    onClick={() => onOpenTask(item.movie_id)}
+                  >
+                    查看任务
+                  </Button>
+                </>
               }
             />
           ))}
 
-          {stuck.map((effect) => (
-            <AttentionRow
-              key={`stuck-${effect.id}`}
-              title={sideEffectTitle(effect)}
-              badge={
-                <Badge
-                  variant="outline"
-                  className="border-transparent bg-status-danger-surface text-status-danger-text"
-                >
-                  副作用驻留
-                </Badge>
-              }
-              detail={effect.last_error || "自动重试已放弃，等人工重发。"}
-              action={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs"
-                  disabled={busy === effect.id}
-                  onClick={() => void retry(effect.id)}
-                >
-                  <RotateCcw className={cn("size-3.5", busy === effect.id && "animate-spin")} aria-hidden />
-                  重发
-                </Button>
-              }
-            />
-          ))}
+          {stuck.map((effect) => {
+            const remedy = remedyForSideEffect(effect);
+            return (
+              <AttentionRow
+                key={`stuck-${effect.id}`}
+                title={sideEffectTitle(effect)}
+                meta={effect.attempts > 0 ? `已试 ${effect.attempts} 次` : undefined}
+                now={now}
+                badge={
+                  <Badge
+                    variant="outline"
+                    className="border-transparent bg-status-danger-surface text-status-danger-text"
+                  >
+                    副作用驻留
+                  </Badge>
+                }
+                detail={effect.last_error || "自动重试已放弃，等人工重发。"}
+                remedy={remedy}
+                notice={sideEffect.errors[effect.id]}
+                actions={
+                  <>
+                    {remedy.settings ? (
+                      <Button
+                        variant="outline"
+                        className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                        onClick={onOpenWizard}
+                      >
+                        去 {settingsLabel(remedy.settings)} 设置
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant={remedy.settings ? "ghost" : "outline"}
+                      className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                      disabled={sideEffect.busy === effect.id}
+                      onClick={() => void sideEffect.retry(effect.id)}
+                    >
+                      <RotateCcw
+                        className={cn("size-3.5", sideEffect.busy === effect.id && "animate-spin")}
+                        aria-hidden
+                      />
+                      重发
+                    </Button>
+                  </>
+                }
+              />
+            );
+          })}
           </div>
         </CardContent>
       ) : null}
@@ -437,53 +601,66 @@ function NeedsAttention({
   );
 }
 
-/** AttentionRow 是「需要人工」区的一行：标题 + 徽章 + 原因 + 行内动作。 */
+/**
+ * AttentionRow 是「需要人工」区的一行：标题 + 徽章 + 多久了 / 原因 / 补法 / 动作。
+ *
+ * 原因用正文色 13px——它是这一屏最决定动作的一句话，不该是全页最灰最小的字。
+ * 补法（remedy.hint）只在能说清「为什么重试没用」时才出现。
+ */
 function AttentionRow({
   title,
   badge,
   detail,
-  action,
+  remedy,
+  time,
+  meta,
+  now,
+  notice,
+  actions,
 }: {
   title: React.ReactNode;
   badge?: React.ReactNode;
   detail: string;
-  action?: React.ReactNode;
+  remedy: Remedy;
+  /** 事件发生的时刻（任务侧）。 */
+  time?: string;
+  /** 时刻之外的次要元信息，如驻留副作用「已试 3 次」。 */
+  meta?: string;
+  now: number;
+  notice?: RetryNotice | string;
+  actions?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-2 py-3 first:pt-0 last:pb-0">
-      <div className="min-w-0 space-y-1">
-        <div className="flex items-center gap-2 text-[0.8125rem] font-medium tabular-nums">
+    <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] font-medium tabular-nums">
           {title}
           {badge}
+          {time ? (
+            <span
+              className="text-xs font-normal text-muted-foreground"
+              title={formatAbsolute(time)}
+            >
+              {formatWhen(time, now)}
+            </span>
+          ) : null}
+          {meta ? (
+            <span className="text-xs font-normal text-muted-foreground">{meta}</span>
+          ) : null}
         </div>
-        <p className="text-xs leading-relaxed break-words text-muted-foreground">{detail}</p>
+        <p className="text-[0.8125rem] leading-relaxed break-words text-foreground">{detail}</p>
+        {remedy.hint ? (
+          <p className="text-xs leading-relaxed break-words text-muted-foreground">{remedy.hint}</p>
+        ) : null}
+        {notice ? (
+          <div className="pt-0.5">
+            <Notice tone={typeof notice === "string" ? "bad" : notice.tone}>
+              {typeof notice === "string" ? notice : notice.text}
+            </Notice>
+          </div>
+        ) : null}
       </div>
-      {action}
-    </div>
-  );
-}
-
-/** RetryActions 是「需要人工」一行的行内动作：重试（任务侧）+ 查看任务。 */
-function RetryActions({
-  movieID,
-  busy,
-  onRetry,
-  onOpen,
-}: {
-  movieID: string;
-  busy: boolean;
-  onRetry: () => void;
-  onOpen: () => void;
-}) {
-  return (
-    <div className="flex shrink-0 items-center gap-1.5" data-movie-id={movieID}>
-      <Button variant="outline" size="sm" className="text-xs" disabled={busy} onClick={onRetry}>
-        <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
-        重试
-      </Button>
-      <Button variant="outline" size="sm" className="text-xs" onClick={onOpen}>
-        查看任务
-      </Button>
+      {actions ? <div className="flex shrink-0 flex-wrap items-center gap-1.5">{actions}</div> : null}
     </div>
   );
 }
@@ -494,33 +671,55 @@ type RetryNotice = { tone: "ok" | "warn"; text: string };
 /**
  * useTaskRetry 是人工重试（规格 §6.1 / P13）的共用逻辑：忙位、错误、逐版结论。
  *
- * 版本侧的结局是 200 里的逐版结果：被拒（qbt 仍在下载）与加种失败都不该当成
- * 网络错误弹红字，但要原样告诉人为什么没动。
+ * 忙位按行记（键 = movie_id + 是否强制），所以别人在看行 B 时行 A 不会被重新
+ * 放开；回执也按 movie_id 记，落在出事的那一行里，不往卡片顶部挤。
  */
 function useTaskRetry(onRefresh: () => Promise<void>) {
-  const [busy, setBusy] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState<ReadonlySet<string>>(() => new Set());
+  const busyRef = React.useRef<ReadonlySet<string>>(new Set());
   const [error, setError] = React.useState<string | null>(null);
-  const [notice, setNotice] = React.useState<RetryNotice | null>(null);
+  const [notices, setNotices] = React.useState<Record<string, RetryNotice>>({});
+  const clearError = React.useCallback(() => setError(null), []);
+  const clearNotice = React.useCallback((movieID: string) => {
+    setNotices((current) => {
+      if (!(movieID in current)) return current;
+      const next = { ...current };
+      delete next[movieID];
+      return next;
+    });
+  }, []);
 
   const retry = React.useCallback(
     async (movieID: string, force: boolean) => {
-      setBusy(taskRetryKey(movieID, force));
+      const key = taskRetryKey(movieID, force);
+      // 同一行连点不二次下发：两个 POST 会让后到的那张回执顶掉前一张。
+      if (busyRef.current.has(key)) return;
+      busyRef.current = new Set(busyRef.current).add(key);
+      setBusy(busyRef.current);
       setError(null);
-      setNotice(null);
+      setNotices((current) => {
+        if (!(movieID in current)) return current;
+        const next = { ...current };
+        delete next[movieID];
+        return next;
+      });
       try {
         const result = await api.retryTask(movieID, force);
-        setNotice(summarizeRetry(result.results));
+        setNotices((current) => ({ ...current, [movieID]: summarizeRetry(result.results) }));
         await onRefresh();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
-        setBusy(null);
+        const next = new Set(busyRef.current);
+        next.delete(key);
+        busyRef.current = next;
+        setBusy(next);
       }
     },
     [onRefresh],
   );
 
-  return { busy, error, notice, retry };
+  return { busy, error, notices, retry, clearError, clearNotice };
 }
 
 /** taskRetryKey 是忙位的键：同一任务的「重试」与「强制重刮」互不复用。 */
@@ -528,7 +727,11 @@ function taskRetryKey(movieID: string, force: boolean): string {
   return `${movieID}:${force ? "force" : "retry"}`;
 }
 
-/** summarizeRetry 把逐版结果折成一句话：被拒/失败的排在前面，成功只说做了哪件事。 */
+/** summarizeRetry 把逐版结果折成一句话：被拒/失败的排在前面。
+ *
+ * 回执现在落在出事的那一行里，所以单版本时不再报 8 位哈希（那一行已经写了番号）；
+ * 只有一任务多版本时，哈希才是分流的关键。
+ */
 function summarizeRetry(results: TaskRetryOutcome[]): RetryNotice {
   if (results.length === 0) {
     return { tone: "warn", text: "这条任务还没有版本，没有可重试的东西。" };
@@ -538,12 +741,21 @@ function summarizeRetry(results: TaskRetryOutcome[]): RetryNotice {
   if (blocked.length > 0) {
     return {
       tone: "warn",
-      text: blocked.map((result) => `${shortHash(result.infohash)}：${result.reason}`).join("；"),
+      text: blocked.map((result) => labelResult(result)).join("；"),
     };
   }
 
-  const done = results.map((result) => `${shortHash(result.infohash)} ${retryActionLabel(result.action)}`);
+  const done = results.map((result) => labelResult(result));
   return { tone: "ok", text: `已下发：${done.join("；")}` };
+}
+
+/** labelResult 拼一条版本结局：只有多于一条版本时才前缀哈希。 */
+function labelResult(result: TaskRetryOutcome, showHash = false): string {
+  const body =
+    result.action === "skipped" || result.action === "failed"
+      ? result.reason
+      : retryActionLabel(result.action);
+  return showHash ? `${shortHash(result.infohash)}：${body}` : body;
 }
 
 function retryActionLabel(action: TaskRetryOutcome["action"]): string {
@@ -565,83 +777,108 @@ function shortHash(infohash: string): string {
   return infohash.slice(0, 8);
 }
 
-/** useSideEffectRetry 是「重发 / 提前重试」的共用逻辑：忙位、错误、刷新面板。 */
+/** useSideEffectRetry 是「重发」的共用逻辑：忙位、逐条错误、刷新面板。 */
 function useSideEffectRetry(onRefresh: () => Promise<void>) {
   const [busy, setBusy] = React.useState<number | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+  const [errors, setErrors] = React.useState<Record<number, string>>({});
 
   const retry = React.useCallback(
     async (id: number) => {
+      if (busy === id) return;
       setBusy(id);
-      setError(null);
+      setErrors((current) => {
+        if (!(id in current)) return current;
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
       try {
         await api.retrySideEffect(id);
         await onRefresh();
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setErrors((current) => ({
+          ...current,
+          [id]: cause instanceof Error ? cause.message : String(cause),
+        }));
       } finally {
         setBusy(null);
       }
     },
-    [onRefresh],
+    [busy, onRefresh],
   );
 
-  return { busy, error, retry };
+  return { busy, errors, retry };
 }
 
 /** SideEffectQueue 是底部的副作用队列：排队中的待办与它们的下一次尝试时间。 */
 function SideEffectQueue({
   effects,
+  now,
   onRefresh,
 }: {
   effects: SideEffect[];
+  now: number;
   onRefresh: () => Promise<void>;
 }) {
-  const { busy, error, retry } = useSideEffectRetry(onRefresh);
+  const { busy, errors, retry } = useSideEffectRetry(onRefresh);
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle as="h2">副作用队列</CardTitle>
-        <CardDescription>
-          删清单项、刷 Jellyfin、发通知都走这张表：同目标只排一条，失败退避重试，耗尽后移到「需要人工」。
-        </CardDescription>
+        <CardTitle
+          as="h2"
+          title="删清单项、刷 Jellyfin、发通知都走这张表：同目标只排一条，失败退避重试，耗尽后移到「需要人工」。"
+        >
+          副作用队列
+        </CardTitle>
+        {effects.length === 0 ? <CardDescription>队列是空的。</CardDescription> : null}
       </CardHeader>
       <CardContent className="space-y-2">
-        {error ? <Notice tone="bad">{error}</Notice> : null}
-        {effects.length === 0 ? (
-          <p className="text-xs text-muted-foreground">队列是空的。</p>
-        ) : (
+        {effects.length === 0 ? null : (
           <div className="divide-y">
-            {effects.map((effect) => (
-              <div
-                key={effect.id}
-                className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-[0.8125rem] font-medium">
-                    {sideEffectTitle(effect)}
-                    <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
-                      第 {effect.attempts + 1} 次
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    下次尝试 {formatTime(effect.next_attempt_at)}
-                    {effect.last_error ? ` · 上次：${effect.last_error}` : ""}
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs"
-                  disabled={busy === effect.id}
-                  onClick={() => void retry(effect.id)}
+            {effects.map((effect) => {
+              return (
+                <div
+                  key={effect.id}
+                  className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
                 >
-                  <RotateCcw className={cn("size-3.5", busy === effect.id && "animate-spin")} aria-hidden />
-                  提前重试
-                </Button>
-              </div>
-            ))}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 text-[0.8125rem] font-medium">
+                      {sideEffectTitle(effect)}
+                      <Badge variant="outline" className="h-5 font-normal text-muted-foreground">
+                        {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
+                      </Badge>
+                    </div>
+                    <p
+                      className="text-xs tabular-nums text-muted-foreground"
+                      title={formatAbsolute(effect.next_attempt_at)}
+                    >
+                      下次尝试 {formatFuture(effect.next_attempt_at, now)}
+                      {effect.last_error ? ` · 上次：${effect.last_error}` : ""}
+                    </p>
+                    {errors[effect.id] ? (
+                      <div className="mt-1">
+                        <Notice tone="bad">{errors[effect.id]}</Notice>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+                      disabled={busy === effect.id}
+                      onClick={() => void retry(effect.id)}
+                    >
+                      <RotateCcw
+                        className={cn("size-3.5", busy === effect.id && "animate-spin")}
+                        aria-hidden
+                      />
+                      立即重发
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </CardContent>
@@ -688,7 +925,6 @@ function EmptyTasks() {
     </div>
   );
 }
-
 /** 四个状态名的唯一真相：徽章、时间线、图例都从这里取文案与色调。 */
 const TASK_STATE_LOOK: Record<TaskState, { label: string; className: string }> = {
   downloading: {
@@ -725,20 +961,28 @@ function StateBadge({ state }: { state: TaskState | "" }) {
   );
 }
 
-/** VersionChip 是版本的小 chip：标签（或来源）一眼可见，失败用红色。 */
+/**
+ * VersionChip 是版本的小 chip：带标签，失败的那条自己说出来。
+ *
+ * 状态不能只活在前 1px 边框色上：那对触屏与读屏都等于不存在，色弱的人又只能
+ * 靠红绿区分。所以失败写「失败」两个字，其余状态交给行上的任务徽章与抽屉。
+ */
 function VersionChip({ version }: { version: TaskVersion }) {
   const name = version.label || sourceLabel(version.source);
+  const failed = version.status === "failed";
   return (
     <Badge
       variant="outline"
       title={`${name} · ${stateLabel(version.status)} · ${version.infohash}`}
+      aria-label={`${name}，${stateLabel(version.status)}`}
       className={cn(
         "h-5 max-w-28 font-normal",
-        version.status === "failed" && "border-status-danger-border text-status-danger-text",
+        failed && "border-status-danger-border text-status-danger-text",
         version.status === "finished" && "border-status-done-border text-status-done-text",
       )}
     >
       <span className="truncate">{name}</span>
+      {failed ? <span className="shrink-0">失败</span> : null}
     </Badge>
   );
 }
@@ -760,6 +1004,7 @@ function TaskDrawer({
   const [error, setError] = React.useState<string | null>(null);
   const closeRef = React.useRef<HTMLButtonElement>(null);
   const dialogRef = React.useRef<HTMLElement>(null);
+  const now = useNow();
 
   // 点完重试要重读一次抽屉：版本列表与时间线是重试的产物，得当场看得见。
   const [reloadKey, setReloadKey] = React.useState(0);
@@ -785,14 +1030,22 @@ function TaskDrawer({
     };
   }, [movieID, reloadKey]);
 
-  // 模态：开时焦点进抽屉，Tab 在内部循环，Esc 关闭，关掉把焦点还给打开它的那行。
+  // 模态：开时焦点进抽屉，Tab 在内部循环，Esc 关闭；焦点归还在 Panel 那边做。
+  //
+  // 这个 effect 只在挂载时跑一次：onClose 是父组件每次渲染新建的箭头函数，写进
+  // 依赖就会每个 render 重跑一遍（StrictMode 下更会跑两次），把状态搅乱。
+  const onCloseRef = React.useRef(onClose);
   React.useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  React.useEffect(() => {
+    const close = () => onCloseRef.current();
     closeRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        close();
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
@@ -813,16 +1066,17 @@ function TaskDrawer({
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      // 等背景的 inert 先撤掉：对 inert 子树里的元素调用 focus() 会被忽略。
-      window.setTimeout(() => previous?.focus(), 0);
-    };
-  }, [onClose]);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const task = detail?.task;
+  const finishedCount = task?.versions.filter((version) => version.status === "finished").length ?? 0;
 
-  return (
+  // 抽屉 portal 到 body：只有这样外壳才能整块 inert（侧栏、顶栏一起），
+  // 而抽屉自己仍可点、可 Tab。
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex justify-end bg-foreground/20"
       role="presentation"
@@ -848,15 +1102,25 @@ function TaskDrawer({
               {task?.movie_id ?? movieID}
             </p>
           </div>
-          <button
-            ref={closeRef}
-            type="button"
-            onClick={onClose}
-            aria-label="关闭抽屉"
-            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-          >
-            <X className="size-4" aria-hidden />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {task ? (
+              <span
+                className="hidden text-xs tabular-nums text-muted-foreground sm:inline"
+                title={formatAbsolute(task.updated_at)}
+              >
+                更新 {formatWhen(task.updated_at, now)}
+              </span>
+            ) : null}
+            <button
+              ref={closeRef}
+              type="button"
+              onClick={onClose}
+              aria-label="关闭抽屉"
+              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+              <X className="size-4" aria-hidden />
+            </button>
+          </div>
         </header>
 
         <div className="flex-1 space-y-6 overflow-y-auto px-4 py-4">
@@ -887,7 +1151,7 @@ function TaskDrawer({
               ) : (
                 <ol className="space-y-3">
                   {detail.events.map((event) => (
-                    <EventRow key={event.id} event={event} />
+                    <EventRow key={event.id} event={event} now={now} />
                   ))}
                 </ol>
               )}
@@ -896,64 +1160,119 @@ function TaskDrawer({
         </div>
 
         <footer className="space-y-2 border-t px-4 py-3">
-          <DrawerActions movieID={movieID} onRetried={reload} onRefresh={onRefresh} />
+          <DrawerActions
+            movieID={movieID}
+            finishedCount={finishedCount}
+            onRetried={reload}
+            onRefresh={onRefresh}
+          />
           <p className="text-xs leading-relaxed text-muted-foreground">
-            重试＝回加工开头或按存的 payload 重新加种；已入库的版本只有「强制重刮」才会重跑。
+            重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。
           </p>
         </footer>
       </aside>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 /**
  * DrawerActions 是抽屉底部的两个按钮（规格 §8.3 文案：重试 / 强制重刮）。
  *
- * 点完先重读抽屉（版本列表与时间线要立刻反映新状态），再刷新面板（统计卡与需人工区）。
+ * 强制重刮会把已入库的版本拉回加工开头并覆盖落盘，所以它只在真有已入库版本时
+ * 存在，且先出一行确认——把后果写在按钮旁边，而不是靠一个 disabled 去躲。
  */
 function DrawerActions({
   movieID,
+  finishedCount,
   onRetried,
   onRefresh,
 }: {
   movieID: string;
+  finishedCount: number;
   onRetried: () => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
   const taskRetry = useTaskRetry(onRefresh);
+  const [confirming, setConfirming] = React.useState(false);
+  const notice = taskRetry.notices[movieID];
+  const busy = taskRetry.busy.size > 0;
 
   const retry = async (force: boolean) => {
+    setConfirming(false);
     await taskRetry.retry(movieID, force);
     await onRetried();
   };
 
   return (
     <>
-      {taskRetry.error ? <Notice tone="bad">{taskRetry.error}</Notice> : null}
-      {taskRetry.notice ? (
-        <Notice tone={taskRetry.notice.tone}>{taskRetry.notice.text}</Notice>
+      {taskRetry.error ? (
+        <Notice tone="bad" onClose={taskRetry.clearError}>
+          {taskRetry.error}
+        </Notice>
       ) : null}
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          className="text-xs"
-          disabled={taskRetry.busy !== null}
-          onClick={() => void retry(false)}
+      {notice ? (
+        <Notice
+          tone={notice.tone}
+          onClose={() => {
+            taskRetry.clearNotice(movieID);
+          }}
         >
-          <RotateCcw className={cn("size-3.5", taskRetry.busy === taskRetryKey(movieID, false) && "animate-spin")} aria-hidden />
-          重试
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="text-xs"
-          disabled={taskRetry.busy !== null}
-          onClick={() => void retry(true)}
-        >
-          <RotateCcw className={cn("size-3.5", taskRetry.busy === taskRetryKey(movieID, true) && "animate-spin")} aria-hidden />
-          强制重刮
-        </Button>
-      </div>
+          {notice.text}
+        </Notice>
+      ) : null}
+
+      {confirming ? (
+        <div className="space-y-2 rounded-lg border border-status-progress-border bg-status-progress-surface px-3 py-2">
+          <p className="text-xs leading-relaxed text-status-progress-text">
+            确认把 {finishedCount} 条已入库版本拉回加工开头？重刮会重新取数并重写落盘，原来的取数快照留在任务事件里。
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+              disabled={busy}
+              onClick={() => void retry(true)}
+            >
+              <RotateCcw
+                className={cn("size-3.5", taskRetry.busy.has(taskRetryKey(movieID, true)) && "animate-spin")}
+                aria-hidden
+              />
+              确认强制重刮
+            </Button>
+            <Button
+              variant="ghost"
+              className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+              onClick={() => setConfirming(false)}
+            >
+              取消
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+            disabled={busy}
+            onClick={() => void retry(false)}
+          >
+            <RotateCcw
+              className={cn("size-3.5", taskRetry.busy.has(taskRetryKey(movieID, false)) && "animate-spin")}
+              aria-hidden
+            />
+            重试
+          </Button>
+          {finishedCount > 0 ? (
+            <Button
+              variant="outline"
+              className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+              disabled={busy}
+              onClick={() => setConfirming(true)}
+            >
+              强制重刮
+            </Button>
+          ) : null}
+        </div>
+      )}
     </>
   );
 }
@@ -996,13 +1315,19 @@ function VersionCard({ version }: { version: TaskVersion }) {
   );
 }
 
-function EventRow({ event }: { event: TaskEvent }) {
+function EventRow({ event, now }: { event: TaskEvent; now: number }) {
   return (
     <li className="relative pl-4">
       <span className="absolute top-1.5 left-0 size-1.5 rounded-full bg-border" aria-hidden />
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-xs font-medium">{eventKindLabel(event.kind)}</span>
-        <time className="shrink-0 text-xs text-muted-foreground">{formatTime(event.at)}</time>
+        <time
+          className="shrink-0 text-xs tabular-nums text-muted-foreground"
+          dateTime={event.at}
+          title={formatAbsolute(event.at)}
+        >
+          {formatWhen(event.at, now)}
+        </time>
       </div>
       <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{event.reason}</p>
       {event.from_state || event.to_state ? (
@@ -1048,10 +1373,18 @@ function eventKindLabel(kind: TaskEvent["kind"]): string {
   }
 }
 
-function formatTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString("zh-CN", { hour12: false });
+/**
+ * useNow 是一分钟一跳的「现在」。
+ *
+ * 相对时间（3 分钟前）不自己走的话，一屏「3 分钟前」会挂到用户关掉标签页为止，
+ * 那比写绝对时间更骗人。
+ */
+function useNow(interval = 60_000): number {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), interval);
+    return () => window.clearInterval(timer);
+  }, [interval]);
+  return now;
 }
 
