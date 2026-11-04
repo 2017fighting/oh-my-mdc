@@ -7,6 +7,11 @@
 @theme {
   --font-sans: 'Geist Variable', 'PingFang SC', 'Microsoft YaHei',
     'Noto Sans SC', ui-sans-serif, system-ui, sans-serif;
+
+  /* DESIGN 的 Dense（13px/1.5）：表格单元格、表单标签、行内动作标题。
+     以前这串字面量在面板里抄了二十遍，改一次规则要改二十处。 */
+  --text-dense: 0.8125rem;
+  --text-dense--line-height: 1.5;
 }
 
 @theme inline {

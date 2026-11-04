@@ -133,7 +133,7 @@ export function Panel({
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
         <section
           aria-label="任务统计"
-          className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[0.8125rem] text-muted-foreground"
+          className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-dense text-muted-foreground"
         >
           {stats.map((stat) => (
             <span key={stat.label} className="flex items-baseline gap-1.5">
@@ -159,7 +159,7 @@ export function Panel({
           </span>
           <Button
             variant="outline"
-            className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
+            className="h-9 px-2.5 text-dense md:h-7 md:text-xs"
             onClick={() => void refresh()}
             disabled={refreshing}
           >
@@ -202,7 +202,7 @@ export function Panel({
                       className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                     >
                       <span className="min-w-0">
-                        <span className="block text-[0.8125rem] font-medium tabular-nums">
+                        <span className="block text-dense font-medium tabular-nums">
                           {task.number}
                         </span>
                         <span className="block font-mono text-xs text-muted-foreground">
@@ -230,7 +230,7 @@ export function Panel({
               </ul>
 
               <div className="hidden overflow-x-auto lg:block">
-              <table className="w-full table-fixed border-collapse text-[0.8125rem] lg:min-w-[34rem]">
+              <table className="w-full table-fixed border-collapse text-dense lg:min-w-[34rem]">
                 <colgroup>
                   <col className="w-[11rem]" />
                   <col className="w-[6.5rem]" />
@@ -240,10 +240,13 @@ export function Panel({
                 </colgroup>
                 <thead>
                   <tr className="border-y bg-muted/40 text-left text-xs font-medium tracking-wide text-muted-foreground">
-                    <th className="px-4 py-2 font-medium">番号</th>
-                    <th className="px-4 py-2 font-medium">状态</th>
-                    <th className="px-4 py-2 font-medium">版本</th>
-                    <th className="px-4 py-2 font-medium">更新</th>
+                    <th scope="col" className="px-4 py-2 font-medium">番号</th>
+                    <th scope="col" className="px-4 py-2 font-medium">状态</th>
+                    <th scope="col" className="px-4 py-2 font-medium">版本</th>
+                    {/* 排序固定在「最近更新」：唯一会变的那一列，也是人判断新鲜度的依据。 */}
+                    <th scope="col" aria-sort="descending" className="px-4 py-2 font-medium">
+                      更新
+                    </th>
                     <th className="w-8 px-2 py-2" aria-label="打开抽屉" />
                   </tr>
                 </thead>
@@ -340,7 +343,7 @@ export function Panel({
             副作用失败退避重试，耗尽后移到「需要人工」等人工重发。
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-1.5 text-[0.8125rem]">
+        <CardContent className="flex flex-col gap-1.5 text-dense">
           {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
             const health = overview?.loops?.[loop];
             const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
@@ -689,13 +692,17 @@ function VersionGroup({
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
       <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[0.8125rem] font-medium tabular-nums">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-dense font-medium tabular-nums">
           {group.number}
           <span className="font-mono text-xs font-normal text-muted-foreground">{group.movieID}</span>
         </div>
         <ul className="space-y-2">
-          {group.items.map((item) => {
+          {group.items.map((item, index) => {
             const remedy = remedyOf(item);
+            // 同一组里连着两条同一个病因（两版都挂满盘、都停在同一句告警）时，
+            // 补法只说一次：逐行重复的那句话是纯噪声，还会把真正的差别淹掉。
+            const previousHint = index > 0 ? remedyOf(group.items[index - 1]).hint : "";
+            const hint = remedy.hint === previousHint ? "" : remedy.hint;
             return (
               <li key={item.infohash} className="space-y-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -716,13 +723,11 @@ function VersionGroup({
                     {formatWhen(item.at, now)}
                   </span>
                 </div>
-                <p className="text-[0.8125rem] leading-relaxed break-words text-foreground">
+                <p className="text-dense leading-relaxed break-words text-foreground">
                   {item.reason}
                 </p>
-                {remedy.hint ? (
-                  <p className="text-xs leading-relaxed break-words text-muted-foreground">
-                    {remedy.hint}
-                  </p>
+                {hint ? (
+                  <p className="text-xs leading-relaxed break-words text-muted-foreground">{hint}</p>
                 ) : null}
               </li>
             );
@@ -764,7 +769,7 @@ function StuckRow({
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
       <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] font-medium">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-dense font-medium">
           {sideEffectTitle(effect)}
           <Badge
             variant="outline"
@@ -776,7 +781,7 @@ function StuckRow({
             {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
           </span>
         </div>
-        <p className="text-[0.8125rem] leading-relaxed break-words text-foreground">
+        <p className="text-dense leading-relaxed break-words text-foreground">
           {effect.last_error || "自动重试已放弃，等人工重发。"}
         </p>
         {remedy.hint ? (
@@ -1046,6 +1051,9 @@ function SideEffectQueue({
 }) {
   const { busy, errors, retry } = useSideEffectRetry(onRefresh);
 
+  // 队列空着就不渲染这张卡：没有待办时，少一块结构就是信息本身。
+  if (effects.length === 0) return null;
+
   return (
     <Card>
       <CardHeader>
@@ -1055,10 +1063,9 @@ function SideEffectQueue({
         >
           副作用队列
         </CardTitle>
-        {effects.length === 0 ? <CardDescription>队列是空的。</CardDescription> : null}
       </CardHeader>
       <CardContent className="space-y-2">
-        {effects.length === 0 ? null : (
+        {(
           <div className="divide-y">
             {effects.map((effect) => {
               return (
@@ -1067,7 +1074,7 @@ function SideEffectQueue({
                   className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[0.8125rem] font-medium">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-dense font-medium">
                       {sideEffectTitle(effect)}
                       <span className="text-xs font-normal tabular-nums text-muted-foreground">
                         {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
@@ -1087,9 +1094,8 @@ function SideEffectQueue({
                     ) : null}
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                    <Button
+                    <RowAction
                       variant="outline"
-                      className="h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs"
                       disabled={busy === effect.id}
                       onClick={() => void retry(effect.id)}
                     >
@@ -1098,7 +1104,7 @@ function SideEffectQueue({
                         aria-hidden
                       />
                       重发
-                    </Button>
+                    </RowAction>
                   </div>
                 </div>
               );
@@ -1149,7 +1155,7 @@ function RowAction({ className, variant = "outline", ...props }: React.Component
   return (
     <Button
       variant={variant}
-      className={cn("h-9 px-2.5 text-[0.8125rem] md:h-7 md:text-xs", className)}
+      className={cn("h-9 px-2.5 text-dense md:h-7 md:text-xs", className)}
       {...props}
     />
   );
@@ -1217,7 +1223,7 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
                 filter.value === "failed" ? "任务级：只算全部版本都失败的作品" : undefined
               }
               className={cn(
-                "h-9 rounded-lg px-2.5 text-[0.8125rem] transition-colors md:h-7 md:text-xs",
+                "h-9 rounded-lg px-2.5 text-dense transition-colors md:h-7 md:text-xs",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                 current
                   ? "bg-secondary font-medium text-secondary-foreground"
@@ -1380,6 +1386,9 @@ function TaskDrawer({
 }) {
   const [detail, setDetail] = React.useState<TaskDetail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  // 强制重刮的确认条住在这里而不是在按钮组里：遮罩要知道「确认条正开着」，
+  // 否则一次误触就把刚写清后果的那句话关掉，人还得重新走一遍。
+  const [confirming, setConfirming] = React.useState(false);
   const closeRef = React.useRef<HTMLButtonElement>(null);
   const dialogRef = React.useRef<HTMLElement>(null);
   const now = useNow();
@@ -1458,7 +1467,7 @@ function TaskDrawer({
     <div
       className="fixed inset-0 z-50 flex justify-end bg-foreground/20"
       role="presentation"
-      onClick={onClose}
+      onClick={confirming ? undefined : onClose}
     >
       <aside
         ref={dialogRef}
@@ -1512,7 +1521,7 @@ function TaskDrawer({
 
           {task ? (
             <section aria-label="版本列表" className="space-y-2">
-              <h3 className="text-[0.8125rem] font-medium">版本（{task.versions.length}）</h3>
+              <h3 className="text-dense font-medium">版本（{task.versions.length}）</h3>
               <div className="divide-y">
                 {task.versions.map((version) => (
                   <VersionCard key={version.infohash} version={version} />
@@ -1523,7 +1532,7 @@ function TaskDrawer({
 
           {detail ? (
             <section aria-label="事件时间线" className="space-y-2">
-              <h3 className="text-[0.8125rem] font-medium">最近事件</h3>
+              <h3 className="text-dense font-medium">最近事件</h3>
               {detail.events.length === 0 ? (
                 <p className="text-xs text-muted-foreground">还没有事件。</p>
               ) : (
@@ -1542,6 +1551,8 @@ function TaskDrawer({
             movieID={movieID}
             versionCount={task?.versions.length ?? 0}
             finishedCount={finishedCount}
+            confirming={confirming}
+            onConfirming={setConfirming}
             onRetried={reload}
             onRefresh={onRefresh}
           />
@@ -1562,17 +1573,20 @@ function DrawerActions({
   movieID,
   versionCount,
   finishedCount,
+  confirming,
+  onConfirming: setConfirming,
   onRetried,
   onRefresh,
 }: {
   movieID: string;
   versionCount: number;
   finishedCount: number;
+  confirming: boolean;
+  onConfirming: (confirming: boolean) => void;
   onRetried: () => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
   const taskRetry = useTaskRetry(onRefresh);
-  const [confirming, setConfirming] = React.useState(false);
   const notice = taskRetry.notices[movieID];
   const busy = taskRetry.busy.size > 0;
 
@@ -1607,7 +1621,7 @@ function DrawerActions({
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Button
-              className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+              className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
               disabled={busy}
               onClick={() => void retry(true)}
             >
@@ -1619,7 +1633,7 @@ function DrawerActions({
             </Button>
             <Button
               variant="ghost"
-              className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+              className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
               onClick={() => setConfirming(false)}
             >
               取消
@@ -1629,7 +1643,7 @@ function DrawerActions({
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+            className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
             disabled={busy}
             title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
             onClick={() => void retry(false)}
@@ -1643,7 +1657,7 @@ function DrawerActions({
           {finishedCount > 0 ? (
             <Button
               variant="outline"
-              className="h-9 px-2.5 text-[0.8125rem] md:h-8 md:text-sm"
+              className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
               disabled={busy}
               onClick={() => setConfirming(true)}
             >
@@ -1664,7 +1678,7 @@ function VersionCard({ version }: { version: TaskVersion }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-[0.8125rem] font-medium">{version.label || "无标签"}</span>
+            <span className="text-dense font-medium">{version.label || "无标签"}</span>
             <span className="text-xs text-muted-foreground">{sourceLabel(version.source)}</span>
           </div>
           <span className="font-mono text-xs text-muted-foreground" title={version.infohash}>

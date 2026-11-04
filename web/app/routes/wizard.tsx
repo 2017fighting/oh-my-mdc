@@ -320,7 +320,7 @@ export function Wizard({
                   to={`/settings/${candidate.section}`}
                   aria-current={current ? "step" : undefined}
                   className={cn(
-                    "flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-[0.8125rem] transition-colors",
+                    "flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-dense transition-colors",
                     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                     current
                       ? "border-border bg-background font-medium"
@@ -350,7 +350,7 @@ export function Wizard({
                 to={`/settings/${candidate.section}`}
                 aria-current={current ? "step" : undefined}
                 className={cn(
-                  "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-[0.8125rem] transition-colors",
+                  "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-dense transition-colors",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                   current
                     ? "bg-background font-medium ring-1 ring-foreground/10"
@@ -634,7 +634,7 @@ function MainlineChecklist({ snapshot }: { snapshot: ConfigSnapshot }) {
   const { javdb, qbittorrent, jellyfin } = snapshot.sections;
   return (
     <div className="mt-3 rounded-lg border bg-muted/30 p-3">
-      <div className="text-[0.8125rem] font-medium">主线三件套</div>
+      <div className="text-dense font-medium">主线三件套</div>
       <ul className="mt-1.5 space-y-1 text-xs">
         <CheckLine ok={javdb.configured} label="JavDB 可读，清单已登记" />
         <CheckLine ok={qbittorrent.configured} label="qBittorrent 可连" />
@@ -717,7 +717,7 @@ function AutorunAssist({ configured }: { configured: boolean }) {
 
   return (
     <div className="mt-3 rounded-lg border bg-muted/30 p-3">
-      <div className="text-[0.8125rem] font-medium">autorun 共存改写</div>
+      <div className="text-dense font-medium">autorun 共存改写</div>
       <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
         qBittorrent 的 autorun 只能写一条命令，本项目用
         <code className="mx-1 font-mono">/bin/sh -c</code>
@@ -977,7 +977,7 @@ function ListAssist({
 
   return (
     <div className="mt-3 rounded-lg border bg-muted/30 p-3">
-      <div className="text-[0.8125rem] font-medium">从 JavDB 选清单</div>
+      <div className="text-dense font-medium">从 JavDB 选清单</div>
       <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
         探测会列出你自建的清单，按 id 选中登记；也可以一键创建「想看清单」，或手动填 id 兜底。
       </p>

@@ -245,7 +245,20 @@ export default function Home() {
                 {initialized ? "已初始化" : "未初始化"}
               </Badge>
             ) : null}
-            {overview?.paused ? <Badge variant="outline">已暂停</Badge> : null}
+            {/* 暂停是集成设置第 8 步里的一个开关：徽章自己不给按钮，但要给一条真链接，
+                否则「已暂停」就是一句没有下文的坏消息。 */}
+            {overview?.paused ? (
+              <>
+                <Badge variant="outline">已暂停</Badge>
+                <Link
+                  to="/settings/app"
+                  title="暂停/恢复是集成设置里的一个开关"
+                  className="rounded-sm text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                >
+                  恢复循环
+                </Link>
+              </>
+            ) : null}
           </div>
         </header>
 
