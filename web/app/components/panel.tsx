@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
+import { groupByNumber, type FailureGroup } from "~/lib/attention";
 import { formatAbsolute, formatClock, formatFuture, formatWhen } from "~/lib/time";
 import {
   remedyForFailure,
@@ -650,20 +651,6 @@ function ReceiptList({
       ))}
     </div>
   );
-}
-
-/** FailureGroup 是同一个番号下同病的一串版本。 */
-type FailureGroup = { movieID: string; number: string; items: AttentionItem[] };
-
-/** groupByNumber 按番号收行：两版同挂只出现一个番号、一颗按钮。 */
-function groupByNumber(items: AttentionItem[]): FailureGroup[] {
-  const groups: FailureGroup[] = [];
-  for (const item of items) {
-    const last = groups[groups.length - 1];
-    if (last && last.movieID === item.movie_id) last.items.push(item);
-    else groups.push({ movieID: item.movie_id, number: item.number, items: [item] });
-  }
-  return groups;
 }
 
 function AttentionHeading({ label, count }: { label: string; count: number }) {

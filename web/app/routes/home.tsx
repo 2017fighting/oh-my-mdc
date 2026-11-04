@@ -11,6 +11,7 @@ import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
 import { formatInterval } from "~/lib/time";
 import {
   api,
+  isGatewayAuthError,
   type Attention,
   type ConfigSnapshot,
   type Overview,
@@ -48,7 +49,8 @@ export default function Home() {
   const [attention, setAttention] = React.useState<Attention | null>(null);
   const [sideEffects, setSideEffects] = React.useState<SideEffect[]>([]);
   const [pageSize, setPageSize] = React.useState(50);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
+  // 存错误本身而不是一句话：网关类失败（登录页、401/403）要拿它决定给什么动作。
+  const [loadError, setLoadError] = React.useState<unknown | null>(null);
   // 上一次真正读到数据的时刻（客户端时钟）。值班台必须知道自己有多旧，
   // 否则「还没好」与「这是旧快照」在屏幕上长得一模一样。
   const [loadedAt, setLoadedAt] = React.useState<number | null>(null);
@@ -82,16 +84,20 @@ export default function Home() {
   }, []);
 
   // 首次进入、翻页、改筛选时拉一次；保存/测试/刷新按钮另有各自的入口。
+  //
+  // 这里必须用 try/catch 包住 apply：以前是 `.then(loaded => apply(loaded), onError)`，
+  // 而 onError 只接**请求**的失败，接不住 apply 自己抛的错（回包形状不对时）。
+  // 后果是 snapshot 与 loadError 都停在 null，页面永远“正在读取设置…”。
   React.useEffect(() => {
     let cancelled = false;
-    fetchDashboard(query).then(
-      (loaded) => {
+    void (async () => {
+      try {
+        const loaded = await fetchDashboard(query);
         if (!cancelled) apply(loaded);
-      },
-      (error: unknown) => {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error));
-      },
-    );
+      } catch (error: unknown) {
+        if (!cancelled) setLoadError(error);
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -103,7 +109,7 @@ export default function Home() {
     try {
       apply(await fetchDashboard(query));
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error));
+      setLoadError(error);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apply, queryKey]);
@@ -134,6 +140,10 @@ export default function Home() {
 
   const loop = loopState(snapshot, overview);
 
+  // 失败提示说清是哪一层的事：应用自己说的错，还是前面那层网关拦下的。
+  const loadErrorText = loadError instanceof Error ? loadError.message : "";
+  const gatewayExpired = isGatewayAuthError(loadError);
+
   // 三条循环的间隔读自 app_config；读不到就是 null，不编默认值。
   const appConfig = (snapshot?.sections?.app?.data ?? {}) as Record<string, unknown>;
   const intervals = {
@@ -143,7 +153,11 @@ export default function Home() {
   };
 
   // 标题只描述**地址**，不预判门禁：读到 snapshot 之前不说「未初始化」。
-  const title = view === "panel" ? "面板" : !snapshot ? "集成设置" : initialized ? "集成设置" : "初始化向导";
+  // 标题、导航高亮与加载文案读**地址**（route.view），只有未初始化才被门禁改写：
+  // 刚打开 / 的那一刻 snapshot 还没回来，view 会短暂算成 settings，于是面板写着
+  // 「集成设置」、导航亮着另一边，而屏幕上其实什么都没有。
+  const onPanel = route.view === "panel" && (snapshot ? initialized : true);
+  const title = onPanel ? "面板" : !snapshot ? "集成设置" : initialized ? "集成设置" : "初始化向导";
 
   return (
     <div id="app-shell" className="mx-auto flex min-h-screen w-full max-w-6xl gap-6 p-6 text-foreground">
@@ -158,7 +172,7 @@ export default function Home() {
             to="/"
             icon={<LayoutDashboard className="size-4" aria-hidden />}
             label="面板"
-            current={view === "panel"}
+            current={onPanel}
             disabled={!initialized}
             title={initialized ? undefined : "主线三件套不齐，面板进不去"}
           />
@@ -166,7 +180,7 @@ export default function Home() {
             to={`/settings/${section}`}
             icon={<Plug className="size-4" aria-hidden />}
             label="集成设置"
-            current={view === "settings"}
+            current={!onPanel}
             title={initialized ? "八节各自一个地址" : "初始化前这里是向导"}
           />
         </nav>
@@ -195,7 +209,7 @@ export default function Home() {
               to="/"
               icon={<LayoutDashboard className="size-4" aria-hidden />}
               label="面板"
-              current={view === "panel"}
+              current={onPanel}
               disabled={!initialized}
               title={initialized ? undefined : "主线三件套不齐，面板进不去"}
             />
@@ -203,7 +217,7 @@ export default function Home() {
               to={`/settings/${section}`}
               icon={<Plug className="size-4" aria-hidden />}
               label="集成设置"
-              current={view === "settings"}
+              current={!onPanel}
             />
           </nav>
         </div>
@@ -222,7 +236,9 @@ export default function Home() {
 
         {loadError ? (
           <Notice tone="bad" onClose={() => setLoadError(null)}>
-            读不到设置：{loadError}
+            {gatewayExpired
+              ? `网关拦下了这次请求：${loadErrorText}。登录后再刷新本页。`
+              : `${route.view === "panel" ? "读不到面板数据" : "读不到设置"}：${loadErrorText}`}
             <button
               type="button"
               className="ml-2 underline underline-offset-4"
@@ -230,6 +246,15 @@ export default function Home() {
             >
               重试
             </button>
+            {gatewayExpired ? (
+              <button
+                type="button"
+                className="ml-2 underline underline-offset-4"
+                onClick={() => window.location.reload()}
+              >
+                刷新页面
+              </button>
+            ) : null}
           </Notice>
         ) : null}
 
@@ -259,7 +284,7 @@ export default function Home() {
         ) : loadError ? null : (
           <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" aria-hidden />
-            正在读取设置…
+            {route.view === "panel" ? "正在读取面板数据…" : "正在读取设置…"}
           </div>
         )}
       </main>

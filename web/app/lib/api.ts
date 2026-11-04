@@ -286,14 +286,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     | { error?: { code?: string; message?: string } }
     | null;
 
+  // 非 JSON 只可能是中间层接的：网关会话过期时，authelia 会回一个 200 的登录页。
+  // 以前这里把 null 当 T 返回，调用方随后在拉链里抛错，页面就永远停在 spinner 上。
+  if (!body) {
+    throw new HttpError(
+      response.status,
+      "gateway_html",
+      response.ok
+        ? "网关返回的是登录页，不是数据"
+        : `网关返回了 HTTP ${response.status}，不是 JSON`,
+    );
+  }
+
   if (!response.ok) {
     throw new HttpError(
       response.status,
-      body?.error?.code ?? `http_${response.status}`,
-      body?.error?.message ?? `请求失败（HTTP ${response.status}）`,
+      body.error?.code ?? `http_${response.status}`,
+      body.error?.message ?? `请求失败（HTTP ${response.status}）`,
     );
   }
   return body as T;
+}
+
+/**
+ * isGatewayAuthError 认出「不是应用说的，是前面那层网关说的」那一类失败。
+ *
+ * 应用层没有鉴权（长期约束），401/403 与非 JSON 回包只可能来自网关。这两类失败唯一
+ * 有意义的动作是重登，不能靠重试同一个请求。
+ */
+export function isGatewayAuthError(error: unknown): boolean {
+  if (!(error instanceof HttpError)) return false;
+  return error.code === "gateway_html" || error.status === 401 || error.status === 403;
 }
 
 export const api = {
