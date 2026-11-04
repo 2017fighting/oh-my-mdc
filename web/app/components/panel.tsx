@@ -106,8 +106,8 @@ export function Panel({
 
   const counts = overview?.counts;
   // 统计行只放任务级状态数。不放「需要人工」：那个数是一行一件事的**行数**，
-  // 它唯一的住处是下面那张卡的徽章与构成说明；counts.failed 是另一个口径
-  // （全部版本都失败的任务），只服务「需人工」筛选，两者不再合成一个数。
+  // 它唯一的住处是页面标题（`N 件事需要人工`）与卡片的构成行；counts.failed 是
+  // 另一个口径（全部版本都失败的任务），只服务「需人工」筛选，两者不合成一个数。
   // 统计行只放「还在动」的两个数。已入库是永远不需要动作的那个，挪到右端与新鲜度
   // 同处：它是背景，不是待办。
   const stats = [
@@ -125,6 +125,8 @@ export function Panel({
   };
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  // 轮询是「我刚加的片什么时候被拿到」的答案，手机上放进统计行。
+  const poll = overview?.loops?.poll;
 
   return (
     <>
@@ -133,7 +135,7 @@ export function Panel({
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
         <section
           aria-label="任务统计"
-          className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-dense text-muted-foreground"
+          className="dense flex flex-wrap items-baseline gap-x-4 gap-y-1 text-muted-foreground"
         >
           {stats.map((stat) => (
             <span key={stat.label} className="flex items-baseline gap-1.5">
@@ -141,11 +143,25 @@ export function Panel({
               <span className="font-medium tabular-nums text-foreground">{stat.value}</span>
             </span>
           ))}
+          {/* 手机上侧栏是藏起来的，心跳得在这里说一句：清完队列之后，「下一轮什么时候
+              去拿我刚加的那部」就是下一个问题，而它不该在一张分页表格之后再回答。 */}
+          <span className="flex items-baseline gap-1.5 lg:hidden">
+            <span>清单轮询</span>
+            <span className={cn("tabular-nums", poll?.last_ok === false && "text-status-danger-text")}>
+              {[
+                intervals.poll,
+                poll?.last_run_at ? formatWhen(poll.last_run_at, now) : "还没跑过",
+                poll?.last_ok === false ? "失败" : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          </span>
         </section>
 
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           <span className="tabular-nums">
-            已入库 <span className="font-medium text-foreground">{counts?.finished ?? 0}</span>
+            已入库 <span className="tabular-nums">{counts?.finished ?? 0}</span>
           </span>
           <span className="tabular-nums">
             {loadedAt ? (
@@ -159,7 +175,7 @@ export function Panel({
           </span>
           <Button
             variant="outline"
-            className="h-9 px-2.5 text-dense md:h-7 md:text-xs"
+            className="h-9 px-2.5 dense md:h-7 md:text-xs"
             onClick={() => void refresh()}
             disabled={refreshing}
           >
@@ -202,7 +218,7 @@ export function Panel({
                       className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                     >
                       <span className="min-w-0">
-                        <span className="block text-dense font-medium tabular-nums">
+                        <span className="block dense font-medium tabular-nums">
                           {task.number}
                         </span>
                         <span className="block font-mono text-xs text-muted-foreground">
@@ -230,7 +246,7 @@ export function Panel({
               </ul>
 
               <div className="hidden overflow-x-auto lg:block">
-              <table className="w-full table-fixed border-collapse text-dense lg:min-w-[34rem]">
+              <table className="w-full table-fixed border-collapse dense lg:min-w-[34rem]">
                 <colgroup>
                   <col className="w-[11rem]" />
                   <col className="w-[6.5rem]" />
@@ -247,7 +263,9 @@ export function Panel({
                     <th scope="col" aria-sort="descending" className="px-4 py-2 font-medium">
                       更新
                     </th>
-                    <th className="w-8 px-2 py-2" aria-label="打开抽屉" />
+                    <th scope="col" className="w-8 px-2 py-2">
+                      <span className="sr-only">打开详情</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -343,7 +361,7 @@ export function Panel({
             副作用失败退避重试，耗尽后移到「需要人工」等人工重发。
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-1.5 text-dense">
+        <CardContent className="flex flex-col gap-1.5 dense">
           {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
             const health = overview?.loops?.[loop];
             const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
@@ -447,17 +465,22 @@ function NeedsAttention({
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
       <CardHeader>
         <div>
-          <CardTitle as="h2" className="flex items-center gap-2">
+          {/* 页标题已经说了「N 件事需要人工」，卡片不把同一个词再说一遍：可见的首行
+              就是它的构成（失败几部 · 停滞几部 · 驻留几条），标题只留给大纲与读屏。 */}
+          <h2 className="sr-only">需要人工</h2>
+          <p
+            aria-live="polite"
+            className="dense flex items-start gap-2 leading-relaxed text-foreground"
+          >
             <AlertTriangle
-              className={cn("size-4", total > 0 ? "text-status-danger-text" : "text-muted-foreground")}
+              className={cn(
+                "mt-0.5 size-4 shrink-0",
+                total > 0 ? "text-status-danger-text" : "text-muted-foreground",
+              )}
               aria-hidden
             />
-            需要人工
-          </CardTitle>
-          {/* 只说构成，不重复总数：那个数已经是页面标题；这里把它拆成 失败 / 停滞 / 驻留。 */}
-          <CardDescription aria-live="polite">
-            {total === 0 ? "已经清完了。" : broke.join(" · ")}
-          </CardDescription>
+            <span>{total === 0 ? "已经清完了。" : broke.join(" · ")}</span>
+          </p>
         </div>
       </CardHeader>
       {total > 0 || receipts.length > 0 ? (
@@ -476,7 +499,7 @@ function NeedsAttention({
             <div className="divide-y">
               {failedGroups.length > 0 ? (
                 <section aria-label="失败的版本" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="失败" count={failed.length} />
+                  <AttentionHeading label="失败" />
                   <div className="divide-y">
                     {failedGroups.map((group) => (
                       <VersionGroup
@@ -501,13 +524,18 @@ function NeedsAttention({
 
               {stalledGroups.length > 0 ? (
                 <section aria-label="停滞的下载" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="停滞" count={stalled.length} />
+                  <AttentionHeading label="停滞" />
+                  {/* 停滞的补法是一句常量（先在 qBittorrent 里确认…），整节说一次就够了。 */}
+                  <p className="mb-2 dense leading-relaxed text-foreground">
+                    {remedyForStalled().hint}
+                  </p>
                   <div className="divide-y">
                     {stalledGroups.map((group) => (
                       <VersionGroup
                         key={group.movieID}
                         group={group}
                         kind="stalled"
+                        hints={false}
                         now={now}
                         busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
                         onRetry={(infohashes) =>
@@ -526,7 +554,7 @@ function NeedsAttention({
 
               {stuck.length > 0 ? (
                 <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="驻留副作用" count={stuck.length} />
+                  <AttentionHeading label="驻留副作用" />
                   <div className="divide-y">
                     {stuck.map((effect) => (
                       <StuckRow
@@ -625,7 +653,7 @@ function ReceiptList({
               receipt.tone === "ok" ? "text-status-done-text" : "text-status-progress-text",
             )}
           >
-            {receipt.tone === "ok" ? "已下发" : "没成"}
+            {receipt.tone === "ok" ? "已重试" : "没成"}
           </span>
           <span className="min-w-0 flex-1 break-words">
             <span className="font-medium tabular-nums">{receipt.title}</span>
@@ -648,15 +676,13 @@ function ReceiptList({
   );
 }
 
-function AttentionHeading({ label, count }: { label: string; count: number }) {
-  return (
-    <h3 className="mb-1 flex items-baseline gap-1.5 text-xs font-medium text-muted-foreground">
-      {label}
-      <span className="tabular-nums">
-        {count} 条{label === "驻留副作用" ? "" : "版本"}
-      </span>
-    </h3>
-  );
+/**
+ * AttentionHeading 只报分节名，不再报数：数已经有唯一的说话人（页标题 + 构成行）。
+ * 以前这里写「失败 4 条版本」而构成行写「失败 3 部」，两个单位并排 40px，
+ * 人得自己算它们是不是同一个东西。
+ */
+function AttentionHeading({ label }: { label: string }) {
+  return <h3 className="mb-1 text-xs font-medium text-muted-foreground">{label}</h3>;
 }
 
 /**
@@ -669,6 +695,7 @@ function AttentionHeading({ label, count }: { label: string; count: number }) {
 function VersionGroup({
   group,
   kind,
+  hints = true,
   now,
   busy,
   onRetry,
@@ -676,6 +703,8 @@ function VersionGroup({
 }: {
   group: FailureGroup;
   kind: "failed" | "stalled";
+  /** 分节已经把补法说过了就不再逐行印（停滞是常量串）。 */
+  hints?: boolean;
   now: number;
   busy: boolean;
   /** 只把这条组里还有救的版本交出去：按钮上的数字就是会动的条数。 */
@@ -692,7 +721,7 @@ function VersionGroup({
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
       <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-dense font-medium tabular-nums">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 dense font-medium tabular-nums">
           {group.number}
           <span className="font-mono text-xs font-normal text-muted-foreground">{group.movieID}</span>
         </div>
@@ -702,7 +731,7 @@ function VersionGroup({
             // 同一组里连着两条同一个病因（两版都挂满盘、都停在同一句告警）时，
             // 补法只说一次：逐行重复的那句话是纯噪声，还会把真正的差别淹掉。
             const previousHint = index > 0 ? remedyOf(group.items[index - 1]).hint : "";
-            const hint = remedy.hint === previousHint ? "" : remedy.hint;
+            const hint = !hints || remedy.hint === previousHint ? "" : remedy.hint;
             return (
               <li key={item.infohash} className="space-y-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -723,11 +752,20 @@ function VersionGroup({
                     {formatWhen(item.at, now)}
                   </span>
                 </div>
-                <p className="text-dense leading-relaxed break-words text-foreground">
+                <p className="dense leading-relaxed break-words text-foreground">
                   {item.reason}
                 </p>
                 {hint ? (
-                  <p className="text-xs leading-relaxed break-words text-muted-foreground">{hint}</p>
+                  // 补法按「人该照哪句动」给权重：给了按钮时它是脚注，
+                  // 不给按钮时它就是那句指令（宿主机问题的「重试不会变好」）。
+                  <p
+                    className={cn(
+                      "leading-relaxed break-words",
+                      remedy.retryable ? "text-xs text-muted-foreground" : "dense text-foreground",
+                    )}
+                  >
+                    {hint}
+                  </p>
                 ) : null}
               </li>
             );
@@ -739,6 +777,7 @@ function VersionGroup({
           <RowAction
             variant="outline"
             disabled={busy}
+            data-retry={group.movieID}
             onClick={() => onRetry(retryTargets.map((item) => item.infohash))}
           >
             <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
@@ -769,19 +808,19 @@ function StuckRow({
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
       <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-dense font-medium">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 dense font-medium">
           {sideEffectTitle(effect)}
           <Badge
             variant="outline"
             className="border-transparent bg-status-danger-surface text-status-danger-text"
           >
-            副作用驻留
+            驻留副作用
           </Badge>
           <span className="text-xs font-normal tabular-nums text-muted-foreground">
             {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
           </span>
         </div>
-        <p className="text-dense leading-relaxed break-words text-foreground">
+        <p className="dense leading-relaxed break-words text-foreground">
           {effect.last_error || "自动重试已放弃，等人工重发。"}
         </p>
         {remedy.hint ? (
@@ -892,9 +931,14 @@ function useTaskRetry(
         setNotices((current) => ({ ...current, [movieID]: notice }));
         onReceipt?.({ title, ...notice });
         await onRefresh();
-        // 行在成功之后从树上消失了：把焦点跟到回执上，不然它静静掉回 body。
+        // 行在成功之后从树上消失了：焦点跟到下一条还能按的重试，一条不剩才落到回执上。
+        // 落到回执会把整页滚回卡片头，而回执本身是 role=status，已经在播报了。
         await afterPaint();
-        if (origin && !origin.isConnected) focusFallback?.current?.focus();
+        if (focusFallback && origin && !origin.isConnected) {
+          const next = document.querySelector<HTMLElement>("[data-retry]:not([disabled])");
+          if (next) next.focus();
+          else focusFallback.current?.focus();
+        }
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
@@ -1023,7 +1067,11 @@ function useSideEffectRetry(
         onReceipt?.({ title, tone: "ok", text: "已重发，回到副作用队列。" });
         await onRefresh();
         await afterPaint();
-        if (origin && !origin.isConnected) focusFallback?.current?.focus();
+        if (focusFallback && origin && !origin.isConnected) {
+          const next = document.querySelector<HTMLElement>("[data-retry]:not([disabled])");
+          if (next) next.focus();
+          else focusFallback.current?.focus();
+        }
       } catch (cause) {
         setErrors((current) => ({
           ...current,
@@ -1065,52 +1113,50 @@ function SideEffectQueue({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
-        {(
-          <div className="divide-y">
-            {effects.map((effect) => {
-              return (
-                <div
-                  key={effect.id}
-                  className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-dense font-medium">
-                      {sideEffectTitle(effect)}
-                      <span className="text-xs font-normal tabular-nums text-muted-foreground">
-                        {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
-                      </span>
+        <div className="divide-y">
+          {effects.map((effect) => {
+            return (
+              <div
+                key={effect.id}
+                className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 dense font-medium">
+                    {sideEffectTitle(effect)}
+                    <span className="text-xs font-normal tabular-nums text-muted-foreground">
+                      {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
+                    </span>
+                  </div>
+                  <p
+                    className="text-xs tabular-nums text-muted-foreground"
+                    title={formatAbsolute(effect.next_attempt_at)}
+                  >
+                    下次尝试 {formatFuture(effect.next_attempt_at, now)}
+                    {effect.last_error ? ` · 上次：${effect.last_error}` : ""}
+                  </p>
+                  {errors[effect.id] ? (
+                    <div className="mt-1">
+                      <Notice tone="bad">{errors[effect.id]}</Notice>
                     </div>
-                    <p
-                      className="text-xs tabular-nums text-muted-foreground"
-                      title={formatAbsolute(effect.next_attempt_at)}
-                    >
-                      下次尝试 {formatFuture(effect.next_attempt_at, now)}
-                      {effect.last_error ? ` · 上次：${effect.last_error}` : ""}
-                    </p>
-                    {errors[effect.id] ? (
-                      <div className="mt-1">
-                        <Notice tone="bad">{errors[effect.id]}</Notice>
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                    <RowAction
-                      variant="outline"
-                      disabled={busy === effect.id}
-                      onClick={() => void retry(effect.id)}
-                    >
-                      <RotateCcw
-                        className={cn("size-3.5", busy === effect.id && "animate-spin")}
-                        aria-hidden
-                      />
-                      重发
-                    </RowAction>
-                  </div>
+                  ) : null}
                 </div>
-              );
-            })}
-          </div>
-        )}
+                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                  <RowAction
+                    variant="outline"
+                    disabled={busy === effect.id}
+                    onClick={() => void retry(effect.id)}
+                  >
+                    <RotateCcw
+                      className={cn("size-3.5", busy === effect.id && "animate-spin")}
+                      aria-hidden
+                    />
+                    重发
+                  </RowAction>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </CardContent>
     </Card>
   );
@@ -1155,7 +1201,7 @@ function RowAction({ className, variant = "outline", ...props }: React.Component
   return (
     <Button
       variant={variant}
-      className={cn("h-9 px-2.5 text-dense md:h-7 md:text-xs", className)}
+      className={cn("h-9 px-2.5 dense md:h-7 md:text-xs", className)}
       {...props}
     />
   );
@@ -1223,7 +1269,7 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
                 filter.value === "failed" ? "任务级：只算全部版本都失败的作品" : undefined
               }
               className={cn(
-                "h-9 rounded-lg px-2.5 text-dense transition-colors md:h-7 md:text-xs",
+                "h-9 rounded-lg px-2.5 dense transition-colors md:h-7 md:text-xs",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                 current
                   ? "bg-secondary font-medium text-secondary-foreground"
@@ -1521,7 +1567,7 @@ function TaskDrawer({
 
           {task ? (
             <section aria-label="版本列表" className="space-y-2">
-              <h3 className="text-dense font-medium">版本（{task.versions.length}）</h3>
+              <h3 className="dense font-medium">版本（{task.versions.length}）</h3>
               <div className="divide-y">
                 {task.versions.map((version) => (
                   <VersionCard key={version.infohash} version={version} />
@@ -1532,7 +1578,7 @@ function TaskDrawer({
 
           {detail ? (
             <section aria-label="事件时间线" className="space-y-2">
-              <h3 className="text-dense font-medium">最近事件</h3>
+              <h3 className="dense font-medium">最近事件</h3>
               {detail.events.length === 0 ? (
                 <p className="text-xs text-muted-foreground">还没有事件。</p>
               ) : (
@@ -1621,7 +1667,7 @@ function DrawerActions({
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Button
-              className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
+              className="h-9 px-2.5 dense md:h-8 md:text-sm"
               disabled={busy}
               onClick={() => void retry(true)}
             >
@@ -1633,7 +1679,7 @@ function DrawerActions({
             </Button>
             <Button
               variant="ghost"
-              className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
+              className="h-9 px-2.5 dense md:h-8 md:text-sm"
               onClick={() => setConfirming(false)}
             >
               取消
@@ -1643,7 +1689,7 @@ function DrawerActions({
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
+            className="h-9 px-2.5 dense md:h-8 md:text-sm"
             disabled={busy}
             title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
             onClick={() => void retry(false)}
@@ -1657,7 +1703,7 @@ function DrawerActions({
           {finishedCount > 0 ? (
             <Button
               variant="outline"
-              className="h-9 px-2.5 text-dense md:h-8 md:text-sm"
+              className="h-9 px-2.5 dense md:h-8 md:text-sm"
               disabled={busy}
               onClick={() => setConfirming(true)}
             >
@@ -1678,7 +1724,7 @@ function VersionCard({ version }: { version: TaskVersion }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-dense font-medium">{version.label || "无标签"}</span>
+            <span className="dense font-medium">{version.label || "无标签"}</span>
             <span className="text-xs text-muted-foreground">{sourceLabel(version.source)}</span>
           </div>
           <span className="font-mono text-xs text-muted-foreground" title={version.infohash}>

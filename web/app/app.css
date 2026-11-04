@@ -7,11 +7,16 @@
 @theme {
   --font-sans: 'Geist Variable', 'PingFang SC', 'Microsoft YaHei',
     'Noto Sans SC', ui-sans-serif, system-ui, sans-serif;
+}
 
-  /* DESIGN 的 Dense（13px/1.5）：表格单元格、表单标签、行内动作标题。
-     以前这串字面量在面板里抄了二十遍，改一次规则要改二十处。 */
-  --text-dense: 0.8125rem;
-  --text-dense--line-height: 1.5;
+/* DESIGN 的 Dense（13px/1.5）：表格单元格、表单标签、行内动作标题。
+   刻意不叫 `text-dense`：那是字号没错，但 tailwind-merge 把它当**颜色**类，
+   于是 `cn(buttonVariants(), "text-dense")` 会把 variant 的
+   `text-primary-foreground` 删掉——按钮就成了黑底黑字（实测 1.1:1）。
+   换一个不在 text-* 命名空间里的名字，冲突从源头消失。 */
+@utility dense {
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 @theme inline {

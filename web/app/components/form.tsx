@@ -19,7 +19,7 @@ export function Field({
 }) {
   return (
     <label className="block">
-      <span className="text-dense font-medium">{label}</span>
+      <span className="dense font-medium">{label}</span>
       {hint ? (
         <span className="ml-2 text-xs text-muted-foreground">{hint}</span>
       ) : null}
@@ -35,7 +35,7 @@ export function TextInput({ className, mono, ...props }: TextInputProps) {
     <input
       {...props}
       className={cn(
-        "h-8 w-full rounded-lg border border-input bg-background px-2.5 text-base outline-none sm:text-dense",
+        "h-8 w-full rounded-lg border border-input bg-background px-2.5 text-base outline-none sm:dense",
         "placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring",
         "disabled:cursor-not-allowed disabled:opacity-60",
         mono && "font-mono",
@@ -59,7 +59,7 @@ export function Toggle({
   return (
     <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
       <div>
-        <div className="text-dense font-medium">{label}</div>
+        <div className="dense font-medium">{label}</div>
         {desc ? (
           <p className="mt-0.5 max-w-md text-xs leading-relaxed text-muted-foreground">
             {desc}
