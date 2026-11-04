@@ -200,7 +200,9 @@ export function Notice({
         <button
           type="button"
           onClick={onClose}
-          className="shrink-0 opacity-60 hover:opacity-100"
+          // 图标只有 14px，热区用伪元素撑到 46：手机上这条提示旁边的关闭靶
+          // 实测只有 14×14，比指尖小一圈。
+          className="relative shrink-0 opacity-60 before:absolute before:-inset-4 before:content-[''] hover:opacity-100"
           aria-label="关闭提示"
         >
           <X className="size-3.5" aria-hidden />

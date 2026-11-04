@@ -4,9 +4,10 @@ import { LayoutDashboard, Loader2, Plug, Sparkles } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
-import { Panel, isTaskState, type PanelQuery } from "~/components/panel";
+import { Panel, isTaskState, loopLines, useNow, type PanelQuery } from "~/components/panel";
 import { attentionRowCount } from "~/lib/attention";
 import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
 import { formatInterval } from "~/lib/time";
@@ -55,6 +56,8 @@ export default function Home() {
   // 上一次真正读到数据的时刻（客户端时钟）。值班台必须知道自己有多旧，
   // 否则「还没好」与「这是旧快照」在屏幕上长得一模一样。
   const [loadedAt, setLoadedAt] = React.useState<number | null>(null);
+  // 侧栏与手机统计行都要相对时间，而它们挂在外壳上（不是 Panel 里）。
+  const now = useNow();
 
   // 面板的筛选与页号住在 URL 里：F5 不丢，还能把「只看需人工」发给自己的另一个标签页。
   const query = readQuery(params);
@@ -174,45 +177,64 @@ export default function Home() {
         ? "集成设置"
         : "初始化向导";
 
+  // 那个数是全页的标题，也是「刚才那一按成了没有」最直接的答案：由它自己开口。
+  // 以前被播报的是卡片里那句 13px 构成，数反而静默。
+  const announced = useAnnouncement(title, snapshot !== null);
+
   return (
     <div id="app-shell" className="mx-auto flex min-h-screen w-full max-w-6xl gap-6 p-6 text-foreground">
-      <aside className="hidden w-52 shrink-0 flex-col gap-6 md:flex">
-        <Link to="/" className="flex items-center gap-2 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
-          <Sparkles className="size-5 text-primary" aria-hidden />
-          <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
-        </Link>
+      <aside className="hidden w-52 shrink-0 md:flex">
+        {/* 内层粘住、外层只占位：滚过第一屏之后导航与心跳还在，左栏不会变成一片白。 */}
+        <div className="sticky top-6 flex h-[calc(100dvh-3rem)] w-full flex-col gap-6">
+          <Link to="/" className="flex items-center gap-2 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+            <Sparkles className="size-5 text-primary" aria-hidden />
+            <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
+          </Link>
 
-        <nav className="flex flex-col gap-1 text-sm" aria-label="主导航">
-          <NavItem
-            to="/"
-            icon={<LayoutDashboard className="size-4" aria-hidden />}
-            label="面板"
-            current={onPanel}
-            disabled={!initialized}
-            title={initialized ? undefined : "主线三件套不齐，面板进不去"}
-          />
-          <NavItem
-            to={`/settings/${section}`}
-            icon={<Plug className="size-4" aria-hidden />}
-            label="集成设置"
-            current={!onPanel}
-            title={initialized ? "八节各自一个地址" : "初始化前这里是向导"}
-          />
-        </nav>
+          <nav className="flex flex-col gap-1 text-sm" aria-label="主导航">
+            <NavItem
+              to="/"
+              icon={<LayoutDashboard className="size-4" aria-hidden />}
+              label="面板"
+              current={onPanel}
+              disabled={!initialized}
+              title={initialized ? undefined : "主线三件套不齐，面板进不去"}
+            />
+            <NavItem
+              to={`/settings/${section}`}
+              icon={<Plug className="size-4" aria-hidden />}
+              label="集成设置"
+              current={!onPanel}
+              title={initialized ? "八节各自一个地址" : "初始化前这里是向导"}
+            />
+          </nav>
 
-        <div className="mt-auto space-y-2 text-xs leading-relaxed text-muted-foreground">
-          <Separator />
-          <div className="flex items-center justify-between gap-2">
-            <span>循环</span>
-            <span className={cn(loop.failing && "text-status-danger-text")}>{loop.text}</span>
+          {/* 心跳就在导航下面：它是「我要不要再等等」的答案，不是脚注。 */}
+          <div className="mt-auto space-y-1.5 text-xs leading-relaxed text-muted-foreground">
+            <Separator className="mb-2" />
+            <div className="flex items-baseline justify-between gap-2">
+              <span>循环</span>
+              <span className={cn("tabular-nums", loop.failing && "text-status-danger-text")}>
+                {loop.text}
+              </span>
+            </div>
+            {loopLines(overview, intervals, now)
+              .slice(0, 2)
+              .map((line) => (
+                <div key={line.label} className="flex items-baseline justify-between gap-2">
+                  <span>{line.label}</span>
+                  <span className={cn("tabular-nums", line.failing && "text-status-danger-text")}>
+                    {line.text}
+                  </span>
+                </div>
+              ))}
           </div>
-          <p>未初始化时整站只剩向导；主线三件套配齐后循环才会启动。</p>
         </div>
       </aside>
 
       <main id="main" tabIndex={-1} className="flex min-w-0 flex-1 flex-col gap-6 outline-none">
         <div className="flex flex-col gap-3 md:hidden">
-          <Link to="/" className="flex items-center gap-2">
+          <Link to="/" className="flex min-h-11 items-center gap-2">
             <Sparkles className="size-5 text-primary" aria-hidden />
             <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
           </Link>
@@ -240,6 +262,10 @@ export default function Home() {
         <header>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h1 className="font-heading text-2xl font-semibold tracking-tight">{title}</h1>
+            {/* 那个数自己开口：常驻活区，只在它真的变了的时候换字（首载不抢话）。 */}
+            <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+              {announced}
+            </p>
             {snapshot && view === "settings" ? (
               <Badge variant={initialized ? "secondary" : "outline"}>
                 {initialized ? "已初始化" : "未初始化"}
@@ -262,27 +288,31 @@ export default function Home() {
           </div>
         </header>
 
-        {loadError ? (
+        {/* 条子只在「手里已经有一份旧数据」时出现：没有数据的时候，正文那块
+            「读不到」才是全部内容，不需要另一个人把同一句话说第二遍。 */}
+        {loadError && snapshot ? (
           <Notice tone="bad" onClose={() => setLoadError(null)}>
             {gatewayExpired
               ? `网关拦下了这次请求：${loadErrorText}。登录后再刷新本页。`
-              : `${route.view === "panel" ? "读不到面板数据" : "读不到设置"}：${loadErrorText}`}
-            <button
-              type="button"
-              className="ml-2 underline underline-offset-4"
-              onClick={() => void refresh()}
-            >
-              重试
-            </button>
-            {gatewayExpired ? (
-              <button
-                type="button"
-                className="ml-2 underline underline-offset-4"
-                onClick={() => window.location.reload()}
-              >
-                刷新页面
-              </button>
-            ) : null}
+              : `${route.view === "panel" ? "刷新没成功" : "读不到设置"}：${loadErrorText}`}
+            <span className="mt-1 flex flex-wrap items-center gap-2">
+              {gatewayExpired ? (
+                <Button
+                  className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
+                  onClick={() => window.location.reload()}
+                >
+                  刷新页面
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
+                  onClick={() => void refresh()}
+                >
+                  重试
+                </Button>
+              )}
+            </span>
           </Notice>
         ) : null}
 
@@ -309,7 +339,14 @@ export default function Home() {
               onRefresh={refresh}
             />
           )
-        ) : loadError ? null : (
+        ) : loadError ? (
+          <Unavailable
+            scope={route.view === "panel" ? "面板" : "设置"}
+            errorText={loadErrorText}
+            gatewayExpired={gatewayExpired}
+            onRetry={() => void refresh()}
+          />
+        ) : (
           <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" aria-hidden />
             {route.view === "panel" ? "正在读取面板数据…" : "正在读取设置…"}
@@ -321,6 +358,76 @@ export default function Home() {
 }
 
 type View = "panel" | "settings";
+
+/**
+ * useAnnouncement 把「那个数变了」交给一个常驻的活区。
+ *
+ * 首载不出声（读屏已经会把标题念一遍），之后只在标题真的变了时换字。返回值始终是
+ * 最后一条播报，活区就常驻在树上——带内容挂载的活区不会播报，这是这套东西的老坑。
+ */
+function useAnnouncement(text: string, ready: boolean): string {
+  const [spoken, setSpoken] = React.useState("");
+  const previous = React.useRef(text);
+  React.useEffect(() => {
+    if (!ready) return;
+    if (previous.current === text) return;
+    previous.current = text;
+    setSpoken(text);
+  }, [text, ready]);
+  return spoken;
+}
+
+/**
+ * Unavailable 是「这一屏读不到」的正式态，不是一条可以关掉的提示。
+ *
+ * 从前这里渲染 `null`：错误提示跟一个 `×`，关掉之后就只剩那句「正在读取…」，
+ * 而取数 effect 不会再跑——人就被锁在永久的转圈里。现在它给完整的一句话、
+ * 为什么，以及唯一有效的那个动作（网关续期后刷新页面 > 重试同一个失效会话）。
+ */
+function Unavailable({
+  scope,
+  errorText,
+  gatewayExpired,
+  onRetry,
+}: {
+  scope: string;
+  errorText: string;
+  gatewayExpired: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <section
+      aria-labelledby="unavailable-title"
+      className="rounded-xl bg-card p-6 ring-1 ring-foreground/10"
+    >
+      <h2 id="unavailable-title" className="font-heading text-base font-medium">
+        读不到{scope}数据
+      </h2>
+      <p className="mt-1.5 dense leading-relaxed text-foreground">{errorText}</p>
+      <p className="mt-1 dense leading-relaxed text-muted-foreground">
+        {gatewayExpired
+          ? "这个应用自己没有登录页：401/403 与非 JSON 回包只可能来自前面那层网关。登录然后刷新，本页会自己读到数据。"
+          : "数据库或上游暂时没回话。重试是安全的：面板只读，不会重复下发任何动作。"}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {gatewayExpired ? (
+          <>
+            <Button className="h-11 px-3 md:h-8" onClick={() => window.location.reload()}>
+              刷新页面
+            </Button>
+            <Button variant="outline" className="h-11 px-3 md:h-8" onClick={onRetry}>
+              再试一次
+            </Button>
+          </>
+        ) : (
+          <Button className="h-11 px-3 md:h-8" onClick={onRetry}>
+            重试
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
 
 /**
  * parseRoute 把 pathname 翻成视图与节。
@@ -470,7 +577,10 @@ function loopState(
   snapshot: ConfigSnapshot | null,
   overview: Overview | null,
 ): { text: string; failing: boolean } {
-  if (!snapshot?.initialized) return { text: "未启动", failing: false };
+  // 读不到 ≠ 没在跑。侧栏以前在 snapshot 为 null 时写「未启动」，把一次网关超时
+  // 说成了「循环没开」，而值班台最不能做的就是说谎。
+  if (!snapshot) return { text: "还没读到过", failing: false };
+  if (!snapshot.initialized) return { text: "未启动", failing: false };
   if (overview?.paused) return { text: "已暂停", failing: false };
   const loops = overview ? Object.values(overview.loops) : [];
   if (!loops.some((item) => item?.last_run_at)) return { text: "未启动", failing: false };

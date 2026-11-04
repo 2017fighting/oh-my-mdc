@@ -75,6 +75,9 @@ export function Panel({
   const [refreshing, setRefreshing] = React.useState(false);
   // 相对时间要自己走，否则一屏「3 分钟前」会挂到用户关掉标签页为止。
   const now = useNow();
+  // 回执挂在 Panel 上而不是 NeedsAttention 里：那张卡在清空之后整块不渲染，
+  // 而「刚才那一按成了没有」的播报位必须一直在树上——活区带内容挂载就不会播报。
+  const receiptsState = useReceipts();
 
   // 打开抽屉的人和归还焦点的人都必须是 Panel：触发元素在打开的那一刻是焦点，
   // 而 inert 一挂上去焦点就被浏览器挪走了，晚一步再记就只记得住「关闭按钮」。
@@ -125,8 +128,6 @@ export function Panel({
   };
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  // 轮询是「我刚加的片什么时候被拿到」的答案，手机上放进统计行。
-  const poll = overview?.loops?.poll;
 
   return (
     <>
@@ -143,20 +144,19 @@ export function Panel({
               <span className="font-medium tabular-nums text-foreground">{stat.value}</span>
             </span>
           ))}
-          {/* 手机上侧栏是藏起来的，心跳得在这里说一句：清完队列之后，「下一轮什么时候
-              去拿我刚加的那部」就是下一个问题，而它不该在一张分页表格之后再回答。 */}
-          <span className="flex items-baseline gap-1.5 lg:hidden">
-            <span>清单轮询</span>
-            <span className={cn("tabular-nums", poll?.last_ok === false && "text-status-danger-text")}>
-              {[
-                intervals.poll,
-                poll?.last_run_at ? formatWhen(poll.last_run_at, now) : "还没跑过",
-                poll?.last_ok === false ? "失败" : "",
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>
-          </span>
+          {/* 手机上侧栏是藏起来的，心跳得在这里说两句：清完队列之后，「下一轮什么时候
+              去拿我刚加的那部」与「对账还在跑吗」就是接下来两个问题，而它们不该在
+              一张分页表格之后再回答。副作用那一行由下面那张队列卡承担。 */}
+          {loopLines(overview, intervals, now)
+            .slice(0, 2)
+            .map((line) => (
+              <span key={line.label} className="flex items-baseline gap-1.5 lg:hidden">
+                <span>{line.label}</span>
+                <span className={cn("tabular-nums", line.failing && "text-status-danger-text")}>
+                  {line.text}
+                </span>
+              </span>
+            ))}
         </section>
 
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
@@ -175,7 +175,7 @@ export function Panel({
           </span>
           <Button
             variant="outline"
-            className="h-9 px-2.5 dense md:h-7 md:text-xs"
+            className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
             onClick={() => void refresh()}
             disabled={refreshing}
           >
@@ -185,10 +185,13 @@ export function Panel({
         </div>
       </div>
 
+      <ReceiptAnnouncer receipts={receiptsState.receipts} />
+
       <NeedsAttention
         attention={attention}
         stuck={sideEffects.filter((effect) => effect.stuck)}
         now={now}
+        receiptsState={receiptsState}
         onOpenTask={openTask}
         onRefresh={onRefresh}
       />
@@ -388,7 +391,7 @@ export function Panel({
             );
           })}
           <Separator className="my-1" />
-          <Button variant="link" size="sm" asChild className="h-9 self-start px-0 text-sm md:h-7">
+          <Button variant="link" size="sm" asChild className="h-11 self-start px-0 text-sm md:h-7">
             <Link to="/settings/app">去集成设置</Link>
           </Button>
         </CardContent>
@@ -420,12 +423,14 @@ function NeedsAttention({
   attention,
   stuck,
   now,
+  receiptsState,
   onOpenTask,
   onRefresh,
 }: {
   attention: Attention | null;
   stuck: SideEffect[];
   now: number;
+  receiptsState: ReturnType<typeof useReceipts>;
   onOpenTask: (movieID: string) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -434,7 +439,7 @@ function NeedsAttention({
   const failedGroups = groupByNumber(failed);
   const stalledGroups = groupByNumber(stalled);
   // 回执住在卡片上而不是行里：行会在按下成功之后消失，回执却是那一刻唯一的证据。
-  const { receipts, push: receiptOf, dismiss: dismissReceipt, listRef: receiptsRef } = useReceipts();
+  const { receipts, push: receiptOf, dismiss: dismissReceipt, listRef: receiptsRef } = receiptsState;
   // 被上限切过的那一半只数得到 50，所以数字后面跟一个 +，不把截断说成总量。
   const cut = {
     failed: attention?.failed_truncated ?? false,
@@ -450,6 +455,32 @@ function NeedsAttention({
     stalledGroups.length > 0 && `停滞 ${stalledGroups.length}${cut.stalled ? "+" : ""} 部`,
     stuck.length > 0 && `驻留副作用 ${stuck.length} 条`,
   ].filter(Boolean);
+
+  // 「我在这里能不能修」才是第一问：能修的一组给重试，修不动的一组只给查看任务，
+  // 并把那句「重试不会变好」收起来（它的全文带路径，手机上一行要占四行）。
+  const canFixHere = (group: FailureGroup) =>
+    group.items.some((item) => remedyForFailure(item).retryable);
+  const fixableGroups = failedGroups.filter(canFixHere);
+  const elsewhereGroups = failedGroups.filter((group) => !canFixHere(group));
+
+  const renderFailedGroup = (group: FailureGroup, collapseHint = false) => (
+    <VersionGroup
+      key={group.movieID}
+      group={group}
+      kind="failed"
+      collapseHint={collapseHint}
+      now={now}
+      busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
+      onRetry={(infohashes) =>
+        void taskRetry.retry(group.movieID, false, {
+          title: group.number,
+          infohashes,
+          names: versionNames(group),
+        })
+      }
+      onOpenTask={() => onOpenTask(group.movieID)}
+    />
+  );
 
   const retryHooks = { onReceipt: receiptOf, focusFallback: receiptsRef };
   const taskRetry = useTaskRetry(onRefresh, retryHooks);
@@ -468,10 +499,10 @@ function NeedsAttention({
           {/* 页标题已经说了「N 件事需要人工」，卡片不把同一个词再说一遍：可见的首行
               就是它的构成（失败几部 · 停滞几部 · 驻留几条），标题只留给大纲与读屏。 */}
           <h2 className="sr-only">需要人工</h2>
-          <p
-            aria-live="polite"
-            className="dense flex items-start gap-2 leading-relaxed text-foreground"
-          >
+          {/* 这行是卡片唯一可见的首行，所以它得和它下面的卡标题一个分量：以前它是
+              13px/400，比「任务」「副作用队列」的 16px/500 都轻。播报不在这里——
+              那个数由 home.tsx 的常驻活区开口，这里不再抢第二个声音。 */}
+          <p className="flex items-start gap-2 text-base leading-relaxed font-medium text-foreground">
             <AlertTriangle
               className={cn(
                 "mt-0.5 size-4 shrink-0",
@@ -496,28 +527,13 @@ function NeedsAttention({
           ) : null}
 
           {total > 0 ? (
+            // 顺序就是「我在这里能不能修」：能修 → 要等一等（停滞）→ 要去别处 → 驻留。
             <div className="divide-y">
-              {failedGroups.length > 0 ? (
-                <section aria-label="失败的版本" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="失败" />
+              {fixableGroups.length > 0 ? (
+                <section aria-label="能在这里修的失败版本" className="py-3 first:pt-0 last:pb-0">
+                  <AttentionHeading label="能在这里修" />
                   <div className="divide-y">
-                    {failedGroups.map((group) => (
-                      <VersionGroup
-                        key={group.movieID}
-                        group={group}
-                        kind="failed"
-                        now={now}
-                        busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
-                        onRetry={(infohashes) =>
-                          void taskRetry.retry(group.movieID, false, {
-                            title: group.number,
-                            infohashes,
-                            names: versionNames(group),
-                          })
-                        }
-                        onOpenTask={() => onOpenTask(group.movieID)}
-                      />
-                    ))}
+                    {fixableGroups.map((group) => renderFailedGroup(group))}
                   </div>
                 </section>
               ) : null}
@@ -552,6 +568,15 @@ function NeedsAttention({
                 </section>
               ) : null}
 
+              {elsewhereGroups.length > 0 ? (
+                <section aria-label="要去别处修的失败版本" className="py-3 first:pt-0 last:pb-0">
+                  <AttentionHeading label="要去别处修" />
+                  <div className="divide-y">
+                    {elsewhereGroups.map((group) => renderFailedGroup(group, true))}
+                  </div>
+                </section>
+              ) : null}
+
               {stuck.length > 0 ? (
                 <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
                   <AttentionHeading label="驻留副作用" />
@@ -577,7 +602,11 @@ function NeedsAttention({
 }
 
 /** ReceiptDraft 是一条新回执（还没编号）：番号或待办名 + 结局 + 一句后果。 */
-type ReceiptDraft = RetryNotice & { title: string };
+type ReceiptDraft = RetryNotice & {
+  title: string;
+  /** 回执说的那个动作本身：任务侧是「重试」，副作用侧是「重发」。 */
+  verb?: "重试" | "重发";
+};
 
 /** Receipt 是已经发出的一条回执。 */
 type Receipt = ReceiptDraft & { id: number; at: number };
@@ -641,7 +670,7 @@ function ReceiptList({
     <div
       ref={listRef}
       tabIndex={-1}
-      role="status"
+      role="group"
       aria-label="操作回执"
       className="mb-3 divide-y rounded-lg bg-muted/50 px-3 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
     >
@@ -653,7 +682,7 @@ function ReceiptList({
               receipt.tone === "ok" ? "text-status-done-text" : "text-status-progress-text",
             )}
           >
-            {receipt.tone === "ok" ? "已重试" : "没成"}
+            {receipt.tone === "ok" ? `已${receipt.verb ?? "重试"}` : "没成"}
           </span>
           <span className="min-w-0 flex-1 break-words">
             <span className="font-medium tabular-nums">{receipt.title}</span>
@@ -666,7 +695,7 @@ function ReceiptList({
             type="button"
             onClick={() => onDismiss(receipt.id)}
             aria-label={`收起回执：${receipt.title}`}
-            className="-m-1 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:size-6"
+            className="-m-1 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors before:absolute before:-inset-2 before:content-[''] relative hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:size-6"
           >
             <X className="size-3" aria-hidden />
           </button>
@@ -696,6 +725,7 @@ function VersionGroup({
   group,
   kind,
   hints = true,
+  collapseHint = false,
   now,
   busy,
   onRetry,
@@ -705,6 +735,8 @@ function VersionGroup({
   kind: "failed" | "stalled";
   /** 分节已经把补法说过了就不再逐行印（停滞是常量串）。 */
   hints?: boolean;
+  /** 「要去别处修」那一组：补法默认收起，只留一句「重试不会变好」。 */
+  collapseHint?: boolean;
   now: number;
   busy: boolean;
   /** 只把这条组里还有救的版本交出去：按钮上的数字就是会动的条数。 */
@@ -732,6 +764,8 @@ function VersionGroup({
             // 补法只说一次：逐行重复的那句话是纯噪声，还会把真正的差别淹掉。
             const previousHint = index > 0 ? remedyOf(group.items[index - 1]).hint : "";
             const hint = !hints || remedy.hint === previousHint ? "" : remedy.hint;
+            // 原因也一样：两个版本沦于同一句失败时，第二过只留一行「原因同上」。
+            const repeatedReason = index > 0 && group.items[index - 1].reason === item.reason;
             return (
               <li key={item.infohash} className="space-y-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -752,20 +786,28 @@ function VersionGroup({
                     {formatWhen(item.at, now)}
                   </span>
                 </div>
-                <p className="dense leading-relaxed break-words text-foreground">
-                  {item.reason}
-                </p>
+                {repeatedReason ? (
+                  <p className="text-xs text-muted-foreground">原因同上</p>
+                ) : (
+                  <p className="dense leading-relaxed break-words text-foreground">
+                    {item.reason}
+                  </p>
+                )}
                 {hint ? (
                   // 补法按「人该照哪句动」给权重：给了按钮时它是脚注，
                   // 不给按钮时它就是那句指令（宿主机问题的「重试不会变好」）。
-                  <p
-                    className={cn(
-                      "leading-relaxed break-words",
-                      remedy.retryable ? "text-xs text-muted-foreground" : "dense text-foreground",
-                    )}
-                  >
-                    {hint}
-                  </p>
+                  remedy.retryable || !collapseHint ? (
+                    <p
+                      className={cn(
+                        "leading-relaxed break-words",
+                        remedy.retryable ? "text-xs text-muted-foreground" : "dense text-foreground",
+                      )}
+                    >
+                      {hint}
+                    </p>
+                  ) : (
+                    <CollapsibleRemedy hint={hint} />
+                  )
                 ) : null}
               </li>
             );
@@ -788,6 +830,51 @@ function VersionGroup({
           查看任务
         </RowAction>
       </div>
+    </div>
+  );
+}
+
+/**
+ * ReceiptAnnouncer 是「刚才那一按成了没有」的唯一播报位。
+ *
+ * 它常驻在 Panel 上（卡片会被清空、会消失，而这个位不能），且只拿最新的那一条：
+ * 三条一起念会把一句结论变成一段日志。可见的回执行是它的视觉版，不再兼任活区。
+ */
+function ReceiptAnnouncer({ receipts }: { receipts: Receipt[] }) {
+  const latest = receipts[0];
+  const text = latest
+    ? `${latest.tone === "ok" ? `已${latest.verb ?? "重试"}` : "没成"} ${latest.title} · ${latest.text}`
+    : "";
+  return (
+    <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+      {text}
+    </p>
+  );
+}
+
+/**
+ * CollapsibleRemedy 把「修不动」那一行的补法收成一行。
+ *
+ * 在失败节里，这一句（含 `/media/...` 路径）手机上要占四行，而它所在的行本来就没有
+ * 可点的动作。收起后操作员先看到「重试不会变好」，需要时再展开看要改哪个目录。
+ */
+function CollapsibleRemedy({ hint }: { hint: string }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className="dense inline-flex min-h-11 items-center gap-1 rounded-sm text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:min-h-0"
+      >
+        重试不会变好
+        <span aria-hidden>·</span>
+        {open ? "收起原因" : "展开原因"}
+      </button>
+      {open ? (
+        <p className="dense leading-relaxed break-words text-foreground">{hint}</p>
+      ) : null}
     </div>
   );
 }
@@ -832,7 +919,7 @@ function StuckRow({
           </div>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         {remedy.settings ? (
           <RowAction variant="outline" asChild>
             <Link to={`/settings/${remedy.settings}`}>去 {settingsLabel(remedy.settings)} 设置</Link>
@@ -919,6 +1006,17 @@ function useTaskRetry(
       busyRef.current = new Set(busyRef.current).add(key);
       setBusy(busyRef.current);
       setError(null);
+      // 忙位先释放：以前它跟在 afterPaint 后面，于是按钮在「等下一帧」的那段时间里
+      // 还在转，后台标签页里甚至一直转（rAF 不跑，finally 也就不跑）。
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        const next = new Set(busyRef.current);
+        next.delete(key);
+        busyRef.current = next;
+        setBusy(next);
+      };
       setNotices((current) => {
         if (!(movieID in current)) return current;
         const next = { ...current };
@@ -931,8 +1029,9 @@ function useTaskRetry(
         setNotices((current) => ({ ...current, [movieID]: notice }));
         onReceipt?.({ title, ...notice });
         await onRefresh();
+        release();
         // 行在成功之后从树上消失了：焦点跟到下一条还能按的重试，一条不剩才落到回执上。
-        // 落到回执会把整页滚回卡片头，而回执本身是 role=status，已经在播报了。
+        // 落到回执会把整页滚回卡片头，而回执本身已经在播报了。
         await afterPaint();
         if (focusFallback && origin && !origin.isConnected) {
           const next = document.querySelector<HTMLElement>("[data-retry]:not([disabled])");
@@ -942,10 +1041,7 @@ function useTaskRetry(
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
-        const next = new Set(busyRef.current);
-        next.delete(key);
-        busyRef.current = next;
-        setBusy(next);
+        release();
       }
     },
     [onRefresh, onReceipt, focusFallback],
@@ -958,15 +1054,28 @@ function useTaskRetry(
  * afterPaint 等到这次刷新真的提交到 DOM 之后。
  *
  * await 一个 fetch 回来的时刻，React 的 setState 可能还没提交，`isConnected` 此时
- * 仍是真的；等到双 rAF（下一帧），行已经真的没了，判断才作数。
+ * 仍是真的；等到下一帧，行已经真的没了，判断才作数。
+ *
+ * 但「下一帧」不能只靠 rAF：后台标签页、锁屏、被遮住的窗口都不会跑 rAF，而按完就
+ * 锁屏正是手机上的常态动作。所以这里同时排一个超时兑底——谁先到算谁，永不挂死。
  */
 function afterPaint(): Promise<void> {
   return new Promise((resolve) => {
-    if (typeof requestAnimationFrame !== "function") {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
       resolve();
+    };
+    if (typeof window === "undefined") {
+      finish();
       return;
     }
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+    }
+    // 后台标签页里 rAF 不触发，这一行是那条链的唯一出口。
+    window.setTimeout(finish, 120);
   });
 }
 
@@ -1064,8 +1173,10 @@ function useSideEffectRetry(
       });
       try {
         await api.retrySideEffect(id);
-        onReceipt?.({ title, tone: "ok", text: "已重发，回到副作用队列。" });
+        onReceipt?.({ title, tone: "ok", verb: "重发", text: "已重发，回到副作用队列。" });
         await onRefresh();
+        // 忙位先放：等下一帧只属于焦点交接，不能把按钮的旋转一起拖住。
+        setBusy(null);
         await afterPaint();
         if (focusFallback && origin && !origin.isConnected) {
           const next = document.querySelector<HTMLElement>("[data-retry]:not([disabled])");
@@ -1201,7 +1312,8 @@ function RowAction({ className, variant = "outline", ...props }: React.Component
   return (
     <Button
       variant={variant}
-      className={cn("h-9 px-2.5 dense md:h-7 md:text-xs", className)}
+      // 手机上一律 44px 热区：值班时是单手刷屏，36px 的行内动作实测要瞄。
+      className={cn("h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs", className)}
       {...props}
     />
   );
@@ -1251,10 +1363,10 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
           onChange={(event) => setDraft(event.target.value)}
           placeholder="搜番号或 movie_id"
           aria-label="搜番号或 movie_id"
-          className="h-9 pl-8 md:h-8"
+          className="h-11 pl-8 md:h-8"
         />
       </div>
-      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="按状态筛选">
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="按状态筛选">
         {STATE_FILTERS.map((filter) => {
           const current = query.state === filter.value;
           return (
@@ -1269,7 +1381,7 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
                 filter.value === "failed" ? "任务级：只算全部版本都失败的作品" : undefined
               }
               className={cn(
-                "h-9 rounded-lg px-2.5 dense transition-colors md:h-7 md:text-xs",
+                "h-11 rounded-lg px-3 dense transition-colors md:h-7 md:px-2.5 md:text-xs",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                 current
                   ? "bg-secondary font-medium text-secondary-foreground"
@@ -1549,7 +1661,7 @@ function TaskDrawer({
               type="button"
               onClick={onClose}
               aria-label="关闭抽屉"
-              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:size-8"
             >
               <X className="size-4" aria-hidden />
             </button>
@@ -1635,6 +1747,18 @@ function DrawerActions({
   const taskRetry = useTaskRetry(onRefresh);
   const notice = taskRetry.notices[movieID];
   const busy = taskRetry.busy.size > 0;
+  const confirmRef = React.useRef<HTMLButtonElement>(null);
+  const forceRef = React.useRef<HTMLButtonElement>(null);
+  // 确认条是「刚出现的、需要人读一句再决定」的东西：不接焦点、不进活区，键盘与读屏
+  // 用户就不知道它开了。取消后把焦点还给「强制重刮」，不把人扔回 body。
+  const wantForceFocus = React.useRef(false);
+  React.useEffect(() => {
+    if (confirming) confirmRef.current?.focus();
+    else if (wantForceFocus.current) {
+      wantForceFocus.current = false;
+      forceRef.current?.focus();
+    }
+  }, [confirming]);
 
   const retry = async (force: boolean) => {
     setConfirming(false);
@@ -1661,13 +1785,19 @@ function DrawerActions({
       ) : null}
 
       {confirming ? (
-        <div className="space-y-2 rounded-lg border border-status-progress-border bg-status-progress-surface px-3 py-2">
+        <div
+          role="group"
+          aria-live="polite"
+          aria-label="确认强制重刮"
+          className="space-y-2 rounded-lg border border-status-progress-border bg-status-progress-surface px-3 py-2"
+        >
           <p className="text-xs leading-relaxed text-status-progress-text">
             确认把 {finishedCount} 条已入库版本拉回加工开头？重刮会重新取数并重写落盘，原来的取数快照留在任务事件里。
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Button
-              className="h-9 px-2.5 dense md:h-8 md:text-sm"
+              ref={confirmRef}
+              className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
               disabled={busy}
               onClick={() => void retry(true)}
             >
@@ -1679,8 +1809,11 @@ function DrawerActions({
             </Button>
             <Button
               variant="ghost"
-              className="h-9 px-2.5 dense md:h-8 md:text-sm"
-              onClick={() => setConfirming(false)}
+              className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
+              onClick={() => {
+                wantForceFocus.current = true;
+                setConfirming(false);
+              }}
             >
               取消
             </Button>
@@ -1689,7 +1822,7 @@ function DrawerActions({
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            className="h-9 px-2.5 dense md:h-8 md:text-sm"
+            className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
             disabled={busy}
             title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
             onClick={() => void retry(false)}
@@ -1702,8 +1835,9 @@ function DrawerActions({
           </Button>
           {finishedCount > 0 ? (
             <Button
+              ref={forceRef}
               variant="outline"
-              className="h-9 px-2.5 dense md:h-8 md:text-sm"
+              className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
               disabled={busy}
               onClick={() => setConfirming(true)}
             >
@@ -1724,7 +1858,8 @@ function VersionCard({ version }: { version: TaskVersion }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="dense font-medium">{version.label || "无标签"}</span>
+            {/* 没有判别词就不占位，也不写「无标签」：来源就在旁边，重复一遍只是噪声。 */}
+            {version.label ? <span className="dense font-medium">{version.label}</span> : null}
             <span className="text-xs text-muted-foreground">{sourceLabel(version.source)}</span>
           </div>
           <span className="font-mono text-xs text-muted-foreground" title={version.infohash}>
@@ -1755,7 +1890,7 @@ function VersionCard({ version }: { version: TaskVersion }) {
       </div>
       {version.error_reason ? (
         <p className="text-xs text-status-danger-text">
-          失败于{phaseLabel(version.error_phase)}：{version.error_reason}
+          {failureLine(version.error_phase, version.error_reason)}
         </p>
       ) : null}
     </div>
@@ -1763,11 +1898,17 @@ function VersionCard({ version }: { version: TaskVersion }) {
 }
 
 function EventRow({ event, now }: { event: TaskEvent; now: number }) {
+  const kind = eventKindLabel(event.kind);
+  // 事件名已经在上一行报过，原因又用同一个词开头就是口吃（`人工重试` /
+  // `人工重试：回到加工开头`）。已带上前缀的只留后半句。
+  const reason = event.reason.startsWith(`${kind}：`)
+    ? event.reason.slice(kind.length + 1)
+    : event.reason;
   return (
     <li className="relative pl-4">
       <span className="absolute top-1.5 left-0 size-1.5 rounded-full bg-border" aria-hidden />
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-xs font-medium">{eventKindLabel(event.kind)}</span>
+        <span className="text-xs font-medium">{kind}</span>
         <time
           className="shrink-0 text-xs tabular-nums text-muted-foreground"
           dateTime={event.at}
@@ -1776,7 +1917,7 @@ function EventRow({ event, now }: { event: TaskEvent; now: number }) {
           {formatWhen(event.at, now)}
         </time>
       </div>
-      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{event.reason}</p>
+      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{reason}</p>
       {event.from_state || event.to_state ? (
         <p className="mt-0.5 text-xs text-muted-foreground">
           {stateLabel(event.from_state)} → {stateLabel(event.to_state)}
@@ -1803,6 +1944,21 @@ function phaseLabel(phase: TaskVersion["error_phase"] | AttentionItem["phase"]):
     default:
       return "下载";
   }
+}
+
+/**
+ * failureLine 拼「失败于哪一步：原话」。
+ *
+ * 上游原话本身常常已经以阶段词开头（`刮削取数失败：DMM 接口 503…`），直接前缀会变成
+ * `失败于刮削：刮削取数失败：…`——同一个词说了两遍，而那正是最需要一眼读完的一句。
+ */
+function failureLine(
+  phase: TaskVersion["error_phase"] | AttentionItem["phase"],
+  reason: string,
+): string {
+  const label = phaseLabel(phase);
+  // 原话自己就开了头（`刮削取数失败：…`）就不再加前缀，否则同一个词会说两遍。
+  return reason.startsWith(label) ? reason : `失败于${label}：${reason}`;
 }
 
 function eventKindLabel(kind: TaskEvent["kind"]): string {
@@ -1834,4 +1990,46 @@ function useNow(interval = 60_000): number {
   }, [interval]);
   return now;
 }
+
+export { useNow };
+
+type LoopLine = { label: string; text: string; failing: boolean };
+
+/**
+ * loopLines 是三条常驻循环的那两行字（侧栏与手机统计行共用）。
+ *
+ * 「机器还醒着吗、下一轮什么时候」（清单轮询），与「对账还在跑吗」（对账）是值班台
+ * 第二个与第三个问题，它们以前只在桌面侧栏的底部与手机文档的末尾各出现一次。
+ * 间隔读不到就不编（`intervals.*` 为 null 时不写）。
+ */
+function loopLines(
+  overview: Overview | null,
+  intervals: { poll: string | null; reconcile: string | null; sidefx: string | null },
+  now: number,
+): LoopLine[] {
+  const rows: { key: "poll" | "reconcile" | "sidefx"; label: string }[] = [
+    { key: "poll", label: "清单轮询" },
+    { key: "reconcile", label: "对账" },
+    { key: "sidefx", label: "副作用" },
+  ];
+  return rows.map(({ key, label }) => {
+    const health = overview?.loops?.[key];
+    // 读不到概览时不说「还没跑过」：那是一个我们并不知道的事实。
+    if (!overview) return { label, text: "还没读到过", failing: false };
+    const failing = health?.last_run_at ? health.last_ok === false : false;
+    return {
+      label,
+      text: [
+        intervals[key],
+        health?.last_run_at ? formatWhen(health.last_run_at, now) : "还没跑过",
+        failing ? "失败" : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      failing,
+    };
+  });
+}
+
+export { loopLines };
 
