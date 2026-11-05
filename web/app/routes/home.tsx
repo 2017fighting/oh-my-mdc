@@ -121,14 +121,24 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apply, queryKey]);
 
-  const refresh = React.useCallback(async () => {
+  // 返回刷新后的快照：向导要靠它判断门禁（「完成初始化」按下去之后到底齐了没有）。
+  // 读不到就返回 null，界面据此说「已保存但没读回来」，而不是假装成功。
+  const refresh = React.useCallback(async (): Promise<ConfigSnapshot | null> => {
     try {
-      apply(await fetchDashboard(query));
+      const loaded = await fetchDashboard(query);
+      apply(loaded);
+      return loaded.config;
     } catch (error) {
       setLoadError(error);
+      return null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apply, queryKey]);
+
+  // 面板与抽屉只关心「刷完了没有」：把返回值吞掉，别让它们跟着向导的契约走。
+  const refreshOnly = React.useCallback(async () => {
+    await refresh();
+  }, [refresh]);
 
   // 页号越界（删掉了最后一页的全部任务、或筛选后总数变少）时退到最后一页，
   // 不让空页把人留在空白表格上。
@@ -369,7 +379,7 @@ export default function Home() {
               helpOpen={helpOpen}
               onHelpOpen={setHelpOpen}
               onQuery={writeQuery}
-              onRefresh={refresh}
+              onRefresh={refreshOnly}
             />
           ) : (
             <Wizard

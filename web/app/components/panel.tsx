@@ -9,7 +9,8 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
-import { CONFUSABLES, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER } from "~/lib/copy";
+import { focusablesIn, holdShellInert } from "~/lib/modal";
+import { CONFUSABLES, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER, WIZARD_CONFUSABLES } from "~/lib/copy";
 import { groupByNumber, groupStuck, oldestCreatedAt, attentionRowCount, type FailureGroup, type StuckGroup } from "~/lib/attention";
 import {
   formatAbsolute,
@@ -70,29 +71,6 @@ export const PANEL_ACTION_SIZE = "h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm";
  * 「抽屉还开着吗」：抽屉恰好在这时关掉，外壳的 inert 就被提前撤掉，底下又能点。
  * 改用计数之后，两个弹层各拿一只把手，最后一个放手才真的放手。
  */
-let shellInertHolds = 0;
-
-function holdShellInert(): () => void {
-  if (shellInertHolds === 0) document.getElementById("app-shell")?.setAttribute("inert", "");
-  shellInertHolds += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    shellInertHolds = Math.max(0, shellInertHolds - 1);
-    if (shellInertHolds === 0) document.getElementById("app-shell")?.removeAttribute("inert");
-  };
-}
-
-/** 弹层里可 Tab 到的元素，按文档顺序；隐藏的不算。 */
-function focusablesIn(root: HTMLElement): HTMLElement[] {
-  return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    ),
-  ).filter((element) => element.offsetParent !== null);
-}
-
 /** Panel 是面板：统计卡 → 「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康（规格 §8.2）。 */
 export function Panel({
   overview,
@@ -2651,16 +2629,21 @@ function eventKindLabel(kind: TaskEvent["kind"]): string {
  * 模式复用抽屉：portal 到 body、role=dialog、Esc 关闭、Tab 在内部循环、
  * 开着时外壳（与抽屉）inert。全站唯一不带阴影的浮层——阴影属于抽屉，这是卡片。
  */
-function ShortcutsHelp({
+export function ShortcutsHelp({
   onClose,
   closeRef,
   dialogRef,
+  variant = "panel",
 }: {
   onClose: () => void;
   closeRef: React.RefObject<HTMLButtonElement | null>;
   dialogRef: React.RefObject<HTMLElement | null>;
+  /** panel＝快捷键 + 面板术语；wizard＝只讲向导自己那几个词（向导里没有 / r j k 可用）。 */
+  variant?: "panel" | "wizard";
 }) {
   if (typeof document === "undefined") return null;
+  const glossaryOnly = variant === "wizard";
+  const entries = glossaryOnly ? WIZARD_CONFUSABLES : CONFUSABLES;
   // 与 keydown 的门同一判据：能按键盘才列键盘。
   const precisePointer =
     typeof window !== "undefined" &&
@@ -2689,7 +2672,7 @@ function ShortcutsHelp({
       >
         <div className="flex items-center justify-between gap-3">
           <h2 id="shortcuts-title" className="font-heading text-base font-medium">
-            快捷键与术语
+            {glossaryOnly ? "术语" : "快捷键与术语"}
           </h2>
           <button
             ref={closeRef}
@@ -2702,7 +2685,7 @@ function ShortcutsHelp({
           </button>
         </div>
 
-        {precisePointer ? (
+        {precisePointer && !glossaryOnly ? (
           <section aria-labelledby="help-shortcuts" className="mt-4">
             <h3 id="help-shortcuts" className="text-xs font-medium text-muted-foreground">
               快捷键
@@ -2719,35 +2702,37 @@ function ShortcutsHelp({
           </section>
         ) : null}
 
-        <section aria-labelledby="help-status" className="mt-4">
-          <h3 id="help-status" className="text-xs font-medium text-muted-foreground">
-            状态
-          </h3>
-          <dl className="mt-2 space-y-2.5">
-            {STATUS_ORDER.map((state) => (
-              <div key={state}>
-                <dt>
-                  <Badge
-                    variant="outline"
-                    className={cn("font-normal", TASK_STATE_LOOK[state].className)}
-                  >
-                    {STATUS_NAMES[state]}
-                  </Badge>
-                </dt>
-                <dd className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                  {STATUS_NOTES[state]}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </section>
+        {glossaryOnly ? null : (
+          <section aria-labelledby="help-status" className="mt-4">
+            <h3 id="help-status" className="text-xs font-medium text-muted-foreground">
+              状态
+            </h3>
+            <dl className="mt-2 space-y-2.5">
+              {STATUS_ORDER.map((state) => (
+                <div key={state}>
+                  <dt>
+                    <Badge
+                      variant="outline"
+                      className={cn("font-normal", TASK_STATE_LOOK[state].className)}
+                    >
+                      {STATUS_NAMES[state]}
+                    </Badge>
+                  </dt>
+                  <dd className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {STATUS_NOTES[state]}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        )}
 
         <section aria-labelledby="help-confusables" className="mt-4">
           <h3 id="help-confusables" className="text-xs font-medium text-muted-foreground">
             容易混的
           </h3>
           <dl className="mt-2 space-y-2.5">
-            {CONFUSABLES.map((entry) => (
+            {entries.map((entry) => (
               <div key={entry.term}>
                 <dt className="dense font-medium">{entry.term}</dt>
                 <dd className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
