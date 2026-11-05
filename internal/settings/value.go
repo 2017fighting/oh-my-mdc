@@ -24,10 +24,10 @@ type Masked struct {
 // 它是门禁第六判据「清单验读」的凭据——账本是状态记录，不是活体探测；
 // 测试失败不清旧值，已验记录不被一次网络抖动抹掉（见 RecordTest）。
 type LastTest struct {
-	At    time.Time `json:"at"`
-	OK    bool      `json:"ok"`
-	Error string    `json:"error,omitempty"`
-	ListID string   `json:"list_id,omitempty"`
+	At     time.Time `json:"at"`
+	OK     bool      `json:"ok"`
+	Error  string    `json:"error,omitempty"`
+	ListID string    `json:"list_id,omitempty"`
 }
 
 // ListEntry 是 list_registry 的一行：一张清单的 id 与用途，名字只是快照。
