@@ -46,7 +46,7 @@ import { formatInterval } from "~/lib/time";
  *   （前进 / 连上游）。以前 `下一步` 只是一条链接 + 一个墨色主按钮，看起来像「保存并
  *   继续」，实际只导航：屏幕上看不出「改了但没存」，测试还测的是旧值。
  * - **草稿按表各存一份**（`lib/draft`）。改完 A 步去动 B 步，A 的输入还在。
- * - **脏就是脏**：字段旁写「已改」，动作行写「未保存 · 下一步会先保存」。刷新/关页会拦
+ * - **脏就是脏**：字段旁写「未保存」，动作行写「未保存 · 下一步与测试会先保存」。刷新/关页会拦
  *   一次（草稿只在内存里）。
  * - **最后一步的那颗主按钮真的会按得动**：它保存本步、重读门禁，然后要么给一条
  *   「已初始化」的回执，要么把还差哪几项列出来并给出链接。
@@ -88,7 +88,7 @@ const steps: StepSpec[] = [
       {
         key: "token",
         label: "JavDB Token",
-        hint: "Bearer JWT · 已保存的只显示掩码，留空＝不改",
+        hint: "Bearer JWT · 在 JavDB App 的设置里复制后粘贴；已保存的只显示掩码，留空＝不改",
         kind: "secret",
         mono: true,
         placeholder: "粘贴手机里导出的 token",
@@ -118,7 +118,7 @@ const steps: StepSpec[] = [
       { key: "username", label: "用户名", hint: "可选", kind: "text" },
       { key: "password", label: "密码", hint: "留空＝不改", kind: "secret" },
       { key: "category", label: "分类", hint: "qBittorrent 的 category，默认 mdc", kind: "text" },
-      { key: "download_root", label: "下载根目录", hint: "每次加种显式传保存路径", kind: "text", mono: true },
+      { key: "download_root", label: "下载根目录", hint: "每次加种显式传保存路径；须与 Jellyfin 媒体库目录同一 host 目录", kind: "text", mono: true },
       {
         key: "webhook_base_url",
         label: "回调 base URL",
@@ -190,13 +190,13 @@ const steps: StepSpec[] = [
   {
     section: "app",
     title: "完成",
-    help: "间隔与重试都在这一步。三件套齐了「已初始化」才成立，三个循环才开始跑。",
+    help: "间隔与重试都在这一步。三件套齐了「已初始化」才成立，三个循环才开始跑；「完成初始化」会先保存本步再检查门禁——齐了给回执，没齐把差的项列成链接。",
     fields: [
       { key: "poll_interval", label: "清单轮询（分钟）", kind: "duration", min: 1, max: 1440 },
       { key: "reconcile_interval", label: "对账（分钟）", kind: "duration", min: 1, max: 1440 },
       { key: "sidefx_interval", label: "副作用（分钟）", kind: "duration", min: 1, max: 60 },
       { key: "max_attempts", label: "最大重试次数", kind: "number", min: 1, max: 100 },
-      { key: "paused", label: "暂停循环", hint: "正在跑的版本会跑完，不接新的", kind: "bool" },
+      { key: "paused", label: "暂停循环", hint: "正在跑的版本会跑完，不接新的；初始化请保持关闭", kind: "bool" },
     ],
   },
 ];
@@ -285,6 +285,28 @@ export function Wizard({
     setHelpOpen(false);
     setJustInitialized(false);
   }
+
+  // Telegram 未启用时，四个通知开关先不露脸：为一个没启用的集成先做四个偏好决策
+  // 是倒置的（渐进披露）；启用后它们带着已存的值出现。
+  const telegramIdle = step.section === "telegram" && values.enabled === false;
+
+  // 换步之后做两件「这一步才开始」的事：
+  // ① 焦点交给新卡的标题——SPA 里换的只是同一实例的 props，不管理焦点的话，读屏用户
+  //    每按一次「下一步」就迷路一次；首次挂载不抢焦点。
+  // ② 重读一次设置——门禁有一半真值在服务端（目录在盘、清单登记），不能等下一次
+  //    保存才更新（面板 Freshness 规则的向导版）。
+  const headingRef = React.useRef<HTMLHeadingElement>(null);
+  const refreshRef = React.useRef(onRefresh);
+  React.useEffect(() => {
+    refreshRef.current = onRefresh;
+  });
+  const enteredSection = React.useRef(step.section);
+  React.useEffect(() => {
+    if (enteredSection.current === step.section) return;
+    enteredSection.current = step.section;
+    headingRef.current?.focus();
+    void refreshRef.current();
+  }, [step.section]);
 
   // 草稿只在内存里：刷新或关页会丢。脏的时候拦一次，不脏就不打扰。
   React.useEffect(() => {
@@ -444,6 +466,14 @@ export function Wizard({
         return;
       }
       const missing = requirements(next).filter((item) => !item.ok);
+      if (missing.length === 0) {
+        // 门禁说没齐，却列不出差哪项：两份判据不同步了。给防御句，不渲染「还差 0 项」。
+        setStatus({
+          tone: "warn",
+          text: "屏幕上看不出还差哪项：刷新一次再看（门禁读的是保存后的最新设置）。",
+        });
+        return;
+      }
       setStatus({
         tone: "warn",
         text: (
@@ -473,6 +503,18 @@ export function Wizard({
   // 而它恰恰是这一刻最该被读到的一句（DESIGN 的 Fixed-Row 同一个理由）。
   const testDetail = chip.kind === "fail" && chip.detail ? chip.detail : null;
 
+  // 终点回执（刚初始化成功那一刻）不是一行 12px 小字：它是全旅程唯一「机器接班」的
+  // 时刻，抬到动作行上方，绿三件套、半秒入场；普通回执仍在按钮下面的 StatusLine。
+  const receipt =
+    justInitialized && status?.tone === "ok" && pending === null ? (
+      <div
+        role="status"
+        className="rounded-lg border border-status-done-border bg-status-done-surface px-3 py-2.5 text-sm font-medium leading-relaxed text-status-done-text motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-300"
+      >
+        {status.text}
+      </div>
+    ) : null;
+
   const statusLine =
     pending === "save" ? (
       <StatusLine tone="muted">
@@ -481,7 +523,7 @@ export function Wizard({
           正在保存…
         </span>
       </StatusLine>
-    ) : status ? (
+    ) : status && !receipt ? (
       <StatusLine tone={status.tone}>{status.text}</StatusLine>
     ) : isDirty ? (
       <StatusLine tone="muted">未保存 · 下一步与测试会先保存</StatusLine>
@@ -535,14 +577,14 @@ export function Wizard({
           isLast || stepIndex === 0 ? (
             <GateCard snapshot={snapshot} onOpenHelp={() => setHelpOpen(true)} />
           ) : (
-            <GateStrip snapshot={snapshot} />
+            <GateStrip snapshot={snapshot} currentSection={step.section} />
           )
         ) : null}
 
         <Card className="p-5" aria-busy={pending !== null}>
           <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
-              <h2 className="font-heading text-base font-semibold">{step.title}</h2>
+              <h2 ref={headingRef} tabIndex={-1} className="font-heading text-base font-semibold outline-none">{step.title}</h2>
               <p className="mt-1 max-w-xl dense leading-relaxed text-muted-foreground">
                 {step.help}
               </p>
@@ -554,17 +596,25 @@ export function Wizard({
           <Separator className="mb-4" />
 
           <div className="space-y-3">
-            {step.fields.map((field) => (
-              <FieldRow
-                key={field.key}
-                field={field}
-                value={values[field.key]}
-                section={section}
-                dirty={dirtySet.has(field.key)}
-                error={fieldErrors[field.key]}
-                onChange={(value) => setField(field.key, value)}
-              />
-            ))}
+            {step.fields
+              .filter((field) => !(telegramIdle && field.key.startsWith("notify_")))
+              .map((field) => (
+                <FieldRow
+                  key={field.key}
+                  field={field}
+                  value={values[field.key]}
+                  section={section}
+                  dirty={dirtySet.has(field.key)}
+                  error={fieldErrors[field.key]}
+                  onChange={(value) => setField(field.key, value)}
+                />
+              ))}
+            {telegramIdle ? (
+              <p className="dense text-muted-foreground">
+                启用 Telegram 后，这里会出现四个通知开关（下载开始 / 入库完成 / 加工失败 /
+                下载停滞），逐事件各自开关。
+              </p>
+            ) : null}
           </div>
 
           {step.section === "list_registry" ? (
@@ -588,6 +638,7 @@ export function Wizard({
           <Separator className="my-4" />
 
           <div className="space-y-2">
+            {receipt}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2 md:justify-between">
               <div className="flex flex-wrap items-center gap-2">
                 {initialized && justInitialized ? null : initialized ? (
@@ -656,7 +707,6 @@ export function Wizard({
                     className={cn(ACTION, "max-md:flex-1")}
                     onClick={finish}
                     disabled={pending !== null}
-                    title="保存本步，并检查三件套是否齐了"
                   >
                     {pending === "finish" || pending === "save" ? (
                       <Loader2 className="animate-spin" aria-hidden />
@@ -691,7 +741,7 @@ export function Wizard({
           <button
             type="button"
             onClick={() => setHelpOpen(true)}
-            className="rounded-sm text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            className="inline-flex min-h-11 items-center rounded-sm text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:min-h-0"
           >
             术语
           </button>
@@ -882,7 +932,7 @@ function GateCard({
           <button
             type="button"
             onClick={onOpenHelp}
-            className="mt-2.5 rounded-sm text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            className="mt-2.5 inline-flex min-h-11 items-center rounded-sm text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:min-h-0"
           >
             三件套、清单 id、测试连接分别是什么意思
           </button>
@@ -899,18 +949,26 @@ function GateCard({
  * 是琥珀（进度/警告）色，一分钟里看八遍就不再是信号。中间步只留一句「差什么」，
  * 点一下就到能修它的那一节。
  */
-function GateStrip({ snapshot }: { snapshot: ConfigSnapshot }) {
+function GateStrip({
+  snapshot,
+  currentSection,
+}: {
+  snapshot: ConfigSnapshot;
+  currentSection: SectionName;
+}) {
   const all = requirements(snapshot);
   const missing = all.filter((item) => !item.ok);
   const first = missing[0];
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-xl bg-card px-3 py-2.5 ring-1 ring-foreground/10">
-      <p className="dense text-muted-foreground">
+      {/* 计数变化（保存后 4/5→5/5）没有别的出口，这行自己播报。 */}
+      <p aria-live="polite" className="dense text-muted-foreground">
         还没初始化 · 三件套 {all.length - missing.length}/{all.length}
         {first ? ` · 差 ${first.short}` : ""}
       </p>
-      {first ? (
+      {/* 「去 X」不指向当前步自己：站在清单登记步时链接会变成一次空操作。 */}
+      {first && first.section !== currentSection ? (
         <Link
           to={`/settings/${first.section}`}
           className="shrink-0 rounded-sm text-xs text-foreground underline underline-offset-4 hover:text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
@@ -972,7 +1030,7 @@ function requirements(snapshot: ConfigSnapshot): Requirement[] {
         ? "媒体库目录（Jellyfin 步里填）"
         : snapshot.media_root_visible
           ? "媒体库目录在盘可见"
-          : "媒体库目录不在盘：三个容器要挂同一路径",
+          : "媒体库目录不在盘：三个容器要挂同一路径，去宿主机核对挂载",
       short: "媒体库目录在盘",
       ok: mediaOK,
       section: "jellyfin",
@@ -1000,8 +1058,10 @@ function CheckLine({ item }: { item: Requirement }) {
   }
   return (
     <li className="flex items-center gap-2 dense">
+      {/* 待办不是警告：未满足的圆点用中性纸白（Gate-Once 的同一理由——琥珀留给
+          真正的警告，五颗「!」齐刷刷亮琥珀就把信号磨平了）。 */}
       <span
-        className="grid size-4 shrink-0 place-items-center rounded-full border border-status-progress-border bg-status-progress-surface text-xs text-status-progress-text"
+        className="grid size-4 shrink-0 place-items-center rounded-full border border-border bg-background text-xs text-muted-foreground"
         aria-hidden
       >
         !
@@ -1009,7 +1069,8 @@ function CheckLine({ item }: { item: Requirement }) {
       <span className="min-w-0 text-muted-foreground">{item.label}</span>
       <Link
         to={`/settings/${item.section}`}
-        className="shrink-0 rounded-sm text-xs underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        aria-label={`去补 ${item.short}`}
+        className="inline-flex min-h-11 shrink-0 items-center rounded-sm text-xs underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:min-h-0"
       >
         去补
       </Link>
@@ -1307,7 +1368,7 @@ function ListAssist({
         {!tokenConfigured ? (
           <Link
             to="/settings/javdb"
-            className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+            className="inline-flex min-h-11 items-center text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground md:min-h-0"
           >
             先去保存 JavDB token
           </Link>
@@ -1331,7 +1392,7 @@ function ListAssist({
               <button
                 type="button"
                 onClick={() => onPick(list.id, list.name)}
-                className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-left text-xs hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                className="flex min-h-11 w-full items-center justify-between gap-2 px-2.5 py-2 text-left text-[0.8125rem] hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring md:min-h-0 md:text-xs"
               >
                 <span className="min-w-0 truncate">
                   <span className="font-mono text-xs text-muted-foreground">{list.id}</span>{" "}
@@ -1495,7 +1556,10 @@ function AutorunLine({
 }) {
   return (
     <div>
-      <div className="mb-1 text-xs text-muted-foreground">{label}</div>
+      <div className="mb-1 flex items-baseline justify-between gap-2 text-xs text-muted-foreground">
+        <span>{label}</span>
+        {value.length > 40 ? <span className="shrink-0 md:hidden">长命令可左右滑动</span> : null}
+      </div>
       <pre
         className={cn(
           "overflow-x-auto rounded-md border px-2.5 py-1.5 font-mono text-xs leading-relaxed whitespace-pre",
