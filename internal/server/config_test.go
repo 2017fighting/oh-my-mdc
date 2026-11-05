@@ -115,7 +115,9 @@ func initialized(t *testing.T, h http.Handler) bool {
 	return value
 }
 
-// configureMainline 把主线三件套配齐（JavDB + 清单登记 + qBittorrent + Jellyfin）。
+// configureMainline 把门禁六判据配齐：主线三件套 + 清单登记 + 一次读到清单的
+// 真实测试（第六判据「清单验读」）。handler 必须装着 readWantWatchTester——
+// 验读走的是真按钮 POST /api/config/javdb/test，不是直写账本。
 //
 // media_root 用一次性的真实目录：门禁要看它在盘上可见（P4-2，本票把 media_root
 // 搬进了 Jellyfin 集成表）。
@@ -126,6 +128,29 @@ func configureMainline(t *testing.T, h http.Handler) {
 	save(t, h, "list_registry", `"list_id": "k4EVE4", "purpose": "want_watch", "name": "想看清单"`)
 	save(t, h, "qbittorrent", `"url": "http://qbittorrent.media.svc:8080", "download_root": "/media/downloads/completed/av"`)
 	save(t, h, "jellyfin", `"url": "http://jellyfin.media.svc:8096", "api_key": "0123456789abcdef", "media_root": "`+t.TempDir()+`"`)
+	readWantWatch(t, h)
+}
+
+// readWantWatch 按真实测试按钮的路径记一次「读到登记清单」的绿账（门禁第六判据）。
+func readWantWatch(t *testing.T, h http.Handler) {
+	t.Helper()
+
+	rec := send(t, h, http.MethodPost, "/api/config/javdb/test", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config/javdb/test = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if body := jsonOf(t, rec); body["ok"] != true {
+		t.Fatalf("测试连接 = %v, want ok:true（前置条件没搭起来）", body)
+	}
+}
+
+// readWantWatchTester 是 JavDB 测试连接在测试里的替身：照登记清单回一张绿账
+// （ListID 记账，门禁的「清单验读」读的就是它）。
+func readWantWatchTester(_ context.Context, _ settings.Section, input settings.TestInput) settings.TestResult {
+	if entry, ok := input.ListFor("want_watch"); ok {
+		return settings.TestResult{OK: true, ListID: entry.ListID}
+	}
+	return settings.TestResult{OK: false, Code: settings.CodeBusiness, Detail: "没登记想看清单"}
 }
 
 func TestConfigStartsUninitializedWithEverySectionPresent(t *testing.T) {
@@ -185,7 +210,7 @@ func TestConfigStartsUninitializedWithEverySectionPresent(t *testing.T) {
 }
 
 func TestSavingTheMainlineTrioOpensTheGate(t *testing.T) {
-	h := newSettingsHandler(t)
+	h := newSettingsHandler(t, settings.WithTester("javdb", settings.TesterFunc(readWantWatchTester)))
 
 	save(t, h, "javdb", `"token": "eyJhbGciOiJIUzI1NiJ9.phone-token"`)
 	if got := initialized(t, h); got {
@@ -211,8 +236,14 @@ func TestSavingTheMainlineTrioOpensTheGate(t *testing.T) {
 
 	// 末尾空格不该让门禁与 Test/Refresh 看到两个值（都按去空白后的路径判）。
 	save(t, h, "jellyfin", `"media_root": "`+t.TempDir()+` "`)
+
+	// 第六判据：三件套齐了但清单还没被一次真实测试读到过，门仍然不开。
+	if got := initialized(t, h); got {
+		t.Error("initialized = true：清单还没验读过，门不该开")
+	}
+	readWantWatch(t, h)
 	if got := initialized(t, h); !got {
-		t.Error("initialized = false：三件套齐了，循环才该启动")
+		t.Error("initialized = false：三件套齐了且清单验读过，循环才该启动")
 	}
 
 	if got := jsonOf(t, send(t, h, http.MethodGet, "/api/config", ""))["media_root_visible"]; got != true {
@@ -373,7 +404,7 @@ func TestPatchValidationErrors(t *testing.T) {
 }
 
 func TestDeletingAMainlineSectionClosesTheGate(t *testing.T) {
-	h := newSettingsHandler(t)
+	h := newSettingsHandler(t, settings.WithTester("javdb", settings.TesterFunc(readWantWatchTester)))
 	configureMainline(t, h)
 
 	if got := jsonOf(t, send(t, h, http.MethodGet, "/api/config", ""))["initialized"]; got != true {
