@@ -368,329 +368,329 @@ export function Panel({
   return (
     <>
       <div className="flex flex-col gap-6">
-      {/* 统计走一行，把首屏第一块让给「需要人工」；新鲜度与刷新贴在这一行的右端。 */}
-      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-        <section
-          aria-label="任务统计"
-          className="dense flex flex-wrap items-baseline gap-x-4 gap-y-1 text-muted-foreground"
-        >
-          {stats.map((stat) => (
-            <span key={stat.label} className="flex items-baseline gap-1.5">
-              <span>{stat.label}</span>
-              <span className="font-medium tabular-nums text-foreground">{stat.value}</span>
-            </span>
-          ))}
-          {/* 手机上侧栏是藏起来的，心跳得在这里说两句：清完队列之后，「下一轮什么时候
-              去拿我刚加的那部」与「对账还在跑吗」就是接下来两个问题，而它们不该在
-              一张分页表格之后再回答。失败的那条排最前：它才是「要不要起床」的答案，
-              不能被 slice 恒定掉（副作用恰是三条里唯一会带失败进面板的）。
-              `md:hidden` 与侧栏的 `md:flex` 同一道门：以前这里写的是 `lg:hidden`，
-              于是 768–1023px 同一屏并排坐着两遍心跳。 */}
-          {[...loopLines(overview, intervals, now)]
-            .sort((a, b) => Number(b.failing) - Number(a.failing))
-            .slice(0, 2)
-            .map((line) => (
-              <span key={line.label} className="flex items-baseline gap-1.5 md:hidden">
-                <span>{line.label}</span>
-                <span className={cn("tabular-nums", line.failing && "text-status-danger-text")}>
-                  {line.text}
-                </span>
+        {/* 统计走一行，把首屏第一块让给「需要人工」；新鲜度与刷新贴在这一行的右端。 */}
+        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+          <section
+            aria-label="任务统计"
+            className="dense flex flex-wrap items-baseline gap-x-4 gap-y-1 text-muted-foreground"
+          >
+            {stats.map((stat) => (
+              <span key={stat.label} className="flex items-baseline gap-1.5">
+                <span>{stat.label}</span>
+                <span className="font-medium tabular-nums text-foreground">{stat.value}</span>
               </span>
             ))}
-        </section>
-
-        {/* 新鲜度这一档不许出屏：手机上一行装不下就折成两行，而不是让「上次读取」
-            与刷新按钮被挤到可见区之外（formatWhen 满一周后会换成更宽的绝对时间）。 */}
-        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span className="tabular-nums whitespace-nowrap">
-            已入库 <span className="tabular-nums">{counts?.finished ?? 0}</span>
-          </span>
-          <span className="tabular-nums whitespace-nowrap">
-            {loadedAt ? (
-              <>
-                上次读取 <time dateTime={new Date(loadedAt).toISOString()}>{formatClock(loadedAt)}</time>
-                （{formatWhen(loadedAt, now)}）
-              </>
-            ) : (
-              "还没读到过"
-            )}
-          </span>
-          <Button
-            variant="outline"
-            className={ROW_ACTION_SIZE}
-            onClick={() => void refresh()}
-            disabled={refreshing}
-          >
-            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
-            刷新
-          </Button>
-        </div>
-      </div>
-
-      <ReceiptAnnouncer receipts={receiptsState.receipts} />
-
-      <NeedsAttention
-        attention={attention}
-        stuck={sideEffects.filter((effect) => effect.stuck)}
-        now={now}
-        receiptsState={receiptsState}
-        cardRef={attentionRef}
-        onOpenTask={openTask}
-        onRefresh={onRefresh}
-      />
-
-      <Card>
-        <CardHeader>
-          <CardTitle as="h2">任务</CardTitle>
-          <CardDescription className="text-xs tabular-nums">
-            {query.q || query.state ? `筛选后 ${total} 条` : `共 ${total} 条`}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="px-0">
-          <TaskFilters query={query} onQuery={onQuery} />
-          {tasks.length === 0 ? (
-            <EmptyTasks
-              query={query}
-              onQuery={onQuery}
-              failedVersions={attention?.failed.length ?? 0}
-              hasAttention={attentionRowCount(attention, sideEffects) > 0}
-              onFocusAttention={goToAttention}
-            />
-          ) : (
-            <>
-              <ul className="divide-y lg:hidden">
-                {tasks.map((task) => (
-                  <li key={task.movie_id}>
-                    <button
-                      type="button"
-                      onClick={() => openTask(task.movie_id)}
-                      aria-label={`打开 ${task.number} 的详情，${TASK_STATE_LOOK[isTaskState(task.state) ? task.state : "downloading"].label}，版本：${versionsSpoken(task)}`}
-                      className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
-                    >
-                      <span className="min-w-0">
-                        <span className="block dense font-medium tabular-nums">
-                          {task.number}
-                        </span>
-                        <span className="block font-mono text-xs break-all text-muted-foreground">
-                          {task.movie_id}
-                        </span>
-                        <span className="mt-1.5 flex flex-wrap gap-1">
-                          {task.versions.map((version) => (
-                            <VersionChip key={version.infohash} version={version} />
-                          ))}
-                        </span>
-                        <span
-                          className="mt-1 block text-xs tabular-nums text-muted-foreground"
-                          title={formatAbsolute(task.updated_at)}
-                        >
-                          更新 {formatWhen(task.updated_at, now)}
-                        </span>
-                      </span>
-                      <span className="flex shrink-0 items-center gap-2">
-                        <StateBadge state={task.state} />
-                        <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-
-              <div className="hidden overflow-x-auto lg:block">
-              <table className="w-full table-fixed border-collapse dense lg:min-w-[34rem]">
-                <colgroup>
-                  <col className="w-[11rem]" />
-                  <col className="w-[6.5rem]" />
-                  <col />
-                  <col className="w-[6.5rem]" />
-                  <col className="w-8" />
-                </colgroup>
-                <thead>
-                  <tr className="border-y bg-muted/40 text-left text-xs font-medium tracking-wide text-muted-foreground">
-                    <th scope="col" className="px-4 py-2 font-medium">番号</th>
-                    <th scope="col" className="px-4 py-2 font-medium">状态</th>
-                    <th scope="col" className="px-4 py-2 font-medium">版本</th>
-                    {/* 排序固定在「最近更新」：唯一会变的那一列，也是人判断新鲜度的依据。
-                        不写 aria-sort：这一列没有排序控件，向读屏宣告一个不存在的
-                        排序状态，比不说话更糟。 */}
-                    <th scope="col" className="px-4 py-2 font-medium">
-                      更新
-                    </th>
-                    <th scope="col" className="w-8 px-2 py-2">
-                      <span className="sr-only">打开详情</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tasks.map((task) => (
-                    <tr
-                      key={task.movie_id}
-                      onClick={() => openTask(task.movie_id)}
-                      className="cursor-pointer border-b transition-colors last:border-b-0 hover:bg-muted/40"
-                    >
-                      <td className="px-4 py-2.5 align-top">
-                        <div className="font-medium tabular-nums">
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openTask(task.movie_id);
-                            }}
-                            className="inline-flex min-h-6 items-center rounded-sm text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                            aria-label={`打开 ${task.number} 的详情`}
-                          >
-                            {task.number}
-                          </button>
-                        </div>
-                        <div
-                          className="truncate font-mono text-xs text-muted-foreground"
-                          title={task.movie_id}
-                        >
-                          {task.movie_id}
-                        </div>
-                      </td>
-                      <td className="px-4 py-2.5 align-top">
-                        <StateBadge state={task.state} />
-                      </td>
-                      <td className="px-4 py-2.5 align-top">
-                        <div className="flex flex-wrap gap-1">
-                          {task.versions.map((version) => (
-                            <VersionChip key={version.infohash} version={version} />
-                          ))}
-                        </div>
-                      </td>
-                      <td
-                        className="px-4 py-2.5 align-top text-xs whitespace-nowrap tabular-nums text-muted-foreground"
-                        title={formatAbsolute(task.updated_at)}
-                      >
-                        {formatWhen(task.updated_at, now)}
-                      </td>
-                      <td className="px-2 py-2.5 align-top text-muted-foreground">
-                        <ChevronRight className="size-4" aria-hidden />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            </>
-          )}
-          {pageCount > 1 ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
-              <span className="tabular-nums">
-                第 {query.page} / {pageCount} 页
-              </span>
-              <div className="flex items-center gap-1.5">
-                <RowAction
-                  variant="outline"
-                  disabled={query.page <= 1}
-                  onClick={() => onQuery({ ...query, page: query.page - 1 })}
-                >
-                  上一页
-                </RowAction>
-                <RowAction
-                  variant="outline"
-                  disabled={query.page >= pageCount}
-                  onClick={() => onQuery({ ...query, page: query.page + 1 })}
-                >
-                  下一页
-                </RowAction>
-              </div>
-            </div>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <SideEffectQueue
-        effects={sideEffects.filter((effect) => !effect.stuck)}
-        now={now}
-        onRefresh={onRefresh}
-      />
-
-      <Card>
-        <CardHeader>
-          <CardTitle as="h2">循环健康</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-1.5 dense">
-          {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
-            const health = overview?.loops?.[loop];
-            const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
-            const interval = intervals[loop];
-            // 四样数据一个优先级：正在跑 → 上轮 → 上次成功（连败时才可见）→ 迭代计数（title）。
-            // 「正在跑」是「机器此刻醒着」的最直接证据；上轮的成败在跑着时退到第二行。
-            const runningAt = health?.running_since ? Date.parse(health.running_since) : null;
-            const failing = health?.last_run_at ? health.last_ok === false : false;
-            const secondary = [
-              runningAt && health?.last_run_at
-                ? `上轮 ${formatWhen(health.last_run_at, now)}${failing ? " · 失败" : ""}`
-                : "",
-              failing
-                ? health?.last_success_at
-                  ? `上次成功 ${formatWhen(health.last_success_at, now)}`
-                  : "还没成功过"
-                : "",
-            ].filter(Boolean);
-            return (
-              <div key={loop} className="flex flex-col gap-0.5">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                  <span>
-                    {label}
-                    {interval ? (
-                      <span className="ml-1.5 text-xs text-muted-foreground">{interval}</span>
-                    ) : null}
+            {/* 手机上侧栏是藏起来的，心跳得在这里说两句：清完队列之后，「下一轮什么时候
+                去拿我刚加的那部」与「对账还在跑吗」就是接下来两个问题，而它们不该在
+                一张分页表格之后再回答。失败的那条排最前：它才是「要不要起床」的答案，
+                不能被 slice 恒定掉（副作用恰是三条里唯一会带失败进面板的）。
+                `md:hidden` 与侧栏的 `md:flex` 同一道门：以前这里写的是 `lg:hidden`，
+                于是 768–1023px 同一屏并排坐着两遍心跳。 */}
+            {[...loopLines(overview, intervals, now)]
+              .sort((a, b) => Number(b.failing) - Number(a.failing))
+              .slice(0, 2)
+              .map((line) => (
+                <span key={line.label} className="flex items-baseline gap-1.5 md:hidden">
+                  <span>{line.label}</span>
+                  <span className={cn("tabular-nums", line.failing && "text-status-danger-text")}>
+                    {line.text}
                   </span>
-                  <span className="flex items-baseline gap-2 text-xs text-muted-foreground">
-                    <span
-                      className={cn("tabular-nums", runningAt && "text-foreground")}
-                      title={[
-                        health?.last_run_at ? `上轮 ${formatAbsolute(health.last_run_at)}` : "",
-                        health?.last_success_at
-                          ? `上次成功 ${formatAbsolute(health.last_success_at)}`
-                          : "",
-                        health
-                          ? `本进程累计 ${health.iterations.ok} 轮成功 · ${health.iterations.error} 轮失败`
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join("\n")}
-                    >
-                      {runningAt
-                        ? `正在跑 ${formatElapsed(runningAt, now)}`
-                        : health?.last_run_at
-                          ? formatWhen(health.last_run_at, now)
-                          : "还没跑过"}
-                    </span>
-                    {!runningAt && health?.last_run_at ? (
-                      <span className={health.last_ok ? "" : "text-status-danger-text"}>
-                        {health.last_ok ? "成功" : "失败"}
-                      </span>
-                    ) : null}
-                  </span>
-                </div>
-                {secondary.length > 0 ? (
-                  <p className="text-right text-xs leading-relaxed text-muted-foreground">
-                    {secondary.join(" · ")}
-                  </p>
-                ) : null}
-              </div>
-            );
-          })}
-          <Separator className="my-1" />
-          <div className="flex flex-wrap items-center gap-x-6">
-            <Button variant="link" size="sm" asChild className="h-11 self-start px-0 text-sm md:h-7">
-              <Link to="/settings/app">去集成设置</Link>
-            </Button>
-            {/* 帮助唯一可见的入口：手机上侧栏不存在，这是那条路。 */}
+                </span>
+              ))}
+          </section>
+
+          {/* 新鲜度这一档不许出屏：手机上一行装不下就折成两行，而不是让「上次读取」
+              与刷新按钮被挤到可见区之外（formatWhen 满一周后会换成更宽的绝对时间）。 */}
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span className="tabular-nums whitespace-nowrap">
+              已入库 <span className="tabular-nums">{counts?.finished ?? 0}</span>
+            </span>
+            <span className="tabular-nums whitespace-nowrap">
+              {loadedAt ? (
+                <>
+                  上次读取 <time dateTime={new Date(loadedAt).toISOString()}>{formatClock(loadedAt)}</time>
+                  （{formatWhen(loadedAt, now)}）
+                </>
+              ) : (
+                "还没读到过"
+              )}
+            </span>
             <Button
-              variant="link"
-              size="sm"
-              className="h-11 self-start px-0 text-sm md:h-7"
-              onClick={() => onHelpOpen(true)}
+              variant="outline"
+              className={ROW_ACTION_SIZE}
+              onClick={() => void refresh()}
+              disabled={refreshing}
             >
-              术语与快捷键
+              <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
+              刷新
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+
+        <ReceiptAnnouncer receipts={receiptsState.receipts} />
+
+        <NeedsAttention
+          attention={attention}
+          stuck={sideEffects.filter((effect) => effect.stuck)}
+          now={now}
+          receiptsState={receiptsState}
+          cardRef={attentionRef}
+          onOpenTask={openTask}
+          onRefresh={onRefresh}
+        />
+
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">任务</CardTitle>
+            <CardDescription className="text-xs tabular-nums">
+              {query.q || query.state ? `筛选后 ${total} 条` : `共 ${total} 条`}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-0">
+            <TaskFilters query={query} onQuery={onQuery} />
+            {tasks.length === 0 ? (
+              <EmptyTasks
+                query={query}
+                onQuery={onQuery}
+                failedVersions={attention?.failed.length ?? 0}
+                hasAttention={attentionRowCount(attention, sideEffects) > 0}
+                onFocusAttention={goToAttention}
+              />
+            ) : (
+              <>
+                <ul className="divide-y lg:hidden">
+                  {tasks.map((task) => (
+                    <li key={task.movie_id}>
+                      <button
+                        type="button"
+                        onClick={() => openTask(task.movie_id)}
+                        aria-label={`打开 ${task.number} 的详情，${TASK_STATE_LOOK[isTaskState(task.state) ? task.state : "downloading"].label}，版本：${versionsSpoken(task)}`}
+                        className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                      >
+                        <span className="min-w-0">
+                          <span className="block dense font-medium tabular-nums">
+                            {task.number}
+                          </span>
+                          <span className="block font-mono text-xs break-all text-muted-foreground">
+                            {task.movie_id}
+                          </span>
+                          <span className="mt-1.5 flex flex-wrap gap-1">
+                            {task.versions.map((version) => (
+                              <VersionChip key={version.infohash} version={version} />
+                            ))}
+                          </span>
+                          <span
+                            className="mt-1 block text-xs tabular-nums text-muted-foreground"
+                            title={formatAbsolute(task.updated_at)}
+                          >
+                            更新 {formatWhen(task.updated_at, now)}
+                          </span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2">
+                          <StateBadge state={task.state} />
+                          <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="hidden overflow-x-auto lg:block">
+                <table className="w-full table-fixed border-collapse dense lg:min-w-[34rem]">
+                  <colgroup>
+                    <col className="w-[11rem]" />
+                    <col className="w-[6.5rem]" />
+                    <col />
+                    <col className="w-[6.5rem]" />
+                    <col className="w-8" />
+                  </colgroup>
+                  <thead>
+                    <tr className="border-y bg-muted/40 text-left text-xs font-medium tracking-wide text-muted-foreground">
+                      <th scope="col" className="px-4 py-2 font-medium">番号</th>
+                      <th scope="col" className="px-4 py-2 font-medium">状态</th>
+                      <th scope="col" className="px-4 py-2 font-medium">版本</th>
+                      {/* 排序固定在「最近更新」：唯一会变的那一列，也是人判断新鲜度的依据。
+                          不写 aria-sort：这一列没有排序控件，向读屏宣告一个不存在的
+                          排序状态，比不说话更糟。 */}
+                      <th scope="col" className="px-4 py-2 font-medium">
+                        更新
+                      </th>
+                      <th scope="col" className="w-8 px-2 py-2">
+                        <span className="sr-only">打开详情</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tasks.map((task) => (
+                      <tr
+                        key={task.movie_id}
+                        onClick={() => openTask(task.movie_id)}
+                        className="cursor-pointer border-b transition-colors last:border-b-0 hover:bg-muted/40"
+                      >
+                        <td className="px-4 py-2.5 align-top">
+                          <div className="font-medium tabular-nums">
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openTask(task.movie_id);
+                              }}
+                              className="inline-flex min-h-6 items-center rounded-sm text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                              aria-label={`打开 ${task.number} 的详情`}
+                            >
+                              {task.number}
+                            </button>
+                          </div>
+                          <div
+                            className="truncate font-mono text-xs text-muted-foreground"
+                            title={task.movie_id}
+                          >
+                            {task.movie_id}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 align-top">
+                          <StateBadge state={task.state} />
+                        </td>
+                        <td className="px-4 py-2.5 align-top">
+                          <div className="flex flex-wrap gap-1">
+                            {task.versions.map((version) => (
+                              <VersionChip key={version.infohash} version={version} />
+                            ))}
+                          </div>
+                        </td>
+                        <td
+                          className="px-4 py-2.5 align-top text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+                          title={formatAbsolute(task.updated_at)}
+                        >
+                          {formatWhen(task.updated_at, now)}
+                        </td>
+                        <td className="px-2 py-2.5 align-top text-muted-foreground">
+                          <ChevronRight className="size-4" aria-hidden />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              </>
+            )}
+            {pageCount > 1 ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
+                <span className="tabular-nums">
+                  第 {query.page} / {pageCount} 页
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <RowAction
+                    variant="outline"
+                    disabled={query.page <= 1}
+                    onClick={() => onQuery({ ...query, page: query.page - 1 })}
+                  >
+                    上一页
+                  </RowAction>
+                  <RowAction
+                    variant="outline"
+                    disabled={query.page >= pageCount}
+                    onClick={() => onQuery({ ...query, page: query.page + 1 })}
+                  >
+                    下一页
+                  </RowAction>
+                </div>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <SideEffectQueue
+          effects={sideEffects.filter((effect) => !effect.stuck)}
+          now={now}
+          onRefresh={onRefresh}
+        />
+
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">循环健康</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-1.5 dense">
+            {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
+              const health = overview?.loops?.[loop];
+              const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
+              const interval = intervals[loop];
+              // 四样数据一个优先级：正在跑 → 上轮 → 上次成功（连败时才可见）→ 迭代计数（title）。
+              // 「正在跑」是「机器此刻醒着」的最直接证据；上轮的成败在跑着时退到第二行。
+              const runningAt = health?.running_since ? Date.parse(health.running_since) : null;
+              const failing = health?.last_run_at ? health.last_ok === false : false;
+              const secondary = [
+                runningAt && health?.last_run_at
+                  ? `上轮 ${formatWhen(health.last_run_at, now)}${failing ? " · 失败" : ""}`
+                  : "",
+                failing
+                  ? health?.last_success_at
+                    ? `上次成功 ${formatWhen(health.last_success_at, now)}`
+                    : "还没成功过"
+                  : "",
+              ].filter(Boolean);
+              return (
+                <div key={loop} className="flex flex-col gap-0.5">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                    <span>
+                      {label}
+                      {interval ? (
+                        <span className="ml-1.5 text-xs text-muted-foreground">{interval}</span>
+                      ) : null}
+                    </span>
+                    <span className="flex items-baseline gap-2 text-xs text-muted-foreground">
+                      <span
+                        className={cn("tabular-nums", runningAt && "text-foreground")}
+                        title={[
+                          health?.last_run_at ? `上轮 ${formatAbsolute(health.last_run_at)}` : "",
+                          health?.last_success_at
+                            ? `上次成功 ${formatAbsolute(health.last_success_at)}`
+                            : "",
+                          health
+                            ? `本进程累计 ${health.iterations.ok} 轮成功 · ${health.iterations.error} 轮失败`
+                            : "",
+                        ]
+                          .filter(Boolean)
+                          .join("\n")}
+                      >
+                        {runningAt
+                          ? `正在跑 ${formatElapsed(runningAt, now)}`
+                          : health?.last_run_at
+                            ? formatWhen(health.last_run_at, now)
+                            : "还没跑过"}
+                      </span>
+                      {!runningAt && health?.last_run_at ? (
+                        <span className={health.last_ok ? "" : "text-status-danger-text"}>
+                          {health.last_ok ? "成功" : "失败"}
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                  {secondary.length > 0 ? (
+                    <p className="text-right text-xs leading-relaxed text-muted-foreground">
+                      {secondary.join(" · ")}
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+            <Separator className="my-1" />
+            <div className="flex flex-wrap items-center gap-x-6">
+              <Button variant="link" size="sm" asChild className="h-11 self-start px-0 text-sm md:h-7">
+                <Link to="/settings/app">去集成设置</Link>
+              </Button>
+              {/* 帮助唯一可见的入口：手机上侧栏不存在，这是那条路。 */}
+              <Button
+                variant="link"
+                size="sm"
+                className="h-11 self-start px-0 text-sm md:h-7"
+                onClick={() => onHelpOpen(true)}
+              >
+                术语与快捷键
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {selected ? (
