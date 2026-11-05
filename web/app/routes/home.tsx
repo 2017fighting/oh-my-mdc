@@ -239,6 +239,13 @@ export default function Home() {
                   </span>
                 </div>
               ))}
+            {/* 快捷键的唯一可发现性入口：桌面 only（侧栏本身 md 起才显示），
+                手机零提示零占位。 */}
+            {onPanel && initialized ? (
+              <p className="pt-1 text-xs text-muted-foreground">
+                按 <span className="font-mono">?</span> 看快捷键
+              </p>
+            ) : null}
           </div>
         </div>
       </aside>

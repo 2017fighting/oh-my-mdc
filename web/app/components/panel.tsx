@@ -6,7 +6,7 @@ import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
 import { groupByNumber, type FailureGroup } from "~/lib/attention";
@@ -106,6 +106,110 @@ export function Panel({
       else document.getElementById("main")?.focus();
     };
   }, [selected]);
+
+  // ---- 快捷键：Alex 主循环的加速器（brief：/、r、j/k、?；输入框内静默；桌面 only）----
+  // 它们是焦点的别名，不是第二套导航：r 只触发「焦点所在行」的动作，j/k 只在
+  // 抽屉内走当前任务表顺序；触屏设备（无精确指针）不响应，手机零提示。
+  const [helpOpen, setHelpOpen] = React.useState(false);
+  const helpCloseRef = React.useRef<HTMLButtonElement>(null);
+  const helpReturnRef = React.useRef<HTMLElement | null>(null);
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      if (!window.matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+
+      const isHelp = event.key === "?" || (event.code === "Slash" && event.shiftKey);
+      if (isHelp) {
+        event.preventDefault();
+        if (!helpOpen) {
+          helpReturnRef.current =
+            document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          setHelpOpen(true);
+        } else {
+          setHelpOpen(false);
+        }
+        return;
+      }
+      // 帮助浮层开着时其余键不响应（Esc 由浮层自己在 capture 阶段接住）。
+      if (helpOpen) return;
+
+      const drawerOpen = selected !== null;
+      if (event.key === "/" && !event.shiftKey) {
+        // 抽屉开着时搜索在外壳 inert 里，聚焦不到。
+        if (drawerOpen) return;
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>('input[type="search"]')?.focus();
+        return;
+      }
+      if (event.key === "j" || event.key === "k") {
+        if (!drawerOpen) return;
+        event.preventDefault();
+        const index = tasks.findIndex((task) => task.movie_id === selected);
+        const next = tasks[index + (event.key === "j" ? 1 : -1)];
+        if (next) openTask(next.movie_id);
+        return;
+      }
+      if (event.key === "r") {
+        event.preventDefault();
+        // r 是焦点的别名：抽屉里=抽屉那颗；行内=焦点所在组的那颗；设有上下文
+        // 时先聚焦第一颗可按的（与既有交接同一选择器），不盲按。
+        if (drawerOpen) {
+          document
+            .querySelector<HTMLElement>("[data-drawer-retry]:not([disabled])")
+            ?.click();
+          return;
+        }
+        const active = document.activeElement;
+        const groupEl =
+          active instanceof HTMLElement ? active.closest<HTMLElement>("[data-group]") : null;
+        const inGroup = groupEl?.querySelector<HTMLElement>("[data-retry]:not([disabled])");
+        if (inGroup) {
+          inGroup.click();
+          return;
+        }
+        document
+          .querySelector<HTMLElement>("[data-retry]:not([disabled])")
+          ?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, tasks, openTask, helpOpen]);
+
+  // 帮助浮层的模态：复用抽屉那套（inert 外壳 + Esc + 焦点归还），抽屉开着时
+  // 连抽屉一起 inert；Esc 在 capture 阶段接住并 stopPropagation，不会连抽屉一起关。
+  React.useEffect(() => {
+    if (!helpOpen) return;
+    const shell = document.getElementById("app-shell");
+    const drawer = document.querySelector<HTMLElement>("aside[role=\"dialog\"]");
+    shell?.setAttribute("inert", "");
+    drawer?.setAttribute("inert", "");
+    helpCloseRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setHelpOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      // 抽屉还开着时外壳的 inert 归它管（它的 effect 会在关闭时撤）。
+      if (!document.querySelector("aside[role=\"dialog\"]")) shell?.removeAttribute("inert");
+      drawer?.removeAttribute("inert");
+      const back = helpReturnRef.current;
+      helpReturnRef.current = null;
+      if (back?.isConnected) back.focus();
+    };
+  }, [helpOpen]);
 
   const counts = overview?.counts;
   // 统计行只放任务级状态数。不放「需要人工」：那个数是一行一件事的**行数**，
@@ -413,6 +517,10 @@ export function Panel({
           onRefresh={onRefresh}
         />
       ) : null}
+
+      {helpOpen ? (
+        <ShortcutsHelp onClose={() => setHelpOpen(false)} closeRef={helpCloseRef} />
+      ) : null}
     </>
   );
 }
@@ -486,6 +594,23 @@ function NeedsAttention({
     return at >= latestStallAt ? at : undefined;
   };
 
+  // 批量重试的作用域 = Remedy 的聚合视图：能在这里修 + 未亮「重新加种中」的停滞组。
+  // 数字与行级按钮同一契约：印几部动几部、印几条版本动几条版本。
+  const batchTargets: { group: FailureGroup; kind: "failed" | "stalled" }[] = [
+    ...fixableGroups.map((group) => ({ group, kind: "failed" as const })),
+    ...stalledGroups
+      .filter((group) => reseededAtOf(group) === undefined)
+      .map((group) => ({ group, kind: "stalled" as const })),
+  ];
+  const batchVersions = batchTargets.reduce(
+    (sum, { group, kind }) =>
+      sum +
+      group.items.filter((item) =>
+        kind === "stalled" ? true : remedyForFailure(item).retryable,
+      ).length,
+    0,
+  );
+
   const renderFailedGroup = (group: FailureGroup, collapseHint = false) => (
     <VersionGroup
       key={group.movieID}
@@ -505,11 +630,54 @@ function NeedsAttention({
     />
   );
 
-  const retryHooks = { onReceipt: receiptOf, focusFallback: receiptsRef };
+  // 批量时回执限额放宽到本次部数（≤天花板）：五部批量不能只留三条证据。
+  const receiptLimitRef = React.useRef(RECEIPT_LIMIT);
+  const pushReceipt = React.useCallback(
+    (draft: ReceiptDraft) => receiptOf(draft, receiptLimitRef.current),
+    [receiptOf],
+  );
+  const retryHooks = { onReceipt: pushReceipt, focusFallback: receiptsRef };
   const taskRetry = useTaskRetry(onRefresh, retryHooks);
   // 任务侧重试与副作用重发是两件事，各有自己的忙位；回执则合并成一条流：
   // 作者关心的不是「哪一个子系统的」，而是「我刚才那一按成了没有」。
   const sideEffect = useSideEffectRetry(onRefresh, retryHooks);
+
+  // 批量重试：顺序逐部发起（作者规模 ≤10，不并发轰炸后端），一部失败不中断后续，
+  // 逐部回执；「重新加种中」的行已在 batchTargets 里跳过。无确认条：重试幂等安全，
+  // 爆炸半径印在按钮上（Consequence-First 只约束不可逆动作）。
+  const [batchBusy, setBatchBusy] = React.useState(false);
+  const runBatch = async () => {
+    if (batchBusy || taskRetry.busy.size > 0) return;
+    setBatchBusy(true);
+    receiptLimitRef.current = Math.max(
+      RECEIPT_LIMIT,
+      Math.min(batchTargets.length, RECEIPT_CEILING),
+    );
+    try {
+      for (const { group, kind } of batchTargets) {
+        await taskRetry.retry(
+          group.movieID,
+          false,
+          {
+            title: group.number,
+            infohashes: group.items
+              .filter((item) => (kind === "stalled" ? true : remedyForFailure(item).retryable))
+              .map((item) => item.infohash),
+            names: versionNames(group),
+          },
+          { holdFocus: true },
+        );
+      }
+      // 批量的焦点交接只在收尾做一次：行消失 → 下一颗可按的重试；否则回执列表。
+      await afterPaint();
+      const next = document.querySelector<HTMLElement>("[data-retry]:not([disabled])");
+      if (next) next.focus();
+      else receiptsRef.current?.focus();
+    } finally {
+      receiptLimitRef.current = RECEIPT_LIMIT;
+      setBatchBusy(false);
+    }
+  };
 
   // 没事可做、也没有刚做完的回执：这张卡整块不出现。页面标题已经说了「没有要动手的事」，
   // 再留一张空卡把同一个意思说第二遍，只是给首屏加了一段家具。
@@ -536,6 +704,20 @@ function NeedsAttention({
             <span>{total === 0 ? "已经清完了。" : broke.join(" · ")}</span>
           </p>
         </div>
+        {/* One-Action Rule 的主操作位：批量重试印作用域，行级按钮仍是逐行动作。 */}
+        {batchTargets.length > 0 && batchVersions > 0 ? (
+          <CardAction>
+            <RowAction
+              variant="outline"
+              disabled={batchBusy}
+              data-batch-retry=""
+              onClick={() => void runBatch()}
+            >
+              <RotateCcw className={cn("size-3.5", batchBusy && "animate-spin")} aria-hidden />
+              重试 {batchTargets.length} 部 · {batchVersions} 条版本
+            </RowAction>
+          </CardAction>
+        ) : null}
       </CardHeader>
       {total > 0 || receipts.length > 0 ? (
         <CardContent>
@@ -646,8 +828,10 @@ type ReceiptDraft = RetryNotice & {
 /** Receipt 是已经发出的一条回执。 */
 type Receipt = ReceiptDraft & { id: number; at: number };
 
-/** 回执留 3 条、活 10 分钟：足够看见刚才那几下，又不至于把卡片变成一块日志。 */
+/** 回执留 3 条、活 10 分钟：足够看见刚才那几下，又不至于把卡片变成一块日志。
+ *  批量重试时限额临时放宽（见 NeedsAttention.runBatch），但永不超天花板 8。 */
 const RECEIPT_LIMIT = 3;
+const RECEIPT_CEILING = 8;
 const RECEIPT_TTL = 10 * 60_000;
 
 /**
@@ -661,9 +845,12 @@ function useReceipts() {
   const nextID = React.useRef(1);
   const listRef = React.useRef<HTMLDivElement>(null);
 
-  const push = React.useCallback((draft: ReceiptDraft) => {
+  const push = React.useCallback((draft: ReceiptDraft, limit = RECEIPT_LIMIT) => {
     setReceipts((current) =>
-      [{ ...draft, id: nextID.current++, at: Date.now() }, ...current].slice(0, RECEIPT_LIMIT),
+      [{ ...draft, id: nextID.current++, at: Date.now() }, ...current].slice(
+        0,
+        Math.min(limit, RECEIPT_CEILING),
+      ),
     );
   }, []);
 
@@ -795,7 +982,10 @@ function VersionGroup({
   const retryTargets = group.items.filter((item) => remedyOf(item).retryable);
 
   return (
-    <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
+    <div
+      data-group={group.movieID}
+      className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
+    >
       <div className="min-w-0 flex-1 space-y-1.5">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 dense font-medium tabular-nums">
           {group.number}
@@ -1053,7 +1243,12 @@ function useTaskRetry(
   }, []);
 
   const retry = React.useCallback(
-    async (movieID: string, force: boolean, plan?: RetryPlan) => {
+    async (
+      movieID: string,
+      force: boolean,
+      plan?: RetryPlan,
+      opts?: { holdFocus?: boolean },
+    ) => {
       const title = plan?.title ?? movieID;
       // 按下时元素还在；刷新之后它就没了，所以先把它的引用拿在手上。
       const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1088,7 +1283,7 @@ function useTaskRetry(
         await onRefresh();
         release();
         await afterPaint();
-        if (focusFallback && origin) {
+        if (!opts?.holdFocus && focusFallback && origin) {
           if (!origin.isConnected) {
             // 行在成功之后从树上消失了：焦点跟到下一条还能按的重试，
             // 一条不剩才落到回执上。落到回执会把整页滚回卡片头，
@@ -1929,6 +2124,7 @@ function DrawerActions({
           <Button
             className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
             disabled={busy}
+            data-drawer-retry=""
             title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
             onClick={() => void retry(false)}
           >
@@ -2091,6 +2287,69 @@ function eventKindLabel(kind: TaskEvent["kind"]): string {
  * 相对时间（3 分钟前）不自己走的话，一屏「3 分钟前」会挂到用户关掉标签页为止，
  * 那比写绝对时间更骗人。
  */
+/**
+ * ShortcutsHelp 是 ? 的帮助浮层：键表一列，桌面 only。
+ *
+ * 模式复用抽屉：portal 到 body、role=dialog、Esc 关闭、开着时外壳（与抽屉）inert。
+ * 全站唯一不带阴影的浮层——阴影属于抽屉，这是卡片。
+ */
+function ShortcutsHelp({
+  onClose,
+  closeRef,
+}: {
+  onClose: () => void;
+  closeRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  if (typeof document === "undefined") return null;
+  const rows: [string, string][] = [
+    ["/", "聚焦搜索框"],
+    ["r", "重试：焦点所在行；抽屉内是抽屉那颗"],
+    ["j / k", "抽屉内下一部 / 上一部任务"],
+    ["?", "打开 / 关闭本帮助"],
+    ["Esc", "关闭抽屉或本帮助"],
+  ];
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 p-4"
+      role="presentation"
+      onClick={onClose}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shortcuts-title"
+        onClick={(event) => event.stopPropagation()}
+        className="w-full max-w-sm rounded-xl bg-card p-5 ring-1 ring-foreground/10"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <h2 id="shortcuts-title" className="font-heading text-base font-medium">
+            快捷键
+          </h2>
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="关闭快捷键帮助"
+            className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            <X className="size-4" aria-hidden />
+          </button>
+        </div>
+        <dl className="mt-3 space-y-1.5">
+          {rows.map(([keys, desc]) => (
+            <div key={keys} className="flex items-baseline justify-between gap-4">
+              <dt className="font-mono text-xs text-foreground">{keys}</dt>
+              <dd className="dense text-right text-muted-foreground">{desc}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-3 text-xs text-muted-foreground">输入框里打字时快捷键不生效。</p>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
 function useNow(interval = 60_000): number {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
