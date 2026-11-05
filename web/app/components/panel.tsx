@@ -497,7 +497,7 @@ export function Panel({
                   <col className="w-[11rem]" />
                   <col className="w-[6.5rem]" />
                   <col />
-                  <col className="w-[8rem]" />
+                  <col className="w-[6.5rem]" />
                   <col className="w-8" />
                 </colgroup>
                 <thead>

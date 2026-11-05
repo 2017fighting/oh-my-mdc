@@ -23,6 +23,9 @@ export function formatAbsolute(value: string | number | Date | null | undefined)
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+/** 只用来切台阶：一个月按 30 天算，不去追日历（追了就要处理二月的 28/29）。 */
+const MONTH = 30 * DAY;
+const YEAR = 365 * DAY;
 
 /** 一段进行中的耗时（「正在跑 N 秒」）：刚刚 / N 秒 / N 分钟 / N 小时，不带「前」。
  * 与 formatWhen 同源的分档，但方向是「已经跑了多久」而不是「多久以前」。 */
@@ -39,7 +42,11 @@ export function formatElapsed(
   return `${Math.floor(delta / HOUR)} 小时`;
 }
 
-/** 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 HH:MM / 超过一周给绝对时间。 */
+/**
+ * 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / N 个月前 / N 年前。
+ *
+ * 未来时间（对账的「下次尝试」会排在未来）走同一份台阶的正向说法。
+ */
 export function formatWhen(
   value: string | number | Date | null | undefined,
   now: number = Date.now(),
@@ -48,24 +55,14 @@ export function formatWhen(
   if (!date) return "—";
 
   const delta = now - date.getTime();
-  // 未来时间（对账的「下次尝试」会排在未来）走正向的相对说法。
-  if (delta < -MINUTE) return forward(-delta, date);
-  if (delta < MINUTE) return "刚刚";
-  if (delta < HOUR) return `${Math.floor(delta / MINUTE)} 分钟前`;
-  if (delta < DAY) return `${Math.floor(delta / HOUR)} 小时前`;
-  if (delta < 7 * DAY) {
-    const days = Math.floor(delta / DAY);
-    return days === 1 ? "昨天" : `${days} 天前`;
-  }
-  return formatAbsolute(date);
+  return relative(Math.abs(delta), delta < 0 ? "future" : "past");
 }
 
 /**
  * 「已经挂了多久」：给「需要人工」的分节标题用。
  *
- * 与 formatWhen 同一条阶梯，只有一处不同：超过一周也不回落到绝对时间。
- * 「最早 12 天前」回答的是「这件事我躲了多久」，而 `2026/10/24 09:11` 回答的是
- * 「这是哪一天」——后者要人自己减一遍，正是值班台不该让人做的算术。
+ * 与 formatWhen 共用那份台阶，只是永远取过去的方向：未来的时刻对「挂了多久」没有
+ * 意义，夹成「刚刚」而不是算成负数。
  */
 export function formatAge(
   value: string | number | Date | null | undefined,
@@ -73,29 +70,43 @@ export function formatAge(
 ): string {
   const date = parse(value);
   if (!date) return "—";
-  const delta = Math.max(0, now - date.getTime());
-  if (delta < MINUTE) return "刚刚";
-  if (delta < HOUR) return `${Math.floor(delta / MINUTE)} 分钟前`;
-  if (delta < DAY) return `${Math.floor(delta / HOUR)} 小时前`;
-  const days = Math.floor(delta / DAY);
-  return days === 1 ? "昨天" : `${days} 天前`;
+  return relative(Math.max(0, now - date.getTime()), "past");
 }
 
-/** 「多久以后」：副作用的下次尝试时间通常在将来。 */
+/**
+ * 「多久以后」：副作用的下次尝试时间通常在将来。
+ *
+ * 同一份台阶的正向说法；已经过期的（对账刚把这一轮推过头）夹成「马上」，不说负数。
+ */
 export function formatFuture(
   value: string | number | Date | null | undefined,
   now: number = Date.now(),
 ): string {
   const date = parse(value);
   if (!date) return "—";
-  return forward(date.getTime() - now, date);
+  return relative(Math.max(0, date.getTime() - now), "future");
 }
 
-function forward(delta: number, date: Date): string {
-  if (delta < MINUTE) return "马上";
-  if (delta < HOUR) return `${Math.ceil(delta / MINUTE)} 分钟后`;
-  if (delta < DAY) return `${Math.ceil(delta / HOUR)} 小时后`;
-  return formatAbsolute(date);
+/**
+ * relative 是唯一的一份相对时间台阶。
+ *
+ * 以前 formatWhen、formatAge、formatFuture 各写一份阶梯，于是「超过一周说什么」
+ * 在这些出口里漂了两次（最后一次漂成绝对日期，正好违反 DESIGN 自己那条
+ * 「绝对时间只进 title」）。现在方向由参数决定，台阶只在这里改。
+ *
+ * 台阶：<1 分钟（刚刚 / 马上）→ 分钟 → 小时 → 天（过去的第一天说「昨天」）→
+ * 30 天换月、365 天换年。**没有绝对时间的出口**。
+ */
+function relative(delta: number, direction: "past" | "future"): string {
+  const suffix = direction === "past" ? "前" : "后";
+  if (delta < MINUTE) return direction === "past" ? "刚刚" : "马上";
+  if (delta < HOUR) return `${Math.floor(delta / MINUTE)} 分钟${suffix}`;
+  if (delta < DAY) return `${Math.floor(delta / HOUR)} 小时${suffix}`;
+  const days = Math.floor(delta / DAY);
+  if (days === 1 && direction === "past") return "昨天";
+  if (delta < MONTH) return `${days} 天${suffix}`;
+  if (delta < YEAR) return `${Math.max(1, Math.floor(delta / MONTH))} 个月${suffix}`;
+  return `${Math.max(1, Math.floor(delta / YEAR))} 年${suffix}`;
 }
 
 /**
