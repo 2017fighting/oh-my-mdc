@@ -10,7 +10,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
 import { groupByNumber, type FailureGroup } from "~/lib/attention";
-import { formatAbsolute, formatClock, formatFuture, formatWhen } from "~/lib/time";
+import { formatAbsolute, formatClock, formatElapsed, formatFuture, formatWhen } from "~/lib/time";
 import {
   remedyForFailure,
   remedyForSideEffect,
@@ -480,24 +480,62 @@ export function Panel({
             const health = overview?.loops?.[loop];
             const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
             const interval = intervals[loop];
+            // 四样数据一个优先级：正在跑 → 上轮 → 上次成功（连败时才可见）→ 迭代计数（title）。
+            // 「正在跑」是「机器此刻醒着」的最直接证据；上轮的成败在跑着时退到第二行。
+            const runningAt = health?.running_since ? Date.parse(health.running_since) : null;
+            const failing = health?.last_run_at ? health.last_ok === false : false;
+            const secondary = [
+              runningAt && health?.last_run_at
+                ? `上轮 ${formatWhen(health.last_run_at, now)}${failing ? " · 失败" : ""}`
+                : "",
+              failing
+                ? health?.last_success_at
+                  ? `上次成功 ${formatWhen(health.last_success_at, now)}`
+                  : "还没成功过"
+                : "",
+            ].filter(Boolean);
             return (
-              <div key={loop} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                <span>
-                  {label}
-                  {interval ? (
-                    <span className="ml-1.5 text-xs text-muted-foreground">{interval}</span>
-                  ) : null}
-                </span>
-                <span className="flex items-baseline gap-2 text-xs text-muted-foreground">
-                  <span className="tabular-nums" title={formatAbsolute(health?.last_run_at)}>
-                    {health?.last_run_at ? formatWhen(health.last_run_at, now) : "还没跑过"}
+              <div key={loop} className="flex flex-col gap-0.5">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                  <span>
+                    {label}
+                    {interval ? (
+                      <span className="ml-1.5 text-xs text-muted-foreground">{interval}</span>
+                    ) : null}
                   </span>
-                  {health?.last_run_at ? (
-                    <span className={health.last_ok ? "" : "text-status-danger-text"}>
-                      {health.last_ok ? "成功" : "失败"}
+                  <span className="flex items-baseline gap-2 text-xs text-muted-foreground">
+                    <span
+                      className={cn("tabular-nums", runningAt && "text-foreground")}
+                      title={[
+                        health?.last_run_at ? `上轮 ${formatAbsolute(health.last_run_at)}` : "",
+                        health?.last_success_at
+                          ? `上次成功 ${formatAbsolute(health.last_success_at)}`
+                          : "",
+                        health
+                          ? `本进程累计 ${health.iterations.ok} 轮成功 · ${health.iterations.error} 轮失败`
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join("\n")}
+                    >
+                      {runningAt
+                        ? `正在跑 ${formatElapsed(runningAt, now)}`
+                        : health?.last_run_at
+                          ? formatWhen(health.last_run_at, now)
+                          : "还没跑过"}
                     </span>
-                  ) : null}
-                </span>
+                    {!runningAt && health?.last_run_at ? (
+                      <span className={health.last_ok ? "" : "text-status-danger-text"}>
+                        {health.last_ok ? "成功" : "失败"}
+                      </span>
+                    ) : null}
+                  </span>
+                </div>
+                {secondary.length > 0 ? (
+                  <p className="text-right text-xs leading-relaxed text-muted-foreground">
+                    {secondary.join(" · ")}
+                  </p>
+                ) : null}
               </div>
             );
           })}
@@ -2385,11 +2423,17 @@ function loopLines(
     // 读不到概览时不说「还没跑过」：那是一个我们并不知道的事实。
     if (!overview) return { label, text: "还没读到过", failing: false };
     const failing = health?.last_run_at ? health.last_ok === false : false;
+    // 正在跑是「机器此刻醒着」的最直接证据，优先于「多久以前」。
+    const running = health?.running_since ? Date.parse(health.running_since) : null;
     return {
       label,
       text: [
         intervals[key],
-        health?.last_run_at ? formatWhen(health.last_run_at, now) : "还没跑过",
+        running
+          ? `正在跑 ${formatElapsed(running, now)}`
+          : health?.last_run_at
+            ? formatWhen(health.last_run_at, now)
+            : "还没跑过",
         failing ? "失败" : "",
       ]
         .filter(Boolean)

@@ -199,6 +199,10 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 	defer release()
 
 	started := r.now()
+	if r.loops != nil {
+		// 抢到锁、真的要跑了：面板能看见「正在跑」，结束由 Record/Stop 收口。
+		r.loops.Start(loops.Poll, started)
+	}
 	result, err := r.run(ctx)
 	if !result.Gated && !result.Locked {
 		if r.loops != nil {
@@ -208,6 +212,9 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 			"scanned", result.Scanned, "queried", result.Queried,
 			"candidates", result.Candidates, "torrents", result.Torrents,
 			"fallbacks", result.Fallbacks, "added", result.Added, "err", err)
+	} else if r.loops != nil {
+		// 门禁拦下的轮次不算迭代，也不能一直挂着「正在跑」。
+		r.loops.Stop(loops.Poll)
 	}
 	return result, err
 }

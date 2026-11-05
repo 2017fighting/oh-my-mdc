@@ -176,6 +176,10 @@ func (e *Engine) RunOnce(ctx context.Context) (Result, error) {
 	defer release()
 
 	started := e.now()
+	if e.loops != nil {
+		// 抢到锁、真的要跑了：面板能看见「正在跑」，结束由 Record/Stop 收口。
+		e.loops.Start(loops.Sidefx, started)
+	}
 	result, err := e.run(ctx)
 	if !result.Gated && !result.Locked {
 		if e.loops != nil {
@@ -184,6 +188,9 @@ func (e *Engine) RunOnce(ctx context.Context) (Result, error) {
 		e.logger.Debug("sidefx 循环结束",
 			"swept", result.Swept, "due", result.Due, "done", result.Done,
 			"retried", result.Retried, "stuck", result.Stuck, "skipped", result.Skipped, "err", err)
+	} else if e.loops != nil {
+		// 门禁拦下的轮次不算迭代，也不能一直挂着「正在跑」。
+		e.loops.Stop(loops.Sidefx)
 	}
 	return result, err
 }

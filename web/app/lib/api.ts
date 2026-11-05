@@ -105,7 +105,16 @@ export type Overview = {
   };
   loops: Record<
     "poll" | "reconcile" | "sidefx",
-    { last_run_at: string | null; last_ok: boolean | null }
+    {
+      last_run_at: string | null;
+      last_ok: boolean | null;
+      /** 最近一次成功的时间：连败判据（LoopStalled 看它，不看 last_run）。 */
+      last_success_at: string | null;
+      /** 本轮起跑时间；null = 没在跑。进程内状态，重启即「还没跑过」。 */
+      running_since: string | null;
+      /** 本进程累计迭代；门禁没开、抢锁抢输的轮次不算。 */
+      iterations: { ok: number; error: number };
+    }
   >;
 };
 

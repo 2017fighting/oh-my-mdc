@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatInterval, formatWhen, formatFuture, formatAbsolute } from "./time.ts";
+import { formatInterval, formatWhen, formatFuture, formatAbsolute, formatElapsed } from "./time.ts";
 
 const at = (iso: string) => new Date(iso).getTime();
 const now = at("2026-11-04T14:42:05Z");
@@ -27,6 +27,18 @@ test("超过一周回落到绝对时间：那时候精确的日期比「9 天前
 test("空值与坏值都给破折号，不抛异常", () => {
   assert.equal(formatWhen(null, now), "—");
   assert.equal(formatWhen("not-a-date", now), "—");
+});
+
+test("进行中的耗时不带「前」：刚刚 / N 秒 / N 分钟 / N 小时", () => {
+  assert.equal(formatElapsed("2026-11-04T14:42:01Z", now), "刚刚");
+  assert.equal(formatElapsed("2026-11-04T14:41:40Z", now), "25 秒");
+  assert.equal(formatElapsed("2026-11-04T14:40:05Z", now), "2 分钟");
+  assert.equal(formatElapsed("2026-11-04T12:42:05Z", now), "2 小时");
+});
+
+test("未来起点不会算出负耗时：错钟时回落「刚刚」", () => {
+  assert.equal(formatElapsed("2026-11-04T14:45:00Z", now), "刚刚");
+  assert.equal(formatElapsed(null, now), "—");
 });
 
 test("将来的时间说「N 分钟后」：副作用的下次尝试总在未来", () => {

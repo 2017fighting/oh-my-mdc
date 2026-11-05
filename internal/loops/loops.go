@@ -47,6 +47,11 @@ type Status struct {
 	// LoopStalled 告警判的是后者（规格 §9）。
 	LastSuccessAt *time.Time
 	Iterations    Iterations
+	// RunningSince 非空表示这一轮正在跑（Start 起、Record/Stop 止）。
+	//
+	// 它同样是进程内状态：循环 panic 会连带进程退出，重启后回到「还没跑过」，
+	// 不会留下一个永远在跑的假标记。
+	RunningSince *time.Time
 }
 
 // Registry 是三条循环健康位的进程内登记处。
@@ -60,7 +65,34 @@ func NewRegistry() *Registry {
 	return &Registry{status: make(map[string]Status, 3)}
 }
 
-// Record 记一次循环结果（ok=false 也算跑过：面板要能看见失败）。
+// Start 标记一条循环开始一轮：抢到锁、真的要跑了才调（与 Iterations 同一口径，
+// 门禁没开、抢锁抢输的轮次不调）。结束由 Record（计一轮）或 Stop（不计）收口。
+func (r *Registry) Start(name string, at time.Time) {
+	if r == nil {
+		return
+	}
+	utc := at.UTC()
+	r.mu.Lock()
+	status := r.status[name]
+	status.RunningSince = &utc
+	r.status[name] = status
+	r.mu.Unlock()
+}
+
+// Stop 清掉 running 标记但不计一轮：门禁拦下的轮次确实「跑过零毫秒」，
+// 但它不是一次迭代，面板上也不该挂着「正在跑」。
+func (r *Registry) Stop(name string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	status := r.status[name]
+	status.RunningSince = nil
+	r.status[name] = status
+	r.mu.Unlock()
+}
+
+// Record 记一次循环结果（ok=false 也算跑过：面板要能看见失败），并收掉 running 标记。
 func (r *Registry) Record(name string, at time.Time, ok bool) {
 	if r == nil {
 		return
@@ -69,6 +101,7 @@ func (r *Registry) Record(name string, at time.Time, ok bool) {
 	lastOK := ok
 	r.mu.Lock()
 	status := r.status[name]
+	status.RunningSince = nil
 	status.LastRunAt = &utc
 	status.LastOK = &lastOK
 	if ok {

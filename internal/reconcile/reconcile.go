@@ -223,6 +223,10 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 	defer release()
 
 	started := r.now()
+	if r.loops != nil {
+		// 抢到锁、真的要跑了：面板能看见「正在跑」，结束由 Record/Stop 收口。
+		r.loops.Start(loops.Reconcile, started)
+	}
 	result, err := r.run(ctx)
 	if !result.Gated && !result.Locked {
 		if r.loops != nil {
@@ -234,6 +238,9 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 			"waiting", result.Waiting, "skipped", result.Skipped,
 			"scraped", result.Processing.Fetched, "reused", result.Processing.Reused,
 			"filed", result.Organized.Filed, "organize_failed", result.Organized.Failed, "err", err)
+	} else if r.loops != nil {
+		// 门禁拦下的轮次不算迭代，也不能一直挂着「正在跑」。
+		r.loops.Stop(loops.Reconcile)
 	}
 	return result, err
 }

@@ -24,6 +24,21 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/** 一段进行中的耗时（「正在跑 N 秒」）：刚刚 / N 秒 / N 分钟 / N 小时，不带「前」。
+ * 与 formatWhen 同源的分档，但方向是「已经跑了多久」而不是「多久以前」。 */
+export function formatElapsed(
+  value: string | number | Date | null | undefined,
+  now: number = Date.now(),
+): string {
+  const date = parse(value);
+  if (!date) return "—";
+  const delta = Math.max(0, now - date.getTime());
+  if (delta < 5_000) return "刚刚";
+  if (delta < MINUTE) return `${Math.floor(delta / 1000)} 秒`;
+  if (delta < HOUR) return `${Math.floor(delta / MINUTE)} 分钟`;
+  return `${Math.floor(delta / HOUR)} 小时`;
+}
+
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 HH:MM / 超过一周给绝对时间。 */
 export function formatWhen(
   value: string | number | Date | null | undefined,

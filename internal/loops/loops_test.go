@@ -45,6 +45,42 @@ func TestHealthOfLoopThatNeverRan(t *testing.T) {
 	}
 }
 
+// TestRunningWindowStartsAndStops 钉住「正在跑」的生命周期：Start 起亮、
+// Record 计一轮并收口；门禁拦下的轮次走 Stop——不计数也不留假标记。
+func TestRunningWindowStartsAndStops(t *testing.T) {
+	registry := loops.NewRegistry()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	registry.Start(loops.Reconcile, now)
+	running := registry.Health(loops.Reconcile)
+	if running.RunningSince == nil || !running.RunningSince.Equal(now) {
+		t.Errorf("Start 后 RunningSince = %v, want %v", running.RunningSince, now)
+	}
+	if running.LastRunAt != nil || running.Iterations.OK != 0 {
+		t.Errorf("Start 不该顺手计一轮: %+v", running)
+	}
+
+	registry.Record(loops.Reconcile, now.Add(3*time.Second), true)
+	done := registry.Health(loops.Reconcile)
+	if done.RunningSince != nil {
+		t.Errorf("Record 后 RunningSince = %v, want nil", done.RunningSince)
+	}
+	if done.LastRunAt == nil || done.Iterations.OK != 1 {
+		t.Errorf("Record 该计一轮: %+v", done)
+	}
+
+	// 门禁轮次：Start 后被 Stop，不留「正在跑」也不计数。
+	registry.Start(loops.Reconcile, now.Add(time.Minute))
+	registry.Stop(loops.Reconcile)
+	stopped := registry.Health(loops.Reconcile)
+	if stopped.RunningSince != nil {
+		t.Errorf("Stop 后 RunningSince = %v, want nil", stopped.RunningSince)
+	}
+	if stopped.Iterations.OK != 1 || stopped.LastRunAt == nil {
+		t.Errorf("Stop 不该动计数与上轮结果: %+v", stopped)
+	}
+}
+
 // TestRecordOnNilRegistryIsInert：引擎没接登记处时（测试场景）记账不该 panic。
 func TestRecordOnNilRegistryIsInert(t *testing.T) {
 	var registry *loops.Registry

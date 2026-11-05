@@ -28,6 +28,17 @@ type countsBody struct {
 type loopHealth struct {
 	LastRunAt *time.Time `json:"last_run_at"`
 	LastOK    *bool      `json:"last_ok"`
+	// LastSuccessAt / RunningSince / Iterations 是登记处里一直存着的三样：
+	// 「上次成功」（连败判据）、「正在跑」（本轮起跑时间）与迭代计数。
+	// 面板的循环健康与 §9 指标同源，都是进程内健康位。
+	LastSuccessAt *time.Time    `json:"last_success_at"`
+	RunningSince  *time.Time    `json:"running_since"`
+	Iterations    iterationsBody `json:"iterations"`
+}
+
+type iterationsBody struct {
+	OK    uint64 `json:"ok"`
+	Error uint64 `json:"error"`
 }
 
 type loopsBody struct {
