@@ -60,7 +60,7 @@ export default function Home() {
   // 侧栏与手机统计行都要相对时间，而它们挂在外壳上（不是 Panel 里）。
   const now = useNow();
 
-  // 面板的筛选与页号住在 URL 里：F5 不丢，还能把「只看需人工」发给自己的另一个标签页。
+  // 面板的筛选与页号住在 URL 里：F5 不丢，还能把「只看失败」发给自己的另一个标签页。
   const query = readQuery(params);
   const queryKey = `${query.page}\u0000${query.state}\u0000${query.q}`;
 

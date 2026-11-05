@@ -9,7 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
-import { groupByNumber, groupStuck, oldestCreatedAt, type FailureGroup, type StuckGroup } from "~/lib/attention";
+import { groupByNumber, groupStuck, oldestCreatedAt, attentionRowCount, type FailureGroup, type StuckGroup } from "~/lib/attention";
 import {
   formatAbsolute,
   formatAge,
@@ -324,15 +324,26 @@ export function Panel({
   }, [helpOpen]);
 
   const counts = overview?.counts;
-  // 统计行只放任务级状态数。不放「需要人工」：那个数是一行一件事的**行数**，
-  // 它唯一的住处是页面标题（`N 件事需要人工`）与卡片的构成行；counts.failed 是
-  // 另一个口径（全部版本都失败的任务），只服务「需人工」筛选，两者不合成一个数。
   // 统计行只放「还在动」的两个数。已入库是永远不需要动作的那个，挪到右端与新鲜度
   // 同处：它是背景，不是待办。
+  //
+  // 任务级的「全部版本都失败」数两个地方都不上：`counts.failed` 只为筛选服务，
+  // 想看有几部就点筛选——它不会要人立刻动手，不值得占首屏一个数。
   const stats = [
     { label: "下载中", value: counts?.downloading ?? 0 },
     { label: "加工中", value: counts?.processing ?? 0 },
   ];
+
+  // 「回到需要人工」的落点：那块卡自己带焦点与名字（role=region + tabIndex=-1），
+  // 光是滚过去对读屏用户等于没发生任何事。
+  const attentionRef = React.useRef<HTMLDivElement>(null);
+  const goToAttention = React.useCallback(() => {
+    const card = attentionRef.current;
+    if (!card) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    card.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+    card.focus({ preventScroll: true });
+  }, []);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -415,6 +426,7 @@ export function Panel({
         stuck={sideEffects.filter((effect) => effect.stuck)}
         now={now}
         receiptsState={receiptsState}
+        cardRef={attentionRef}
         onOpenTask={openTask}
         onRefresh={onRefresh}
       />
@@ -431,7 +443,13 @@ export function Panel({
         <CardContent className="px-0">
           <TaskFilters query={query} onQuery={onQuery} />
           {tasks.length === 0 ? (
-            <EmptyTasks query={query} onQuery={onQuery} failedVersions={attention?.failed.length ?? 0} />
+            <EmptyTasks
+              query={query}
+              onQuery={onQuery}
+              failedVersions={attention?.failed.length ?? 0}
+              hasAttention={attentionRowCount(attention, sideEffects) > 0}
+              onFocusAttention={goToAttention}
+            />
           ) : (
             <>
               <ul className="divide-y lg:hidden">
@@ -697,6 +715,7 @@ function NeedsAttention({
   stuck,
   now,
   receiptsState,
+  cardRef,
   onOpenTask,
   onRefresh,
 }: {
@@ -704,6 +723,8 @@ function NeedsAttention({
   stuck: SideEffect[];
   now: number;
   receiptsState: ReturnType<typeof useReceipts>;
+  /** 「回到需要人工」要把焦点送到这块地：光滚动对读屏等于什么都没发生。 */
+  cardRef: React.RefObject<HTMLDivElement | null>;
   onOpenTask: (movieID: string) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -880,12 +901,20 @@ function NeedsAttention({
   if (total === 0 && receipts.length === 0) return null;
 
   return (
-    <Card className={cn(total > 0 && "ring-status-danger-border")}>
+    <Card
+      ref={cardRef}
+      tabIndex={-1}
+      role="region"
+      aria-labelledby="attention-heading"
+      className={cn("scroll-mt-6 outline-none", total > 0 && "ring-status-danger-border")}
+    >
       <CardHeader className="max-sm:grid-cols-1">
         <div>
           {/* 页标题已经说了「N 件事需要人工」，卡片不把同一个词再说一遍：可见的首行
               就是它的构成（失败几部 · 停滞几部 · 驻留几条），标题只留给大纲与读屏。 */}
-          <h2 className="sr-only">需要人工</h2>
+          <h2 id="attention-heading" className="sr-only">
+            需要人工
+          </h2>
           {/* 这行是卡片唯一可见的首行，所以它得和它下面的卡标题一个分量：以前它是
               13px/400，比「任务」「副作用队列」的 16px/500 都轻。播报不在这里——
               那个数由 home.tsx 的常驻活区开口，这里不再抢第二个声音。 */}
@@ -1914,13 +1943,13 @@ const STATE_FILTERS: { value: TaskState | ""; label: string }[] = [
   { value: "downloading", label: "下载中" },
   { value: "processing", label: "加工中" },
   { value: "finished", label: "已入库" },
-  { value: "failed", label: "需人工" },
+  { value: "failed", label: "失败" },
 ];
 
 /**
  * TaskFilters 是任务卡的搜索与状态筛选（规格 §8.4 的 ?state=&q=）。
  *
- * 筛选住在地址栏里：F5 不丢，还能把「只看需人工」发给自己的另一个标签页。
+ * 筛选住在地址栏里：F5 不丢，还能把「只看失败」发给自己的另一个标签页。
  */
 function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: PanelQuery) => void }) {
   const [draft, setDraft] = React.useState(query.q);
@@ -1957,7 +1986,7 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
             className="h-11 pl-8 md:h-8"
           />
         </div>
-        {/* 手机上五个 chip 一行放不下，折成 4+1 会让「需人工」孤悬第二行：
+        {/* 手机上五个 chip 一行放不下，折成 4+1 会让「失败」孤悬第二行：
             改成横滑一行（sm 起恢复换行）。 */}
         <div
           className="flex items-center gap-2 overflow-x-auto sm:flex-wrap sm:overflow-visible"
@@ -1977,8 +2006,9 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
                   // 横向溢出容器自动横滚焦点项。
                   event.currentTarget.scrollIntoView({ inline: "nearest", block: "nearest" });
                 }}
-                // 「需人工」筛的是**任务级**状态：全部版本都失败的作品。失败版本本身属于
-                // 上面那张卡，两者口径不同；解释常驻在筛选条下方，不在这里再说一遍。
+                // chip 说的是**任务状态**（「失败」= 全部版本都失败）；单条版本的失败属于
+                // 上面那张卡，两者尺度不同。筛选条下不再常驻解释：词不再撒谎，
+                // 空状态里那一次说清就够了。
                 className={cn(
                   "h-11 shrink-0 rounded-lg px-3 dense transition-colors md:h-7 md:px-2.5 md:text-xs",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
@@ -1993,11 +2023,6 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
           })}
         </div>
       </div>
-      {/* 口径解释不能只活在 hover 的 title 里：触屏没有 hover，而回到面板的第一件事
-          往往就是点「需人工」看见 0。这句常驻，因为它解释的正是「点了之后为什么是空的」。 */}
-      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-        「需人工」是任务级口径：只算全部版本都失败的作品；单版本失败在上面的「需要人工」里。
-      </p>
     </div>
   );
 }
@@ -2006,30 +2031,43 @@ function EmptyTasks({
   query,
   onQuery,
   failedVersions,
+  hasAttention,
+  onFocusAttention,
 }: {
   query: PanelQuery;
   onQuery: (next: PanelQuery) => void;
-  /** 「需要人工」里的失败版本条数：用来解释「为什么筛需人工是空的」。 */
+  /** 「需要人工」里的失败版本条数：用来解释「为什么筛失败是空的」。 */
   failedVersions: number;
+  /** 上面那张卡是否真的在树上（没有它就没有可去的地方）。 */
+  hasAttention: boolean;
+  /** 把人送到「需要人工」：滚动过去并让读屏拿到那块地的名字。 */
+  onFocusAttention: () => void;
 }) {
-  // 筛「需人工」却是空的，不等于没事：整个任务没失败、但里面的破解版失败时，
-  // 任务状态会随已入库的中文版走。这时候不说清，人会以为上面那张卡在说谎。
+  // 筛「失败」却是空的，不等于没事：一部作品有版本已入库、另一条破解版失败时，
+  // 任务状态跟着已入库走、但它在「需要人工」里有一行。不说清，人会以为那张卡在撒谎。
   if (query.state === "failed") {
     return (
       <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-        <p>没有全部版本都失败的作品。</p>
+        <p>没有全部版本都失败的任务。</p>
         <p className="mt-1 text-xs leading-relaxed">
           {failedVersions > 0
-            ? `上面「需要人工」里有 ${failedVersions} 条失败版本：它们所属的作品还有别的版本已入库或在跑，所以任务状态不算失败。`
-            : "失败版本都挂在上面「需要人工」里。"}
+            ? `上面「需要人工」里有 ${failedVersions} 条失败版本：它们所属的任务还有别的版本已入库或在跑，任务状态因此不是「失败」。要动手的是那些版本，不是任务。`
+            : "「失败」是任务级状态：一部作品的版本全部失败才算。现在没有这样的任务。"}
         </p>
-        <Button
-          variant="outline"
-          className={cn(ROW_ACTION_SIZE, "mt-3")}
-          onClick={() => onQuery({ page: 1, q: "", state: "" })}
-        >
-          清除筛选
-        </Button>
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+          {hasAttention ? (
+            <Button className={ROW_ACTION_SIZE} onClick={onFocusAttention}>
+              回到「需要人工」
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            className={ROW_ACTION_SIZE}
+            onClick={() => onQuery({ page: 1, q: "", state: "" })}
+          >
+            清除筛选
+          </Button>
+        </div>
       </div>
     );
   }
@@ -2073,7 +2111,7 @@ const TASK_STATE_LOOK: Record<TaskState, { label: string; className: string }> =
     className: "border-status-done-border bg-status-done-surface text-status-done-text",
   },
   failed: {
-    label: "需人工",
+    label: "失败",
     className: "border-status-danger-border bg-status-danger-surface text-status-danger-text",
   },
 };
@@ -2119,8 +2157,8 @@ function VersionChip({ version }: { version: TaskVersion }) {
 /**
  * versionState 是版本胶囊与抽屉里的那一颗：状态词 + 三件套 token。
  *
- * 只换边框色的话，下载中与加工中长得一模一样；而版本级不说「需人工」——
- * 任务才需人工，这条版本只是失败了。
+ * 只换边框色的话，下载中与加工中长得一模一样；而两级同名：任务的版本全失败叫
+ * 「失败」，这一条版本失败也叫「失败」，尺度由位置（状态列 / 版本列）区分。
  */
 function versionState(status: TaskState): { label: string; className: string } {
   const look = TASK_STATE_LOOK[isTaskState(status) ? status : "downloading"];

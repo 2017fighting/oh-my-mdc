@@ -140,8 +140,8 @@ _Avoid_: 重试队列、死信、积压、失败任务
 _Avoid_: 进度、phase
 
 **任务状态** (Task state)：
-同一组状态名，但由版本聚合而来：任一版本在加工 → processing；任一在下载 → downloading；有版本入库 → finished；全部失败 → failed。
-_Avoid_: 整体进度
+同一组状态名，但由版本聚合而来：任一版本在加工 → processing；任一在下载 → downloading；有版本入库 → finished；全部失败 → failed。中文名与版本级同名：一条版本失败叫「失败」，一部作品的版本全失败也叫「失败」，尺度由位置区分，不另起一个词。
+_Avoid_: 整体进度、需人工（那是待办区的名字，不是状态）
 
 **对账** (Reconcile)：
 定时扫 qBittorrent 里带本项目 tag 的种子，补 webhook 漏掉的通知。
