@@ -9,7 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
-import { groupByNumber, groupStuck, type FailureGroup, type StuckGroup } from "~/lib/attention";
+import { groupByNumber, groupStuck, oldestCreatedAt, type FailureGroup, type StuckGroup } from "~/lib/attention";
 import {
   formatAbsolute,
   formatAge,
@@ -713,6 +713,8 @@ function NeedsAttention({
   const stalledGroups = groupByNumber(stalled);
   // 驻留副作用按病因收行：三条通知卡在同一个坏 token 上是一件事，不是三件。
   const stuckGroups = groupStuck(stuck);
+  // 组的年龄：入箱时间最早的那一条。迁移前的老行没有 created_at，那就是 null（不说年龄）。
+  const stuckAge = oldestCreatedAt(stuck);
   // 回执住在卡片上而不是行里：行会在按下成功之后消失，回执却是那一刻唯一的证据。
   const { receipts, push: receiptOf, dismiss: dismissReceipt, listRef: receiptsRef } = receiptsState;
   // 被上限切过的那一半只数得到 50，所以数字后面跟一个 +，不把截断说成总量。
@@ -1013,10 +1015,14 @@ function NeedsAttention({
                 <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
                   <AttentionHeading
                     label="驻留副作用"
+                    // 年龄优先：这一组里没有可当场按的按钮，「我躲了它多久」比「几条几种原因」
+                    // 更该占这一行；没有年龄（迁移前的老行）才退回说组成。
                     detail={
-                      stuck.length > stuckGroups.length
-                        ? `${stuck.length} 条，${stuckGroups.length} 种原因`
-                        : undefined
+                      stuckAge !== null
+                        ? `最早 ${formatAge(stuckAge, now)}`
+                        : stuck.length > stuckGroups.length
+                          ? `${stuck.length} 条，${stuckGroups.length} 种原因`
+                          : undefined
                     }
                   />
                   <div className="divide-y">
@@ -1024,6 +1030,7 @@ function NeedsAttention({
                       <StuckRow
                         key={group.cause}
                         group={group}
+                        now={now}
                         notices={group.effects
                           .map((effect) => sideEffect.errors[effect.id])
                           .filter((text): text is string => Boolean(text))}
@@ -1390,11 +1397,13 @@ function CollapsibleRemedy({ hint }: { hint: string }) {
  */
 function StuckRow({
   group,
+  now,
   notices,
   busy,
   onRetry,
 }: {
   group: StuckGroup;
+  now: number;
   /** 组内逐条重发失败的原因：一次只可能一条，但类型上给全。 */
   notices: string[];
   busy: boolean;
@@ -1405,6 +1414,7 @@ function StuckRow({
   const remedy = remedyForSideEffect(first);
   // 组内各条的尝试次数不一定一样：说最大的那个，不说平均值——这里要的是「试到哪一步了」。
   const attempts = Math.max(...group.effects.map((effect) => effect.attempts));
+  const groupAge = oldestCreatedAt(group.effects);
   const titles = group.effects.map(sideEffectTitle);
   const roster = titles.slice(0, 4).join("、") + (titles.length > 4 ? ` 等 ${titles.length} 条` : "");
   return (
@@ -1425,6 +1435,9 @@ function StuckRow({
           ) : null}
           <span className="text-xs font-normal tabular-nums text-muted-foreground">
             {attempts > 0 ? `已试 ${attempts} 次` : "还没试过"}
+            {groupAge !== null ? (
+              <span title={formatAbsolute(groupAge)}> · {formatAge(groupAge, now)}</span>
+            ) : null}
           </span>
         </div>
         {many ? (

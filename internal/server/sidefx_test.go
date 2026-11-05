@@ -81,6 +81,26 @@ func sideEffectsIn(t *testing.T, rec map[string]any) []map[string]any {
 	return out
 }
 
+// TestSideEffectCreatedAtIsNullForLegacyRows 钉住「不知道就说不知道」：
+// 迁移前入箱的行没有 created_at，面板拿到 null 就不说年龄，
+// 而不是拿迁移时刻或零值冒充一个「刚刚」。
+func TestSideEffectCreatedAtIsNullForLegacyRows(t *testing.T) {
+	f := newSidefxFixture(t)
+	id := f.enqueue(t, sidefx.KindNotify, "filed:legacy1", map[string]any{"number": "ABP-123"})
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`UPDATE side_effect SET created_at = NULL WHERE id = $1`, id); err != nil {
+		t.Fatalf("把 created_at 改回老行的样子: %v", err)
+	}
+
+	rows := sideEffectsIn(t, jsonOf(t, send(t, f.handler, http.MethodGet, "/api/side-effects", "")))
+	if len(rows) != 1 {
+		t.Fatalf("side_effects = %+v, want 一条", rows)
+	}
+	if rows[0]["created_at"] != nil {
+		t.Errorf("created_at = %v, want null（老行没有入箱时间）", rows[0]["created_at"])
+	}
+}
+
 // TestSideEffectsListSplitsPendingAndStuck 钉住两个筛选项的语义（规格 §4.2/§8.4）：
 // stuck = 驻留（需人工），pending = 排队中，不传 state = 全部未完成。
 func TestSideEffectsListSplitsPendingAndStuck(t *testing.T) {
@@ -102,6 +122,10 @@ func TestSideEffectsListSplitsPendingAndStuck(t *testing.T) {
 	}
 	if stuck[0]["last_error"] != "永久错" {
 		t.Errorf("last_error = %v, want 永久错", stuck[0]["last_error"])
+	}
+	// 入箱时间必须跟着出来：面板拿它说「最早 N 天前」。
+	if created, _ := stuck[0]["created_at"].(string); created == "" {
+		t.Errorf("created_at = %v, want 入箱时间", stuck[0]["created_at"])
 	}
 	payload, _ := stuck[0]["payload"].(map[string]any)
 	if payload["number"] != "ABP-123" || payload["list_id"] != "wanted" {

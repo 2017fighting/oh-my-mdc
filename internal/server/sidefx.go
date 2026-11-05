@@ -29,6 +29,9 @@ type sideEffectBody struct {
 	LastError     string         `json:"last_error,omitempty"`
 	NextAttemptAt *time.Time     `json:"next_attempt_at"`
 	Stuck         bool           `json:"stuck"`
+	// CreatedAt 是入箱时间，面板拿它说「最早 N 天前」。
+	// 迁移前的老行没有值：null 就是不知道，面板不编一个年龄。
+	CreatedAt *time.Time `json:"created_at"`
 }
 
 // sideEffectsBody 是 GET /api/side-effects 的回执。
@@ -129,5 +132,6 @@ func toSideEffectBody(job sidefx.Job) sideEffectBody {
 		LastError:     job.LastError,
 		NextAttemptAt: job.NextAttemptAt,
 		Stuck:         job.Stuck(),
+		CreatedAt:     job.CreatedAt,
 	}
 }

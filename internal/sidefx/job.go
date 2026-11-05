@@ -44,6 +44,9 @@ type Job struct {
 	// NextAttemptAt 为 nil 就是驻留：需人工（规格 §4.2）。
 	NextAttemptAt *time.Time
 	DoneAt        *time.Time
+	// CreatedAt 是入箱时间（#面板「驻留副作用」的年龄）。2026-11 之前的行没有这一列，
+	// 读出来是 nil：不知道就不说，不拿迁移时刻冒充。
+	CreatedAt *time.Time
 }
 
 // Stuck 报告这条待办是否驻留（需人工）。
@@ -82,7 +85,7 @@ func insertJob(ctx context.Context, exec execer, kind Kind, targetKey string, pa
 }
 
 // jobColumns 是 List/Due/Get 共用的列序（与 scanJob 一一对应）。
-const jobColumns = `id, kind, target_key, payload, attempts, last_error, next_attempt_at, done_at`
+const jobColumns = `id, kind, target_key, payload, attempts, last_error, next_attempt_at, done_at, created_at`
 
 // orderUnfinished 让驻留排在前面（面板先看到要动手的事），其余按下次尝试时间。
 const orderUnfinished = `ORDER BY (next_attempt_at IS NOT NULL), next_attempt_at, id`
@@ -308,20 +311,22 @@ type scanner interface {
 // scanJob 扫一行 side_effect；可空时间列用 pgtype 接，再翻成 *time.Time。
 func scanJob(row scanner) (Job, error) {
 	var (
-		job     Job
-		kind    string
-		payload []byte
-		nextAt  pgtype.Timestamptz
-		doneAt  pgtype.Timestamptz
+		job       Job
+		kind      string
+		payload   []byte
+		nextAt    pgtype.Timestamptz
+		doneAt    pgtype.Timestamptz
+		createdAt pgtype.Timestamptz
 	)
 	if err := row.Scan(&job.ID, &kind, &job.TargetKey, &payload,
-		&job.Attempts, &job.LastError, &nextAt, &doneAt); err != nil {
+		&job.Attempts, &job.LastError, &nextAt, &doneAt, &createdAt); err != nil {
 		return Job{}, err
 	}
 	job.Kind = Kind(strings.TrimSpace(kind))
 	job.Payload = payload
 	job.NextAttemptAt = timeOf(nextAt)
 	job.DoneAt = timeOf(doneAt)
+	job.CreatedAt = timeOf(createdAt)
 	return job, nil
 }
 

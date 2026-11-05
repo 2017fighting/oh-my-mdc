@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { attentionRowCount, groupByNumber, groupStuck } from "./attention.ts";
+import { attentionRowCount, groupByNumber, groupStuck, oldestCreatedAt } from "./attention.ts";
 import type { Attention, AttentionItem, SideEffect } from "./api";
 
 function item(movieID: string, number: string, infohash: string): AttentionItem {
@@ -55,7 +55,12 @@ test("保持首次出现的顺序", () => {
   );
 });
 
-function stuck(id: number, kind: "notify" | "list_removal", lastError: string): SideEffect {
+function stuck(
+  id: number,
+  kind: "notify" | "list_removal",
+  lastError: string,
+  createdAt: string | null = "2026-11-01T09:00:00Z",
+): SideEffect {
   return {
     id,
     kind,
@@ -65,6 +70,7 @@ function stuck(id: number, kind: "notify" | "list_removal", lastError: string): 
     last_error: lastError,
     next_attempt_at: null,
     stuck: true,
+    created_at: createdAt,
   };
 }
 
@@ -113,4 +119,28 @@ test("「需要人工」的行数按病因数：三条同因通知算一件事",
     ]),
     2,
   );
+});
+
+test("组的年龄取最早入箱的那一条", () => {
+  const at = oldestCreatedAt([
+    stuck(1, "notify", TELEGRAM_401, "2026-11-04T09:00:00Z"),
+    stuck(2, "notify", TELEGRAM_401, "2026-10-24T09:11:00Z"),
+    stuck(3, "notify", TELEGRAM_401, "2026-11-02T09:00:00Z"),
+  ]);
+  assert.equal(at, Date.parse("2026-10-24T09:11:00Z"));
+});
+
+test("老行没有 created_at 就不算年龄，也不当成 1970", () => {
+  assert.equal(oldestCreatedAt([stuck(1, "notify", TELEGRAM_401, null)]), null);
+  assert.equal(
+    oldestCreatedAt([
+      stuck(1, "notify", TELEGRAM_401, null),
+      stuck(2, "notify", TELEGRAM_401, "2026-11-02T09:00:00Z"),
+    ]),
+    Date.parse("2026-11-02T09:00:00Z"),
+  );
+});
+
+test("认不出的入箱时间不算年龄，坏值不拖垮整组", () => {
+  assert.equal(oldestCreatedAt([stuck(1, "notify", TELEGRAM_401, "not-a-date")]), null);
 });

@@ -52,6 +52,23 @@ export function groupStuck(effects: SideEffect[]): StuckGroup[] {
 }
 
 /**
+ * oldestCreatedAt 是一组待办里最早的入箱时间（毫秒）；都没有就 null。
+ *
+ * 驻留的组要说「最早 N 天前」：这个锚点是入箱那一刻，不是最后一次尝试（那一个没落库）。
+ * 迁移前入箱的老行没有 created_at，这里是 null，面板就不说年龄——不拿迁移时刻冒充。
+ */
+export function oldestCreatedAt(effects: SideEffect[]): number | null {
+  let oldest: number | null = null;
+  for (const effect of effects) {
+    if (!effect.created_at) continue;
+    const at = Date.parse(effect.created_at);
+    if (Number.isNaN(at)) continue;
+    if (oldest === null || at < oldest) oldest = at;
+  }
+  return oldest;
+}
+
+/**
  * attentionRowCount 是「需要人工」卡片里会显示几行。
  *
  * 行 = 一个要动手的对象：一个番号的失败版本、一个番号的停滞下载，或一条病因下的

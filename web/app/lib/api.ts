@@ -225,6 +225,11 @@ export type SideEffect = {
   next_attempt_at: string | null;
   /** 驻留＝需人工（done_at IS NULL 且 next_attempt_at 为 NULL）。 */
   stuck: boolean;
+  /**
+   * 入箱时间：面板拿它说「最早 N 天前」。
+   * 迁移前入箱的老行是 null，比本项目旧的部署根本不发这个键——两种都是「不知道」，都不说年龄。
+   */
+  created_at?: string | null;
 };
 
 export type SideEffectList = {
