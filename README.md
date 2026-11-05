@@ -18,11 +18,21 @@ make dev
 
 零配置：数据库 DSN 与监听地址都有默认值。
 
+想让面板跑**真实形状的数据**（而不是空库 + 向导），把生产快照灌进本地库：
+
+```bash
+make dev-from-cluster   # 拉 home-ops 的 oh-my-mdc 库 → 断网 + 暂停
+make dev
+```
+
+它会把四个出站地址指向黑洞 `127.0.0.1:9`、凭据换成占位串、`app_config.paused=true`：面板读的是库里的真实状态，但任何「重试 / 测试连接」都只会失败在本地，绝不触达生产上游。
+
 ## 常用命令
 
 | 命令 | 作用 |
 |---|---|
 | `make dev` | 起完整本地栈（Postgres + 服务） |
+| `make dev-from-cluster` | 拉生产快照进本地库（断网 + 暂停，安全只读） |
 | `make test-local` | 起 Postgres 并跑全量测试（含迁移与 HTTP 面的集成测试，`-race`） |
 | `make test` | 只跑测试，数据库由 `MDC_TEST_DATABASE_URL` 提供，没设则跳过集成测试 |
 | `make check-local` | 本地全门：gofmt / vet / 前端 lint+typecheck / 测试 |

@@ -38,9 +38,16 @@ help: ## 列出所有 target
 # ---------------------------------------------------------------- 开发
 
 .PHONY: dev
+# 本地开发：默认零配置（空库 + 向导）；想用真实形状的数据先跑 dev-from-cluster。
 dev: db-up web-build ## 起完整本地栈（compose Postgres + 服务），零配置
 	@echo "→ 打开 http://localhost:8080/"
 	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/oh-my-mdc
+
+.PHONY: db-up
+# 把生产快照灌进本地库：面板跑真实条目，同时断网 + 暂停（不触达上游）。
+.PHONY: dev-from-cluster
+dev-from-cluster: db-up ## 拉 home-ops 生产快照进本地库（断网 + 暂停，安全只读）
+	./scripts/dev-from-cluster.sh
 
 .PHONY: db-up
 db-up: ## 起 Postgres 并等到 healthy
