@@ -2,6 +2,7 @@ package reconcile_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -650,6 +651,57 @@ func TestReconcileAlertsStallOnce(t *testing.T) {
 	}
 	if keys := notifyKeys(t, f, sidefx.EventDownloadStalled); len(keys) != 1 {
 		t.Errorf("重启后停滞通知待办 = %v, want 1 条（不重发）", keys)
+	}
+}
+
+// TestReconcileRealertsStallAfterAReadd 钉住分集语义：重新加种重置这一轮停滞，
+// 再停滞就再告警——否则重新加种没治好的版本对值班台永远隐身。
+func TestReconcileRealertsStallAfterAReadd(t *testing.T) {
+	f := newFixture(t)
+	f.seedAddedVersion(t, movieID, number, hashOne)
+	f.downloading(hashOne, 0.4)
+
+	// 第一轮记起点，61 分钟后判停滞 → 一条告警。
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(1): %v", err)
+	}
+	f.now = f.now.Add(61 * time.Minute)
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(2): %v", err)
+	}
+	if alerts := stallAlerts(t, f); len(alerts) != 1 {
+		t.Fatalf("停滞告警 = %d, want 1", len(alerts))
+	}
+
+	// 人工重试重新加种：与 retry.Runner 同款落库（detail.action 是机器可读的结局）。
+	detail, err := json.Marshal(map[string]any{"action": task.RetryActionReadded})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if err := f.store.AppendEvent(context.Background(), task.Event{
+		MovieID: movieID, Infohash: hashOne, Kind: task.EventManualRetry,
+		FromState: string(task.StatusDownloading), ToState: string(task.StatusDownloading),
+		Reason: "重新加种（新加种），等下一轮对账确认", Detail: detail,
+	}); err != nil {
+		t.Fatalf("AppendEvent(重新加种): %v", err)
+	}
+
+	// 同一段没动过的进度再判停滞：重新加种重置了这一轮，第二条告警该发出来。
+	f.now = f.now.Add(5 * time.Minute)
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce(重新加种后再停滞): %v", err)
+	}
+	if result.Stalled != 1 {
+		t.Errorf("result = %+v, want 1 条新告警（重新加种重臂了停滞）", result)
+	}
+	if alerts := stallAlerts(t, f); len(alerts) != 2 {
+		t.Errorf("停滞告警 = %d, want 2（按集计数，不终身只告一次）", len(alerts))
+	}
+	// 通知待办仍是一条：同一目标只排一条（规格 §4.2），待办还挂着时不重复入箱。
+	// 生产上第一条早已发完退场，新一轮停滞会重新入箱。
+	if keys := notifyKeys(t, f, sidefx.EventDownloadStalled); len(keys) != 1 {
+		t.Errorf("停滞通知待办 = %v, want 一条（同目标去重）", keys)
 	}
 }
 

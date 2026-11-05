@@ -174,18 +174,26 @@ func (s *Store) ResetProcessing(ctx context.Context) ([]ResetVersion, error) {
 	return reset, nil
 }
 
-// HasAlert 报告这条版本是否已经记过某类告警（按 reason 前缀区分）。
+// HasAlert 报告这条版本**当前这一轮停滞**是否已经告过警（按 reason 前缀区分）。
 //
-// 「告警只发一次」的判据在 task_event（GLOSSARY「任务事件」/规格 §5.6），
-// 不靠进程内记忆：重启后同一条版本不该再告警一次。
+// 「一轮」的边界是重新加种：最近一条 manual_retry(action=readded) 之后的告警才算这轮的。
+// 判据在 task_event（GLOSSARY「任务事件」/规格 §5.6），不靠进程内记忆：重启后依然成立。
+// 以前是终身只告一次，于是重新加种之后再次停滞的版本永远隐身——面板不报、通知不发，
+// 值班台对它失明。改成按集（episode）计数：重新加种重置这一轮，再停滞就再告警，
+// 需人工区那条事件序排除（Attention.stalledItems）才对得上同一个真相。
 func (s *Store) HasAlert(ctx context.Context, infohash, reasonPrefix string) (bool, error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS (
 		     SELECT 1 FROM task_event
 		     WHERE infohash = $1 AND kind = 'alert' AND reason LIKE $2 ESCAPE '\'
+		       AND id > COALESCE((
+		           SELECT max(id) FROM task_event
+		           WHERE infohash = $1 AND kind = 'manual_retry'
+		             AND detail->>'action' = $3
+		       ), 0)
 		 )`,
-		infohash, escapeLike(reasonPrefix)+"%",
+		infohash, escapeLike(reasonPrefix)+"%", RetryActionReadded,
 	).Scan(&exists); err != nil {
 		return false, fmt.Errorf("task: 查版本 %s 的告警记录: %w", infohash, err)
 	}

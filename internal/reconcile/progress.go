@@ -9,7 +9,8 @@ import (
 //
 // 为什么历史在内存里：它只回答「从什么时候起没动过」，重启后重新观察一轮就够
 // （downloading 的版本重启后本来就要按 qbt 的真实进度重判）。
-// 而「一次停滞只告警一次」不在这里判：那条判据查 task_event（HasAlert），重启后依然成立。
+// 而「一轮停滞只告警一次」不在这里判：那条判据查 task_event（HasAlert，按重新加种分集），
+// 重启后依然成立。
 type progressTracker struct {
 	mu      sync.Mutex
 	entries map[string]progressEntry

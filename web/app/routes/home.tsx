@@ -306,7 +306,7 @@ export default function Home() {
             {gatewayExpired
               ? `网关拦下了这次请求：${loadErrorText}。登录后再刷新本页。`
               : gatewayBad
-                ? `网关或上游暂时没回话：${loadErrorText}。屏幕上还是上一次的数据，稍等一下再重试。`
+                ? `网关或上游暂时没回话：${loadErrorText}。屏幕上还是上一次的数据。稍等片刻，然后刷新页面。`
                 : `${route.view === "panel" ? "刷新没成功" : "读不到设置"}：${loadErrorText}`}
             <span className="mt-1 flex flex-wrap items-center gap-2">
               {gatewayExpired || gatewayBad ? (

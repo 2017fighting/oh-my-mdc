@@ -359,7 +359,7 @@ func TestAttentionDropsAStaleStallAlertAfterAReadd(t *testing.T) {
 	// 人工重试重新加种：这条版本从头下载，旧告警不再算数。
 	if err := store.AppendEvent(ctx, task.Event{
 		MovieID: "YwrO3B", Infohash: hash, Kind: task.EventManualRetry,
-		FromState: "failed", ToState: "downloading", Reason: "重新加种（added），版本回下载中",
+		FromState: "failed", ToState: "downloading", Reason: "重新加种（新加种），等下一轮对账确认",
 		Detail: mustJSON(t, map[string]any{"action": task.RetryActionReadded}),
 	}); err != nil {
 		t.Fatalf("AppendEvent(人工重试): %v", err)

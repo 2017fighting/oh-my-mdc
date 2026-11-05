@@ -338,10 +338,12 @@ func (r *Runner) readd(ctx context.Context, version task.Version, force bool) (O
 	}
 	outcome.Action = ActionReadded
 	outcome.ToState = task.StatusDownloading
-	outcome.Reason = fmt.Sprintf("重新加种（%s），版本回下载中", ensureLabel(ensured))
+	// 不说「版本回下载中」：种子刚交给 qBittorrent，要等下一轮对账确认才算数。
+	// 回执与抽屉时间线同一句话，屏幕上不预支下一秒兑现不了的结果。
+	outcome.Reason = fmt.Sprintf("重新加种（%s），等下一轮对账确认", ensureLabel(ensured))
 	if delivery.Refetched {
 		// 时间线上要说清「备份曾经没了、这次是重取回来的」：那是一次真实的 M-Team 调用。
-		outcome.Reason = fmt.Sprintf("私种备份已回 M-Team 重取；重新加种（%s），版本回下载中", ensureLabel(ensured))
+		outcome.Reason = "私种备份已回 M-Team 重取；重新加种，等下一轮对账确认"
 	}
 
 	updated, err := r.store.MarkRetryDownloading(ctx, version.Infohash, r.owner, force)

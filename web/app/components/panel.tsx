@@ -294,7 +294,12 @@ export function Panel({
                             {task.number}
                           </button>
                         </div>
-                        <div className="truncate font-mono text-xs text-muted-foreground">{task.movie_id}</div>
+                        <div
+                          className="truncate font-mono text-xs text-muted-foreground"
+                          title={task.movie_id}
+                        >
+                          {task.movie_id}
+                        </div>
                       </td>
                       <td className="px-4 py-2.5 align-top">
                         <StateBadge state={task.state} />
@@ -470,8 +475,16 @@ function NeedsAttention({
   // 阶段徽章换成「重新加种中」，并补一句等谁确认。中间态按当前停滞名单在渲染期
   // 过滤：行离开停滞名单的那一刻它自然退场，不需要另一次 effect 去打扫。
   const [reseeding, setReseeding] = React.useState<Record<string, number>>({});
-  const reseededAtOf = (movieID: string) =>
-    stalledGroups.some((group) => group.movieID === movieID) ? reseeding[movieID] : undefined;
+  // 时序门：组里最新一条停滞的开始晚于这次重新加种 = 旧动作解释不了新停滞，
+  // 中间态退场、徽章回「下载停滞」。停滞名单的成员资格是事件序口径
+  // （task.stalledItems 的排除条件 + HasAlert 按集重臂），这里只防
+  // 「行还在名单里但病因已经换了」的渲染期错觉。
+  const reseededAtOf = (group: FailureGroup) => {
+    const at = reseeding[group.movieID];
+    if (at === undefined) return undefined;
+    const latestStallAt = Math.max(...group.items.map((item) => Date.parse(item.at)));
+    return at >= latestStallAt ? at : undefined;
+  };
 
   const renderFailedGroup = (group: FailureGroup, collapseHint = false) => (
     <VersionGroup
@@ -551,9 +564,12 @@ function NeedsAttention({
               {stalledGroups.length > 0 ? (
                 <section aria-label="停滞的下载" className="py-3 first:pt-0 last:pb-0">
                   <AttentionHeading label="停滞" />
-                  {/* 停滞的补法是一句常量（先在 qBittorrent 里确认…），整节说一次就够了。 */}
+                  {/* 停滞的补法按这一轮的状态给：能修的组都已重新加种时，
+                      「先去 qBittorrent 确认」是过去时，改说等什么。 */}
                   <p className="mb-2 dense leading-relaxed text-foreground">
-                    {remedyForStalled().hint}
+                    {stalledGroups.every((group) => reseededAtOf(group) !== undefined)
+                      ? "重新加种已经下发；qBittorrent 里确认还在下就不必动，等下一轮对账确认。"
+                      : remedyForStalled().hint}
                   </p>
                   <div className="divide-y">
                     {stalledGroups.map((group) => (
@@ -562,7 +578,7 @@ function NeedsAttention({
                         group={group}
                         kind="stalled"
                         hints={false}
-                        reseededAt={reseededAtOf(group.movieID)}
+                        reseededAt={reseededAtOf(group)}
                         now={now}
                         busy={taskRetry.busy.has(taskRetryKey(group.movieID, false))}
                         onRetry={async (infohashes) => {
@@ -707,13 +723,11 @@ function ReceiptList({
             <span className="font-medium tabular-nums">{receipt.title}</span>
             {/* 两个版本以上时一行会变成日志：逐版结论各占一行，
                 番号仍在第一行开头，回执是一段话不是一串分号。 */}
-            {receipt
-              .text.split("；")
-              .map((part, index) => (
-                <span key={index} className={index > 0 ? "block pl-2" : undefined}>
-                  {index === 0 ? ` · ${part}` : part}
-                </span>
-              ))}
+            {(receipt.parts ?? receipt.text.split("；")).map((part, index) => (
+              <span key={index} className={index > 0 ? "block pl-2" : undefined}>
+                {index === 0 ? ` · ${part}` : part}
+              </span>
+            ))}
             <span className="ml-1.5 tabular-nums text-muted-foreground">
               {formatWhen(receipt.at, now)}
             </span>
@@ -993,8 +1007,9 @@ function versionNames(group: FailureGroup): Record<string, string> {
   );
 }
 
-/** RetryNotice 是一次任务重试的结果提示：成功用 ok，被拒/失败用 warn。 */
-type RetryNotice = { tone: "ok" | "warn"; text: string };
+/** RetryNotice 是一次任务重试的结果提示：成功用 ok，被拒/失败用 warn。
+ *  parts 是逐版结论：回执按它换行，text 是同一句话的单行串（播报与抽屉用）。 */
+type RetryNotice = { tone: "ok" | "warn"; text: string; parts?: string[] };
 
 /** RetryPlan 是一次重试的作用域：叫什么名字、只动哪几条、它们各自叫什么。 */
 type RetryPlan = {
@@ -1089,10 +1104,20 @@ function useTaskRetry(
         }
         return notice;
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        const message = cause instanceof Error ? cause.message : String(cause);
+        // 错误条补主语：成功回执有名有姓，失败时刻更该落在具体对象上。
+        // 抽屉里番号已在标题，不再重复。
+        setError(plan?.title ? `${plan.title} · ${message}` : message);
         return null;
       } finally {
         release();
+        // 失败路径也要接回：行不消失的重试在请求失败时同样把焦点丢回 body。
+        // 但忙位一放、React 要到下一帧才提交重启用——提交前 focus() 落在
+        // disabled 按钮上是空操作，所以等一帧（afterPaint 带超时兑底，后台不挂）。
+        await afterPaint();
+        if (origin?.isConnected && document.activeElement === document.body) {
+          origin.focus();
+        }
       }
     },
     [onRefresh, onReceipt, focusFallback],
@@ -1154,16 +1179,14 @@ function summarizeRetry(
 
   const blocked = results.filter((result) => result.action === "skipped" || result.action === "failed");
   if (blocked.length > 0) {
-    return {
-      tone: "warn",
-      text: blocked.map((result) => labelResult(result, prefixOf(result))).join("；"),
-    };
+    const parts = blocked.map((result) => labelResult(result, prefixOf(result)));
+    return { tone: "warn", text: parts.join("；"), parts };
   }
 
   // 不再前缀「已下发：」：回执与抽屉的提示都自己带结局语气词，
   // 正文只说发生了什么（「回到加工开头」），一句话只有一个说话人。
-  const done = results.map((result) => labelResult(result, prefixOf(result)));
-  return { tone: "ok", text: done.join("；") };
+  const parts = results.map((result) => labelResult(result, prefixOf(result)));
+  return { tone: "ok", text: parts.join("；"), parts };
 }
 
 /** labelResult 拼一条版本结局：有名字就前缀上去，没有就不前缀。 */
@@ -1247,6 +1270,11 @@ function useSideEffectRetry(
         }));
       } finally {
         setBusy(null);
+        // 失败路径与成功路径同一套接回；同样等一帧，提交前 focus 是空操作。
+        await afterPaint();
+        if (origin?.isConnected && document.activeElement === document.body) {
+          origin.focus();
+        }
       }
     },
     [busy, onRefresh, onReceipt, focusFallback],
@@ -1439,6 +1467,11 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
                 type="button"
                 aria-pressed={current}
                 onClick={() => onQuery({ page: 1, q: query.q, state: filter.value })}
+                onFocus={(event) => {
+                  // 键盘走到被裁掉的那颗时把它带进视口：Chromium 不会为
+                  // 横向溢出容器自动横滚焦点项。
+                  event.currentTarget.scrollIntoView({ inline: "nearest", block: "nearest" });
+                }}
                 // 「需人工」筛的是**任务级**状态：全部版本都失败的作品。失败版本本身属于
                 // 上面那张卡，两者口径不同，所以这里把它们说出来。
                 title={
@@ -1488,7 +1521,7 @@ function EmptyTasks({
         <p className="mt-1 text-xs leading-relaxed">
           {failedVersions > 0
             ? `上面「需要人工」里有 ${failedVersions} 条失败版本：它们所属的作品还有别的版本已入库或在跑，所以任务状态不算失败。`
-            : "失败版本都挂在上面「需要人工」里；这里只算整个任务都失败的作品。"}
+            : "失败版本都挂在上面「需要人工」里。"}
         </p>
         <Button
           variant="outline"

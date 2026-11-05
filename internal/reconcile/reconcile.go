@@ -573,8 +573,9 @@ func (r *Runner) fail(ctx context.Context, version task.Version, reason string) 
 
 // alertStall 发一次「下载停滞」告警：task_event + Telegram 待办（规格 §5.6）。
 //
-// 「只发一次」的判据在 task_event（GLOSSARY「任务事件」）：重启后同一条版本不会再发。
-// 返回本次是否真的发了（已发过 → false，调用方不要把这一轮算成停滞）。
+// 「一轮只发一次」的判据在 task_event（GLOSSARY「任务事件」）：重启后同一条版本不会再发；
+// 重新加种重置这一轮（HasAlert），再停滞就再告警。返回本次是否真的发了
+// （本轮已发过 → false，调用方不要把这一轮算成停滞）。
 func (r *Runner) alertStall(ctx context.Context, version task.Version, progress float64, elapsed time.Duration) (bool, error) {
 	alerted, err := r.store.HasAlert(ctx, version.Infohash, task.StallReasonPrefix)
 	if err != nil {
