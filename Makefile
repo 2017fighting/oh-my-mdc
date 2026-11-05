@@ -88,6 +88,15 @@ web-test: web-install ## 前端单测（node --test，纯逻辑不跑浏览器�
 web-build: web-install ## vite build → internal/web/dist（embed 的输入）
 	cd $(WEB_DIR) && $(PNPM) build
 
+# 对比度探针要一个无头浏览器，所以只做本地 target：改颜色 / token 之后跑一次
+# （DESIGN · Contrast）。不进 CI——那要为一个数字给它装一个浏览器。
+# 本机没有 chrome 时用 CHROME=/path/to/chrome make contrast。
+CHROME ?=
+
+.PHONY: contrast
+contrast: ## 对比度探针（读 app.css 的 token，用 Chromium 采色；不达标 exit 2）
+	cd $(WEB_DIR) && CHROME=$(CHROME) node scripts/contrast-probe.mjs
+
 # ---------------------------------------------------------------- 镜像
 
 .PHONY: docker-build

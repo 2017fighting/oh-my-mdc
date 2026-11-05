@@ -167,6 +167,16 @@ components:
 
 **The Three-Part State Rule.** 每个状态是三件套：`-surface` 底、`-text` 字、`-border` 边。禁止只换文字颜色，或者拿 Tailwind 调色板直取。
 
+### Contrast
+
+**阈值**：文本 ≥ 4.5:1；焦点环与其它非文本指示 ≥ 3:1。禁用态按 WCAG 豁免，不为它抬色——禁用态的目标是「看得出不能用」，不是「读得清」。边框、发丝线、表面色是装饰性分层，不设阈值：状态靠字，颜色从不单独说话（The Signal-Only Color Rule）。
+
+**实测**（2026-11，`make contrast`）：muted-foreground 在表头 `bg-muted/40` 上 5.81:1、回执带 `bg-muted/50` 5.76、卡片白 6.01、页面底 `bg-muted/30` 5.86、实心 `bg-muted` 5.51；焦点环 4.88:1；四个状态「字 / 底」5.87–8.73:1。状态「边 / 底」只有 1.20–1.33:1——徽章的底与边几乎不承载对比度，可辨性全在字上，这是有意的，也是 Three-Part State Rule 真正落地的方式。
+
+**怎么跑**：`make contrast`（`web/scripts/contrast-probe.mjs`）。颜色从 `web/app/app.css` 读，像素由 Chromium 的 canvas 采，合成顺序照 CSS 的 alpha 规则（`bg-muted/40` 就是 40% 灰叠在卡白上）——仓库里不存第二份色值，也不手写颜色数学。状态色按 `--status-<名>-text × --status-<名>-surface` 自动配对，将来加第五个状态不会静默逃测；装饰性配对只打印。不达标 exit 2。不进 CI：那要为一个数字给它装一个浏览器，`make contrast` 是「改颜色之后手跑一次」的门。
+
+**改哪里**：先改 token，再谈组件。同一个灰被用在不同底色上时，单点修补只会让两边的灰越长越像。
+
 ## Typography
 
 **Display Font:** Geist Variable（回落到 PingFang SC / Microsoft YaHei / Noto Sans SC / system-ui）
