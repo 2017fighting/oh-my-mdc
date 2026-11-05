@@ -39,6 +39,8 @@ type testBody struct {
 	Code       settings.TestCode `json:"code,omitempty"`
 	Detail     string            `json:"detail,omitempty"`
 	DurationMS int64             `json:"duration_ms"`
+	// javdb 的测试实际读到的登记清单 id（没读清单缺省）：前端用它给绿胶囊标深度。
+	ListID string `json:"list_id,omitempty"`
 }
 
 // configAll 返回全部八节 + initialized（未初始化时整站只剩向导）。
@@ -149,6 +151,7 @@ func (s *server) testSection(w http.ResponseWriter, r *http.Request) {
 		Code:       result.Code,
 		Detail:     result.Detail,
 		DurationMS: result.Duration.Milliseconds(),
+		ListID:     result.ListID,
 	})
 }
 

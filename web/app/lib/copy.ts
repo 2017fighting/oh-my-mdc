@@ -64,7 +64,7 @@ export const CONFUSABLES: GlossaryEntry[] = [
 export const WIZARD_CONFUSABLES: GlossaryEntry[] = [
   {
     term: "主线三件套",
-    note: "JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写（媒体库目录在这台机器上可见）。齐了才算「已初始化」，三条循环才开始跑；可选的 M-Team / AI 翻译 / Telegram 缺席只降级对应能力。",
+    note: "门禁六判据：JavDB token 已保存、清单登记、清单验读（清单步点一次「测试读取」）、qBittorrent 可连、Jellyfin 可写、媒体库目录在这台机器上可见。齐了才算「已初始化」，三条循环才开始跑；可选的 M-Team / AI 翻译 / Telegram 缺席只降级对应能力。",
   },
   {
     term: "清单 id 与名字",
@@ -72,7 +72,7 @@ export const WIZARD_CONFUSABLES: GlossaryEntry[] = [
   },
   {
     term: "测试连接测的是什么",
-    note: "测的是已经保存的配置，所以「测试」会先保存本步再连上游。屏幕上有未保存的修改时，它不会替你测那些改动。结论里的人话是第一层，服务端原话在下面一行，机器码与绝对时间在悬停的 title 里。",
+    note: "测的是已经保存的配置，所以「测试」会先保存本步再连上游。屏幕上有未保存的修改时，结论会收回成「还没测试」。javdb 的绿会说深度：「含清单验读」是连登记清单一起读到过，「只验了 token」是没验清单——清单步要看到前一个，门禁的「清单验读」才算齐。",
   },
   {
     term: "「未保存」",

@@ -99,7 +99,8 @@ const steps: StepSpec[] = [
     section: "list_registry",
     title: "清单登记",
     help: "按 id 认清单，名字只是快照：清单改名不影响轮询。「测试读取」会先保存本步，再连 JavDB 读这张清单——凭据与清单是一起验证的。",
-    // 清单不是集成表（没有 last_test_*），它的「测试读取」走 JavDB 那一节：
+    // 清单不是集成表：没有自己的测试账本，验读记账在 javdb.last_test_list_id
+    // （门禁第六判据「清单验读」的凭据）。它的「测试读取」走 JavDB 那一节：
     // 真实的测试内容就是「用户域读 + 登记清单读」（规格 §8.4）。
     test: { label: "测试读取", section: "javdb" },
     fields: [
@@ -269,11 +270,15 @@ export function Wizard({
   const isDirty = dirty.length > 0;
 
   // chip 跟着**被测那一节**的账本走（清单步测的是 JavDB），所以它的钥匙里也要有那一节的
-  // revision；改了本步任何一格，上一次的结论就不再代表屏幕上的配置，直接收回。
+  // revision。编辑与保存都会把结论收回成「还没测试」并钉在当前 revision 上
+  // （Test-Commits-First：旧结论属于已保存的旧配置，不代表屏上的草稿，也不代表
+  // 刚存进去的新值）；只有 fresh mount（chips 为 null）才回落到账本里的历史结论。
   const chip =
     chips !== null && chips.section === testedName && chips.revision === testedSection.revision
       ? chips.chip
-      : chipFromLastTest(testedSection);
+      : chips === null
+        ? chipFromLastTest(testedSection, testedName)
+        : { kind: "idle" as const };
 
   // 换节时把上一节的回执收掉：它说的是另一张表的事。
   // 在渲染期对齐，而不是放进 effect——后者会多跑一轮级联渲染。
@@ -323,7 +328,8 @@ export function Wizard({
     setDrafts((current) =>
       setFields(current, formKey, () => baseValues, { [key]: value }),
     );
-    setChips(null);
+    // 编辑即收回（Test-Commits-First）：结论属于已保存的配置，不属于屏上的草稿。
+    setChips({ section: testedName, revision: testedSection.revision, chip: { kind: "idle" } });
     setFieldErrors((current) => {
       if (!(key in current)) return current;
       const next = { ...current };
@@ -356,6 +362,13 @@ export function Wizard({
       await api.save(step.section, buildPatch(step, section, values));
       const next = await onRefresh();
       setDrafts((current) => clearDrafts(current, `${step.section}:`));
+      // 保存也收回（同一原则）：配置变了，旧结论不再代表它；测试会立刻设回自己的结论。
+      // revision 冲突路径不收回：那一次保存没发生，账本仍是屏上这份配置的账本。
+      setChips({
+        section: testedName,
+        revision: next?.sections[testedName]?.revision ?? testedSection.revision,
+        chip: { kind: "idle" },
+      });
       if (next === null) {
         setStatus({ tone: "warn", text: "已保存，但没读回最新设置：刷新页面再确认一次。" });
       } else if (next.initialized && !initialized) {
@@ -404,7 +417,13 @@ export function Wizard({
       const revision = saved.snapshot?.sections[testedName]?.revision ?? testedSection.revision;
       const at = new Date().toISOString();
       const next: TestChipState = result.ok
-        ? { kind: "ok", detail: result.detail, durationMs: result.duration_ms, at }
+        ? {
+            kind: "ok",
+            note: depthNote(testedName, result.list_id),
+            detail: result.detail,
+            durationMs: result.duration_ms,
+            at,
+          }
         : result.code === "not_implemented"
           ? { kind: "placeholder", detail: result.detail }
           : {
@@ -920,9 +939,9 @@ function GateCard({
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">还没初始化</h2>
           <p className="mt-1 dense leading-relaxed text-muted-foreground">
-            主线三件套齐了，循环才会启动：JavDB 可读且清单登记就位、qBittorrent 可连、
-            Jellyfin 可写。Jellyfin 那一项还包括媒体库目录在这台机器上可见——三个容器把
-            同一个 host 目录挂到同一路径。在那之前这个页面只有向导，面板进不去。
+            主线三件套齐了，循环才会启动：JavDB 可读、清单登记并验读过、qBittorrent
+            可连、Jellyfin 可写。Jellyfin 那一项还包括媒体库目录在这台机器上可见——
+            三个容器把同一个 host 目录挂到同一路径。在那之前这个页面只有向导，面板进不去。
           </p>
           <ul className="mt-2.5 space-y-1">
             {requirements(snapshot).map((item) => (
@@ -964,7 +983,7 @@ function GateStrip({
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-xl bg-card px-3 py-2.5 ring-1 ring-foreground/10">
       {/* 计数变化（保存后 4/5→5/5）没有别的出口，这行自己播报。 */}
       <p aria-live="polite" className="dense text-muted-foreground">
-        还没初始化 · 三件套 {all.length - missing.length}/{all.length}
+        还没初始化 · 门禁 {all.length - missing.length}/{all.length}
         {first ? ` · 差 ${first.short}` : ""}
       </p>
       {/* 「去 X」不指向当前步自己：站在清单登记步时链接会变成一次空操作。 */}
@@ -994,6 +1013,11 @@ type Requirement = {
 function requirements(snapshot: ConfigSnapshot): Requirement[] {
   const { javdb, list_registry, qbittorrent, jellyfin } = snapshot.sections;
   const wantWatch = entriesOf(list_registry).find((entry) => entry.purpose === "want_watch");
+  const javdbTest = javdb.last_test;
+  // 清单验读（第六判据）：登记的这张 id 被一次真实测试读到过。
+  // 账本是 javdb.last_test_list_id，读的是状态记录而非活体探测。
+  const verified =
+    wantWatch !== undefined && javdbTest?.ok === true && javdbTest.list_id === wantWatch.list_id;
   const mediaOK = jellyfin.configured && snapshot.media_root_visible;
   return [
     {
@@ -1008,6 +1032,17 @@ function requirements(snapshot: ConfigSnapshot): Requirement[] {
       label: wantWatch ? `清单 #${wantWatch.list_id} 已登记` : "清单还没登记",
       short: "清单登记",
       ok: Boolean(wantWatch),
+      section: "list_registry",
+    },
+    {
+      key: "list_verified",
+      label: !wantWatch
+        ? "清单还没登记，谈不上验读"
+        : verified
+          ? `清单 #${wantWatch.list_id} 已验可读`
+          : "清单登记了但还没验读：去清单步点一次「测试读取」",
+      short: "清单验读",
+      ok: verified,
       section: "list_registry",
     },
     {
@@ -1252,11 +1287,11 @@ function maskedValue(masked: unknown, fallback?: string): string | undefined {
 }
 
 /** 上一次测试的结论：人话 + 相对时间，绝对时间与机器码进 TestChip 的 title。 */
-function chipFromLastTest(section: SectionState): TestChipState {
+function chipFromLastTest(section: SectionState, sectionName: SectionName): TestChipState {
   const lastTest = section.last_test;
   if (!lastTest) return { kind: "idle" };
   if (lastTest.ok) {
-    return { kind: "ok", at: lastTest.at };
+    return { kind: "ok", at: lastTest.at, note: depthNote(sectionName, lastTest.list_id) };
   }
   const [code, ...rest] = (lastTest.error ?? "error").split(":");
   const detail = rest.join(":").trim();
@@ -1573,7 +1608,19 @@ function AutorunLine({
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  // 浏览器层的网络错只有英文原话（如 "Failed to fetch"）：这里给中文兜底；
+  // 上游业务错原样透传，不改写（PRODUCT：上游业务错原样透给用户）。
+  if (error instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(raw)) {
+    return "连不上目标地址：确认地址与网络后重试。";
+  }
+  return raw;
+}
+
+/** javdb 的绿会说深度：含清单验读 / 只验了 token。其他节的绿没有这个维度。 */
+function depthNote(name: SectionName, listId?: string): string | undefined {
+  if (name !== "javdb") return undefined;
+  return listId ? "含清单验读" : "只验了 token";
 }
 
 function codeOf(error: unknown): string {

@@ -47,6 +47,10 @@ func TestTestSucceedsOnUserDomainRead(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("result = %+v, want 绿（token 可用）", result)
 	}
+	// 没读清单就不带凭据：门禁的「清单验读」不能拿这次测试充当。
+	if result.ListID != "" {
+		t.Errorf("ListID = %q, want 空（这次没读登记清单）", result.ListID)
+	}
 }
 
 // TestTestReadsRegisteredList 确认：登记了想看清单时，测试会真的去读它。
@@ -70,6 +74,10 @@ func TestTestReadsRegisteredList(t *testing.T) {
 	}
 	if gotFilter != "0:l:k4EVE4" {
 		t.Errorf("filter_by = %q, want 0:l:k4EVE4（清单读的实体字母）", gotFilter)
+	}
+	// 门禁第六判据的凭据：读到哪张清单，就把哪张的 id 带回账本。
+	if result.ListID != "k4EVE4" {
+		t.Errorf("ListID = %q, want k4EVE4（清单验读的凭据）", result.ListID)
 	}
 }
 

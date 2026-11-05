@@ -176,6 +176,9 @@ func (s *Store) Delete(ctx context.Context, name string) (SectionState, error) {
 }
 
 // RecordTest 把一次真实测试的结果写进 last_test_*。
+//
+// list_id 只在有值时覆盖（COALESCE + NULLIF）：测试失败证明不了清单不可读，
+// 只证明这次没读成——已验记录不该被一次网络抖动抹掉（门禁第六判据的凭据）。
 func (s *Store) RecordTest(ctx context.Context, name string, result TestResult) error {
 	sec, ok := Lookup(name)
 	if !ok {
@@ -193,19 +196,24 @@ func (s *Store) RecordTest(ctx context.Context, name string, result TestResult) 
 		}
 	}
 	if _, err := s.pool.Exec(ctx,
-		"UPDATE "+sec.Table()+" SET last_test_at = now(), last_test_ok = $1, last_test_error = $2 WHERE id = 1",
-		result.OK, nullIfEmpty(errorText),
+		"UPDATE "+sec.Table()+" SET last_test_at = now(), last_test_ok = $1, last_test_error = $2, "+
+			"last_test_list_id = COALESCE(NULLIF($3, ''), last_test_list_id) WHERE id = 1",
+		result.OK, nullIfEmpty(errorText), result.ListID,
 	); err != nil {
 		return fmt.Errorf("settings: 记录 %s 测试结果: %w", name, err)
 	}
 	return nil
 }
 
-// isInitialized 实现规格 §4.4 的门禁判据：主线三件套都配置了就位。
+// isInitialized 实现规格 §4.4 的门禁判据：主线三件套都配置了就位（六判据）。
 //
-// 只看「行在不在」与「媒体库目录在不在盘」，不看 last_test_*：测试是诊断而非门禁——
-// 上游某次抖动不该把已经跑起来的系统踢回向导。凭据是否还有效由集成自己的告警指标
-// 说话（规格 §9）。
+// 前五判据只看「行在不在」与「媒体库目录在不在盘」，不看 last_test_*：测试是诊断
+// 而非门禁——上游某次抖动不该把已经跑起来的系统踢回向导。凭据是否还有效由集成
+// 自己的告警指标说话（规格 §9）。
+//
+// 第六判据「清单验读」是 2026-11 增加的、账本例外：登记的「想看」清单要被一次真实
+// 测试读到过（javdb.last_test_list_id 记着这张 id）。它读的也是账本状态而非活体——
+// 上游抖动不会推翻已验记录，换 id 或没验过才拦；且 RecordTest 失败不清旧值。
 //
 // 本机可见性是个例外（#22 修订 ADR-0009）：没有目录就没有硬链接与刷新，三件套里
 // 的「Jellyfin 可写」不成立。它查本机文件系统，不打扰上游，也不会因上游抖动而抖。
@@ -219,13 +227,24 @@ func isInitialized(states map[string]SectionState, mediaRootVisible bool) bool {
 		return false
 	}
 
+	wantWatch := wantWatchOf(states)
+	if wantWatch == nil {
+		return false
+	}
+	// 清单验读：登记的这张 id 被一次真实测试读到过。
+	lt := states["javdb"].LastTest
+	return lt != nil && lt.OK && lt.ListID == wantWatch.ListID
+}
+
+// wantWatchOf 取登记的「想看」清单；没登记返回 nil。
+func wantWatchOf(states map[string]SectionState) *ListEntry {
 	entries, _ := states["list_registry"].Data["entries"].([]ListEntry)
-	for _, entry := range entries {
-		if entry.Purpose == "want_watch" {
-			return true
+	for i := range entries {
+		if entries[i].Purpose == "want_watch" {
+			return &entries[i]
 		}
 	}
-	return false
+	return nil
 }
 
 // mediaRootOf 取 jellyfin 节里的媒体库目录（未配置或未填时是空串）。
@@ -271,10 +290,11 @@ func loadSingle(ctx context.Context, q querier, sec Section, lock bool) (row, er
 		testedAt  pgtype.Timestamptz
 		testedOK  pgtype.Bool
 		testError pgtype.Text
+		testList  pgtype.Text
 	)
 	if sec.Kind == KindIntegration {
-		columns = append(columns, "last_test_at", "last_test_ok", "last_test_error")
-		holders = append(holders, &testedAt, &testedOK, &testError)
+		columns = append(columns, "last_test_at", "last_test_ok", "last_test_error", "last_test_list_id")
+		holders = append(holders, &testedAt, &testedOK, &testError, &testList)
 	}
 
 	sql := "SELECT " + strings.Join(columns, ", ") + " FROM " + sec.Table() + " WHERE id = 1"
@@ -294,7 +314,7 @@ func loadSingle(ctx context.Context, q querier, sec Section, lock bool) (row, er
 
 	loaded := row{configured: true, values: values}
 	if sec.Kind == KindIntegration {
-		loaded.lastTest = lastTestOf(testedAt, testedOK, testError)
+		loaded.lastTest = lastTestOf(testedAt, testedOK, testError, testList)
 	}
 	return loaded, nil
 }
@@ -465,14 +485,15 @@ func validateRequired(sec Section, current row, patch Patch) error {
 	return nil
 }
 
-func lastTestOf(at pgtype.Timestamptz, ok pgtype.Bool, errText pgtype.Text) *LastTest {
+func lastTestOf(at pgtype.Timestamptz, ok pgtype.Bool, errText pgtype.Text, listID pgtype.Text) *LastTest {
 	if !at.Valid {
 		return nil
 	}
 	return &LastTest{
-		At:    at.Time.UTC(),
-		OK:    ok.Valid && ok.Bool,
-		Error: errText.String,
+		At:     at.Time.UTC(),
+		OK:     ok.Valid && ok.Bool,
+		Error:  errText.String,
+		ListID: listID.String,
 	}
 }
 

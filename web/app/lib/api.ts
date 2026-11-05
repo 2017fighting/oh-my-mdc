@@ -25,6 +25,8 @@ export type LastTest = {
   at: string;
   ok: boolean;
   error?: string;
+  /** javdb 的测试读到过的登记清单 id：门禁「清单验读」的凭据（其他节缺省）。 */
+  list_id?: string;
 };
 
 export type ListEntry = {
@@ -56,6 +58,8 @@ export type TestResult = {
   code?: string;
   detail?: string;
   duration_ms: number;
+  /** javdb 测试实际读到的登记清单 id（没读清单时缺省）。 */
+  list_id?: string;
 };
 
 /**

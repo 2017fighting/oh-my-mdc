@@ -106,8 +106,12 @@ _Avoid_: 配置、config、yaml、环境变量覆盖
 _Avoid_: 插件、连接、数据源
 
 **已初始化** (Initialized)：
-主线三件套（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写）都配好、循环可以开始跑的状态。没到这一步，系统只提供向导。
+主线三件套配齐（六判据：JavDB token 已保存、清单登记、清单验读、qBittorrent 可连、Jellyfin 可写、媒体库目录在盘）、循环可以开始跑的状态。没到这一步，系统只提供向导。
 _Avoid_: 安装完成、setup done
+
+**清单验读** (List verified)：
+登记的「想看」清单被一次真实测试读到过（javdb.last_test_list_id 记着这张 id）。账本是状态记录不是活体探测：换 id 或没验过才拦，测试失败不清旧值。
+_Avoid_: 验证码、健康检查
 
 **刮削元数据** (Metadata)：
 一部作品最终确定下来的那些字段值（标题、简介、图片地址等）。它有三个侧面：值本身、每个值的来源、各个源返回的原始内容。

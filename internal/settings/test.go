@@ -57,6 +57,9 @@ type TestResult struct {
 	Code     TestCode
 	Detail   string
 	Duration time.Duration
+	// ListID 是这次测试实际读到的登记清单 id（只有 javdb 会带；没读清单为空）。
+	// RecordTest 把它写进 last_test_list_id，作为门禁「清单验读」的凭据。
+	ListID string
 }
 
 // TestInput 是测试连接要用的原文：登录凭据就在 Values 里（对外的掩码在 SectionState，

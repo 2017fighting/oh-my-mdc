@@ -82,6 +82,8 @@ func (i *Integration) client(token string) *appapi.Client {
 //  2. 若已登记「想看」清单，再读一次它的项，证明这张清单真的读得到。
 //
 // 未登记清单时只验 token（JavDB 步早于清单步，不该因为还没登记就红）。
+// 读到清单时把 id 带回 TestResult：RecordTest 写进 last_test_list_id，
+// 门禁第六判据「清单验读」凭的就是这个记录。
 func (i *Integration) Test(ctx context.Context, _ settings.Section, input settings.TestInput) settings.TestResult {
 	client := i.client(input.Text("token"))
 
@@ -110,6 +112,7 @@ func (i *Integration) Test(ctx context.Context, _ settings.Section, input settin
 	return settings.TestResult{
 		OK:     true,
 		Detail: fmt.Sprintf("token 可用；清单「%s」读到 %d 项", name, len(items)),
+		ListID: entry.ListID,
 	}
 }
 

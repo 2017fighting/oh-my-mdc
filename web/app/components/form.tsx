@@ -141,7 +141,7 @@ export function Toggle({
 export type TestChipState =
   | { kind: "idle" }
   | { kind: "testing" }
-  | { kind: "ok"; detail?: string; durationMs?: number; at?: string }
+  | { kind: "ok"; note?: string; detail?: string; durationMs?: number; at?: string }
   | { kind: "fail"; code: string; detail?: string; durationMs?: number; at?: string }
   | { kind: "placeholder"; detail?: string };
 
@@ -197,7 +197,9 @@ function chipLook(state: Exclude<TestChipState, { kind: "idle" } | { kind: "test
       return {
         tone:
           "border-status-done-border bg-status-done-surface text-status-done-text",
-        label: `通过${state.durationMs !== undefined ? ` · ${state.durationMs}ms` : ""}`,
+        label: `通过${state.note ? ` · ${state.note}` : ""}${
+          state.durationMs !== undefined ? ` · ${state.durationMs}ms` : ""
+        }`,
         icon: <Check className="size-3 shrink-0" aria-hidden />,
       };
     case "placeholder":

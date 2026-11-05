@@ -17,7 +17,9 @@ var SensitiveColumns = []string{
 
 // bookkeepingColumns 是设置域里程序自己写、既非凭据也非用户可编辑字段的文本列。
 //
-// last_test_error 记上游错误的分类与摘要，不含凭据原文。
+// last_test_error 记上游错误的分类与摘要，不含凭据原文；
+// last_test_list_id 只有 javdb 的测试会写（读到的登记清单 id，门禁第六判据的凭据），
+// 其余表恒为空串。
 var bookkeepingColumns = []string{
 	"javdb.last_test_error",
 	"qbittorrent.last_test_error",
@@ -25,6 +27,12 @@ var bookkeepingColumns = []string{
 	"mteam.last_test_error",
 	"ai_translation.last_test_error",
 	"telegram.last_test_error",
+	"javdb.last_test_list_id",
+	"qbittorrent.last_test_list_id",
+	"jellyfin.last_test_list_id",
+	"mteam.last_test_list_id",
+	"ai_translation.last_test_list_id",
+	"telegram.last_test_list_id",
 }
 
 // IsSensitive 判断某一列是不是凭据列。

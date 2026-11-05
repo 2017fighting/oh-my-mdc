@@ -72,7 +72,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 ### 4.3 设置域（ADR-0002）
 
 - **`list_registry`**：`list_id text PK`（JavDB 清单 id，判定永远靠 id；**是字符串不是整数**——#16 实测清单 id 为 6 字符 nanoid，如 `e8r1OM`，建清单响应的 `data.id` 也是字符串，见 §5.1）、`purpose text CHECK ('want_watch','want_watch_zh') UNIQUE`、`name text`（快照，仅展示）、`created_at`。
-- **六张集成表**，统一契约：**行存在＝已配置**；可选表（mteam / ai_translation / telegram）另带 `enabled bool`；每表统一 `last_test_at timestamptz`、`last_test_ok bool`、`last_test_error text`：
+- **六张集成表**，统一契约：**行存在＝已配置**；可选表（mteam / ai_translation / telegram）另带 `enabled bool`；每表统一 `last_test_at timestamptz`、`last_test_ok bool`、`last_test_error text`、`last_test_list_id text DEFAULT ''`（只有 javdb 会写：测试实际读到的登记清单 id，门禁「清单验读」的凭据；00008；测试失败不清旧值）：
   - `javdb`：`token`（敏感）、`last_test_*`。
   - `qbittorrent`：`url`、`username`、`password`（敏感）、`category text DEFAULT 'mdc'`、`download_root text`、`webhook_base_url text`、`last_test_*`。（#9 裁决：webhook base URL / 下载根目录 / category 落 qbt 表；#8 的 `app_config.base_url` 因此作废。）
   - `jellyfin`：`url`、`api_key`（敏感）、`media_root`（媒体库根目录；#22 从 `app_config` 搬来——三容器同路径，刷新与硬链接共用）、`last_test_*`。
@@ -87,7 +87,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 - 索引：`task_version(status, next_attempt_at)`、`task_version(claimed_at)`、`side_effect(kind, next_attempt_at)`、`task_event(movie_id, id DESC)`。
 - **claim**（版本互斥，#7+#8）：`UPDATE task_version SET claimed_at=now(), claimed_by=$2 WHERE infohash=$1 AND (claimed_at IS NULL OR claimed_at < now()-interval '10 minutes') RETURNING ...`，完事清零；配哨兵错误 `ErrNoPendingTask`（本轮没活）/ `ErrClaimLost`（抢输别当失败），进程内再加 per-version 锁。
 - **循环单飞**：poll/reconcile/sidefx 各持一把 `pg_advisory_lock`（专用连接），防 Flux 滚动更新时新旧 pod 重叠；版本级互斥仍归 claim。
-- **启动顺序**：迁移（goose Up，advisory lock）→ 读设置 → 三件套齐（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写＝`url`+`api_key`+`media_root` 齐且目录在本机可见）才算 `initialized`，三循环才启动；**迁移失败不 abort 启动**：页面能看、`/readyz` 回 `503 db_unavailable` 带原因、循环不跑（#8 修订）。
+- **启动顺序**：迁移（goose Up，advisory lock）→ 读设置 → 六判据齐（JavDB token 已保存、清单登记且验读过——javdb.last_test_list_id 记着登记的 id、qBittorrent 可连、Jellyfin 可写＝`url`+`api_key`+`media_root` 齐且目录在本机可见）才算 `initialized`，三循环才启动；**迁移失败不 abort 启动**：页面能看、`/readyz` 回 `503 db_unavailable` 带原因、循环不跑（#8 修订）。
 - 敏感列：代码常量清单（表.列）驱动掩码与日志脱敏，配一条反射单测——新增 string 列未登记即测试失败。DB 明文（信任边界＝CNPG 与其备份）。
 - 历史永久保留，无 retention；UI 单条删除只删记录不碰媒体（判重依赖版本行存在，不做自动清理）。
 
@@ -274,7 +274,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.1 向导（分步，一屏一步）
 
-左侧竖向步骤条，顺序：**JavDB 账号与清单 → qBittorrent → Jellyfin → M-Team（可选）→ AI 翻译（可选）→ Telegram（可选）→ 完成（间隔与重试在最后一步）**。可选步可跳过。每步独立「保存本步」＝按表 PATCH；敏感字段只吐掩码、省略或空串＝保持原值；并发编辑靠 `revision` 指纹提示冲突；每步一个「测试连接/测试读取/测试可写」按钮，结果 chip 写在按钮旁（写 `last_test_*`）。
+左侧竖向步骤条，顺序：**JavDB 账号与清单 → qBittorrent → Jellyfin → M-Team（可选）→ AI 翻译（可选）→ Telegram（可选）→ 完成（间隔与重试在最后一步）**。可选步可跳过。每步独立「保存本步」＝按表 PATCH；敏感字段只吐掩码、省略或空串＝保持原值；并发编辑靠 `revision` 指纹提示冲突；每步一个「测试连接/测试读取/测试可写」按钮，结果 chip 写在按钮旁（写 `last_test_*`）；编辑或保存（未重测）把 chip 收回「还没测试」，不拿旧结论代表新配置；javdb 的绿标深度（「含清单验读 / 只验了 token」）。
 
 - **JavDB 步**：token（掩码）+ 清单按 id 登记——读取已有清单优先（探测列表，按 id/名字匹配「想看清单」），新建 = `POST /api/v1/lists` 探测 + **手动粘贴 id 兜底**（#15/#16 流程，名字 4–30 规则见 §5.1）。
 - **qBittorrent 步**：地址/账号（可选）/category/下载根目录/回调 base URL（集群内 svc DNS）+ **autorun 改写前后完整对比**，保存前再确认一次（§5.4）。
@@ -290,9 +290,9 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.3 门禁与文案
 
-未初始化（三件套不齐）＝整站只剩向导，面板入口禁用 + 一张解释卡。文案照原型（`prototype/wizard-dashboard` 分支）：
+未初始化（门禁不齐）＝整站只剩向导，面板入口禁用 + 一张解释卡。文案照原型（`prototype/wizard-dashboard` 分支）：
 
-- 解释卡：「主线三件套（JavDB 可读且清单登记就位、qBittorrent 可连、Jellyfin 可写）齐了，循环才会启动」；Jellyfin 一行另列「媒体库目录在盘可见」（`media_root_visible`），未初始化时一眼看出是哪一半没到。
+- 解释卡：「主线三件套齐了，循环才会启动：JavDB 可读、清单登记并验读过、qBittorrent 可连、Jellyfin 可写」；Jellyfin 一行另列「媒体库目录在盘可见」（`media_root_visible`），未初始化时一眼看出是哪一半没到。门禁计数行报「门禁 N/6 · 差 X」。
 - 状态名「下载中/加工中/已入库/失败」（任务级与版本级同名，任务级「失败」= 全部版本失败）；「需要人工」是待办区的名字，不当状态名；按钮「重试/强制重刮/测试连接/保存本步/重发」；版本失败原因直译 phase。全部 copy zh-CN。
 
 ### 8.4 REST 契约（本票落定；全部 JSON；无应用鉴权）
@@ -305,7 +305,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `GET /api/config/{section}` | 单节，带 `revision`（内容指纹） |
 | `PATCH /api/config/{section}` | 部分字段 + `revision`；省略＝不改，敏感字段空串也＝不改；`revision` 冲突 → `409 revision_conflict`；校验错 → `400` |
 | `DELETE /api/config/{section}` | 删行＝解除配置；主线三件套被删 → `initialized` 变 false 回到向导 |
-| `POST /api/config/{section}/test` | 跑测试连接，写 `last_test_*`，返回 `{ok, code, detail, duration_ms}` |
+| `POST /api/config/{section}/test` | 跑测试连接，写 `last_test_*`，返回 `{ok, code, detail, duration_ms, list_id?}`（javdb 读到登记清单时带 `list_id`，是「清单验读」的凭据） |
 
 `revision` = 该节当前内容的规范 JSON sha256 短指纹，读写往返检测并发编辑（open-mdcng 先例）。`list_registry` PATCH = `{list_id, purpose:'want_watch', name}` upsert；向导辅助端点 `GET /api/javdb/lists`（探测）、`POST /api/javdb/lists {name, description?}`（代建，同名拒原样透出）。 qBittorrent 的 autorun 共存改写同样走向导辅助端点：`GET /api/qbittorrent/autorun` 只读预览 `{before, after, skip, changed, enabled, warning}`（前后**完整**命令串），`POST /api/qbittorrent/autorun` 是人工确认后的落地，只写 `autorun_program`（ADR-0007）。
 

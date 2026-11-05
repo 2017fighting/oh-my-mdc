@@ -18,11 +18,16 @@ type Masked struct {
 	Masked     string `json:"masked"`
 }
 
-// LastTest 是集成表的 last_test_* 三列，即「上次测试连接」的账本。
+// LastTest 是集成表的 last_test_* 四列，即「上次测试连接」的账本。
+//
+// ListID 只有 javdb 的测试会写：这次测试实际读到的登记清单 id（没读清单为空）。
+// 它是门禁第六判据「清单验读」的凭据——账本是状态记录，不是活体探测；
+// 测试失败不清旧值，已验记录不被一次网络抖动抹掉（见 RecordTest）。
 type LastTest struct {
 	At    time.Time `json:"at"`
 	OK    bool      `json:"ok"`
 	Error string    `json:"error,omitempty"`
+	ListID string   `json:"list_id,omitempty"`
 }
 
 // ListEntry 是 list_registry 的一行：一张清单的 id 与用途，名字只是快照。
