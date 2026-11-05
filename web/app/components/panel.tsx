@@ -245,6 +245,10 @@ export function Panel({
           inGroup.click();
           return;
         }
+        // r 在没有上下文时把焦点交给「第一颗可按的重试」——这是刻意的接力，不是撞运气。
+        // 今天全站只有 VersionGroup 一处挂 data-retry。什么时候重看：出现第二处（比如
+        // 副作用行也挂上）时，这四处查询必须收进一个容器 ref——否则 r 与收尾的焦点
+        // 交接会静默改道到另一块区域，而屏幕上看不出它改过。
         document
           .querySelector<HTMLElement>("[data-retry]:not([disabled])")
           ?.focus();
@@ -894,6 +898,7 @@ function NeedsAttention({
         setBatchDone((done) => done + 1);
       }
       // 批量的焦点交接只在收尾做一次：行消失 → 下一颗可按的重试；否则回执列表。
+      // 「全站第一颗」这条约定与 keydown 里那段注释同一件事：只有一处 data-retry 时成立。
       await afterPaint();
       const next = document.querySelector<HTMLElement>("[data-retry]:not([disabled])");
       if (next) next.focus();
