@@ -9,8 +9,15 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
-import { groupByNumber, type FailureGroup } from "~/lib/attention";
-import { formatAbsolute, formatClock, formatElapsed, formatFuture, formatWhen } from "~/lib/time";
+import { groupByNumber, groupStuck, type FailureGroup, type StuckGroup } from "~/lib/attention";
+import {
+  formatAbsolute,
+  formatAge,
+  formatClock,
+  formatElapsed,
+  formatFuture,
+  formatWhen,
+} from "~/lib/time";
 import {
   remedyForFailure,
   remedyForSideEffect,
@@ -25,6 +32,7 @@ import {
   type AttentionItem,
   type Overview,
   type SideEffect,
+  type SideEffectKind,
   type TaskDetail,
   type TaskEvent,
   type TaskRow,
@@ -42,6 +50,48 @@ import {
 /** 面板的筛选与页号：住在地址栏里（`?q=&state=&page=`），刷新不丢。 */
 export type PanelQuery = { page: number; q: string; state: TaskState | "" };
 
+/**
+ * 行内动作的唯一尺寸：md 以下 44px 热区 + 13px 字，md 起 28px + 12px。
+ *
+ * 以前这串类名在本文件与 routes/home.tsx 里各抄了十几遍，「44px 是拇指热区」这条规则
+ * 只活在散文里，于是最先漂掉的是空状态里的两颗「清除筛选」（28px）。
+ * 收成常量之后，改规则就是改这一行，漏抄就不可能再发生。
+ */
+export const ROW_ACTION_SIZE = "h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs";
+
+/** 面板与错误块里的主按钮：比行内动作高 4px（md 起 32px），字号同族。 */
+export const PANEL_ACTION_SIZE = "h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm";
+
+/**
+ * 外壳的 inert 是共享的：抽屉与帮助浮层都可能要求它，谁也不能替另一半撤掉。
+ *
+ * 以前帮助浮层的清理靠 `document.querySelector('aside[role="dialog"]')` 猜
+ * 「抽屉还开着吗」：抽屉恰好在这时关掉，外壳的 inert 就被提前撤掉，底下又能点。
+ * 改用计数之后，两个弹层各拿一只把手，最后一个放手才真的放手。
+ */
+let shellInertHolds = 0;
+
+function holdShellInert(): () => void {
+  if (shellInertHolds === 0) document.getElementById("app-shell")?.setAttribute("inert", "");
+  shellInertHolds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    shellInertHolds = Math.max(0, shellInertHolds - 1);
+    if (shellInertHolds === 0) document.getElementById("app-shell")?.removeAttribute("inert");
+  };
+}
+
+/** 弹层里可 Tab 到的元素，按文档顺序；隐藏的不算。 */
+function focusablesIn(root: HTMLElement): HTMLElement[] {
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => element.offsetParent !== null);
+}
+
 /** Panel 是面板：统计卡 → 「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康（规格 §8.2）。 */
 export function Panel({
   overview,
@@ -53,6 +103,7 @@ export function Panel({
   pageSize,
   loadedAt,
   intervals,
+  autoRefreshMs,
   onQuery,
   onRefresh,
 }: {
@@ -68,6 +119,8 @@ export function Panel({
   loadedAt: number | null;
   /** 三条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
   intervals: { poll: string | null; reconcile: string | null; sidefx: string | null };
+  /** 自动复读的间隔（毫秒）；null = 读不到轮询间隔，宁可不自动读、也不编一个默认值。 */
+  autoRefreshMs: number | null;
   onQuery: (next: PanelQuery) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -83,8 +136,12 @@ export function Panel({
   // 而 inert 一挂上去焦点就被浏览器挪走了，晚一步再记就只记得住「关闭按钮」。
   const previousFocus = React.useRef<HTMLElement | null>(null);
   const openTask = React.useCallback((movieID: string) => {
-    previousFocus.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // 只在抽屉第一次打开时记住触发它的那一行：抽屉里按 j/k 换任务时，焦点已经在
+    // 抽屉内部，把它记成「来处」会让 Esc 把人送到一个不存在的行上，最后掉到 #main。
+    if (previousFocus.current === null) {
+      previousFocus.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
     setSelected(movieID);
   }, []);
 
@@ -93,12 +150,11 @@ export function Panel({
   // 抽屉 portal 到 body，才能既 inert 外壳、又让自己可点。
   React.useEffect(() => {
     if (!selected) return;
-    const shell = document.getElementById("app-shell");
+    const releaseShell = holdShellInert();
     const previousOverflow = document.body.style.overflow;
-    shell?.setAttribute("inert", "");
     document.body.style.overflow = "hidden";
     return () => {
-      shell?.removeAttribute("inert");
+      releaseShell();
       document.body.style.overflow = previousOverflow;
       const target = previousFocus.current;
       previousFocus.current = null;
@@ -112,6 +168,7 @@ export function Panel({
   // 抽屉内走当前任务表顺序；触屏设备（无精确指针）不响应，手机零提示。
   const [helpOpen, setHelpOpen] = React.useState(false);
   const helpCloseRef = React.useRef<HTMLButtonElement>(null);
+  const helpDialogRef = React.useRef<HTMLElement>(null);
   const helpReturnRef = React.useRef<HTMLElement | null>(null);
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -140,6 +197,14 @@ export function Panel({
       }
       // 帮助浮层开着时其余键不响应（Esc 由浮层自己在 capture 阶段接住）。
       if (helpOpen) return;
+
+      // Shift+R = 重新读取面板。刷屏、盯着一轮对账等结果是值班时最常做的动作，
+      // 而以前它只有右上角那颗按钮一条路，键盘和触屏（抽屉、手机）都够不到。
+      if (event.key === "R" && event.shiftKey) {
+        event.preventDefault();
+        void onRefresh();
+        return;
+      }
 
       const drawerOpen = selected !== null;
       if (event.key === "/" && !event.shiftKey) {
@@ -182,29 +247,76 @@ export function Panel({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, tasks, openTask, helpOpen]);
+  }, [selected, tasks, openTask, helpOpen, onRefresh]);
 
-  // 帮助浮层的模态：复用抽屉那套（inert 外壳 + Esc + 焦点归还），抽屉开着时
-  // 连抽屉一起 inert；Esc 在 capture 阶段接住并 stopPropagation，不会连抽屉一起关。
+  // ---- 自动复读：值班台不能静止 ----
+  //
+  // 面板以前只在挂载、翻页、改筛选与按「刷新」时读一次，于是「看着流水线」这半个职责
+  // 其实是靠人肉轮询完成的：一屏「3 分钟前」能挂到标签页关掉为止。现在只要页签可见、
+  // 没有抽屉或帮助浮层开着，就按清单轮询的间隔静默重读一次，`上次读取` 因此一直是真话。
+  //
+  // 读失败不在这里说话：错误条由 home.tsx 的 Notice 承担，静默重读的职责只是别撒谎。
+  // 打开抽屉时暂停：抽屉读的是当前这页的任务数据，行在背后被换掉比看到旧数据更坑。
+  React.useEffect(() => {
+    if (!autoRefreshMs) return;
+    if (selected !== null || helpOpen) return;
+    let inFlight = false;
+    const read = () => {
+      if (inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      void onRefresh().finally(() => {
+        inFlight = false;
+      });
+    };
+    const timer = window.setInterval(read, autoRefreshMs);
+    // 从别的标签页回来时不必等下一格：那一刻正是人想知道「现在怎么样」的时候。
+    const onVisible = () => {
+      if (document.visibilityState === "visible") read();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [autoRefreshMs, selected, helpOpen, onRefresh]);
+
+  // 帮助浮层的模态：与抽屉同一套规矩（inert 外壳 + Tab 在内部循环 + 背景不滚 + Esc + 焦点归还），
+  // 抽屉开着时连抽屉一起 inert；Esc 在 capture 阶段接住并 stopPropagation，不会连抽屉一起关。
   React.useEffect(() => {
     if (!helpOpen) return;
-    const shell = document.getElementById("app-shell");
+    const releaseShell = holdShellInert();
     const drawer = document.querySelector<HTMLElement>("aside[role=\"dialog\"]");
-    shell?.setAttribute("inert", "");
     drawer?.setAttribute("inert", "");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     helpCloseRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setHelpOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setHelpOpen(false);
+        return;
+      }
+      // 模态就得把 Tab 也管住：只抢 Esc 的弹层，键盘人一下 Tab 就回到了背后的页面上。
+      if (event.key !== "Tab" || !helpDialogRef.current) return;
+      const items = focusablesIn(helpDialogRef.current);
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
     };
     window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener("keydown", onKey, true);
-      // 抽屉还开着时外壳的 inert 归它管（它的 effect 会在关闭时撤）。
-      if (!document.querySelector("aside[role=\"dialog\"]")) shell?.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
       drawer?.removeAttribute("inert");
+      releaseShell();
       const back = helpReturnRef.current;
       helpReturnRef.current = null;
       if (back?.isConnected) back.focus();
@@ -251,12 +363,14 @@ export function Panel({
           {/* 手机上侧栏是藏起来的，心跳得在这里说两句：清完队列之后，「下一轮什么时候
               去拿我刚加的那部」与「对账还在跑吗」就是接下来两个问题，而它们不该在
               一张分页表格之后再回答。失败的那条排最前：它才是「要不要起床」的答案，
-              不能被 slice 恒定掉（副作用恰是三条里唯一会带失败进面板的）。 */}
+              不能被 slice 恒定掉（副作用恰是三条里唯一会带失败进面板的）。
+              `md:hidden` 与侧栏的 `md:flex` 同一道门：以前这里写的是 `lg:hidden`，
+              于是 768–1023px 同一屏并排坐着两遍心跳。 */}
           {[...loopLines(overview, intervals, now)]
             .sort((a, b) => Number(b.failing) - Number(a.failing))
             .slice(0, 2)
             .map((line) => (
-              <span key={line.label} className="flex items-baseline gap-1.5 lg:hidden">
+              <span key={line.label} className="flex items-baseline gap-1.5 md:hidden">
                 <span>{line.label}</span>
                 <span className={cn("tabular-nums", line.failing && "text-status-danger-text")}>
                   {line.text}
@@ -265,11 +379,13 @@ export function Panel({
             ))}
         </section>
 
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="tabular-nums">
+        {/* 新鲜度这一档不许出屏：手机上一行装不下就折成两行，而不是让「上次读取」
+            与刷新按钮被挤到可见区之外（formatWhen 满一周后会换成更宽的绝对时间）。 */}
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span className="tabular-nums whitespace-nowrap">
             已入库 <span className="tabular-nums">{counts?.finished ?? 0}</span>
           </span>
-          <span className="tabular-nums">
+          <span className="tabular-nums whitespace-nowrap">
             {loadedAt ? (
               <>
                 上次读取 <time dateTime={new Date(loadedAt).toISOString()}>{formatClock(loadedAt)}</time>
@@ -281,9 +397,10 @@ export function Panel({
           </span>
           <Button
             variant="outline"
-            className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
+            className={ROW_ACTION_SIZE}
             onClick={() => void refresh()}
             disabled={refreshing}
+            title="重新读取面板（Shift + R）"
           >
             <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
             刷新
@@ -323,7 +440,7 @@ export function Panel({
                     <button
                       type="button"
                       onClick={() => openTask(task.movie_id)}
-                      aria-label={`打开 ${task.number} 的详情，${TASK_STATE_LOOK[isTaskState(task.state) ? task.state : "downloading"].label}，${task.versions.length} 个版本`}
+                      aria-label={`打开 ${task.number} 的详情，${TASK_STATE_LOOK[isTaskState(task.state) ? task.state : "downloading"].label}，版本：${versionsSpoken(task)}`}
                       className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                     >
                       <span className="min-w-0">
@@ -368,8 +485,10 @@ export function Panel({
                     <th scope="col" className="px-4 py-2 font-medium">番号</th>
                     <th scope="col" className="px-4 py-2 font-medium">状态</th>
                     <th scope="col" className="px-4 py-2 font-medium">版本</th>
-                    {/* 排序固定在「最近更新」：唯一会变的那一列，也是人判断新鲜度的依据。 */}
-                    <th scope="col" aria-sort="descending" className="px-4 py-2 font-medium">
+                    {/* 排序固定在「最近更新」：唯一会变的那一列，也是人判断新鲜度的依据。
+                        不写 aria-sort：这一列没有排序控件，向读屏宣告一个不存在的
+                        排序状态，比不说话更糟。 */}
+                    <th scope="col" className="px-4 py-2 font-medium">
                       更新
                     </th>
                     <th scope="col" className="w-8 px-2 py-2">
@@ -471,9 +590,6 @@ export function Panel({
           >
             循环健康
           </CardTitle>
-          <CardDescription>
-            副作用失败退避重试，耗尽后移到「需要人工」等人工重发。
-          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-1.5 dense">
           {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
@@ -557,7 +673,11 @@ export function Panel({
       ) : null}
 
       {helpOpen ? (
-        <ShortcutsHelp onClose={() => setHelpOpen(false)} closeRef={helpCloseRef} />
+        <ShortcutsHelp
+          onClose={() => setHelpOpen(false)}
+          closeRef={helpCloseRef}
+          dialogRef={helpDialogRef}
+        />
       ) : null}
     </>
   );
@@ -591,6 +711,8 @@ function NeedsAttention({
   const stalled = attention?.stalled ?? [];
   const failedGroups = groupByNumber(failed);
   const stalledGroups = groupByNumber(stalled);
+  // 驻留副作用按病因收行：三条通知卡在同一个坏 token 上是一件事，不是三件。
+  const stuckGroups = groupStuck(stuck);
   // 回执住在卡片上而不是行里：行会在按下成功之后消失，回执却是那一刻唯一的证据。
   const { receipts, push: receiptOf, dismiss: dismissReceipt, listRef: receiptsRef } = receiptsState;
   // 被上限切过的那一半只数得到 50，所以数字后面跟一个 +，不把截断说成总量。
@@ -600,13 +722,18 @@ function NeedsAttention({
   };
 
   // 总数是**行数**：一行就是一个要动手的对象（一个番号的失败版本、一个番号的停滞
-  // 下载，或一条驻留副作用）。这是「我还有几件事」唯一的答案，说明里给它的构成，
+  // 下载，或一条病因下的驻留副作用）。这是「我还有几件事」唯一的答案，说明里给它的构成，
   // 不给第二个总数。
-  const total = failedGroups.length + stalledGroups.length + stuck.length;
+  const total = failedGroups.length + stalledGroups.length + stuckGroups.length;
   const broke = [
     failedGroups.length > 0 && `失败 ${failedGroups.length}${cut.failed ? "+" : ""} 部`,
     stalledGroups.length > 0 && `停滞 ${stalledGroups.length}${cut.stalled ? "+" : ""} 部`,
-    stuck.length > 0 && `驻留副作用 ${stuck.length} 条`,
+    // 这一行是标题那个数的**拆解**，所以它必须加得起来：驻留副作用按病因算行（标题也这么数），
+    // 后面那个「N 条」是数据库行数——两个数都说，才不会让人拿 2 组 + 4 条去对 5 件事。
+    stuck.length > 0 &&
+      (stuck.length === stuckGroups.length
+        ? `驻留副作用 ${stuck.length} 条`
+        : `驻留副作用 ${stuckGroups.length} 组 ${stuck.length} 条`),
   ].filter(Boolean);
 
   // 「我在这里能不能修」才是第一问：能修的一组给重试，修不动的一组只给查看任务，
@@ -614,7 +741,11 @@ function NeedsAttention({
   const canFixHere = (group: FailureGroup) =>
     group.items.some((item) => remedyForFailure(item).retryable);
   const fixableGroups = failedGroups.filter(canFixHere);
-  const elsewhereGroups = failedGroups.filter((group) => !canFixHere(group));
+  // 「要去别处修」按最久没动排：这一组里没有当场能按的按钮，唯一要做的决定是
+  // 「今天去弄哪一个」，而新挂上来的那部恰恰是最不紧急的一个。
+  const elsewhereGroups = failedGroups
+    .filter((group) => !canFixHere(group))
+    .sort((a, b) => firstSeenAt(a) - firstSeenAt(b));
 
   // 停滞行按重试后行不会消失（它还在等下一轮对账确认），而回执已经说了「已重试」——
   // 屏幕说的（还停滞）与回执说的（已重新加种）在打架。行上要有瞬时中间态：
@@ -680,12 +811,35 @@ function NeedsAttention({
   // 作者关心的不是「哪一个子系统的」，而是「我刚才那一按成了没有」。
   const sideEffect = useSideEffectRetry(onRefresh, retryHooks);
 
+  // 一组驻留副作用共用一颗「重发」：逐条顺序发（同一条病因，修法也就一个），
+  // 忙位挂在病因上而不是某一条 id 上——组里每条都动了才算这一组动完。
+  // 中间不逐条刷新：重发只是交回队列，最后一次刷新就能看到整组的结果。
+  const [stuckBusy, setStuckBusy] = React.useState<string | null>(null);
+  const retryStuckGroup = async (group: StuckGroup) => {
+    if (stuckBusy !== null) return;
+    setStuckBusy(group.cause);
+    try {
+      for (const effect of group.effects) {
+        await sideEffect.retry(effect.id, sideEffectTitle(effect), { quiet: true });
+      }
+      await onRefresh();
+    } finally {
+      setStuckBusy(null);
+    }
+  };
+
   // 批量重试：顺序逐部发起（作者规模 ≤10，不并发轰炸后端），一部失败不中断后续，
   // 逐部回执；「重新加种中」的行已在 batchTargets 里跳过。无确认条：重试幂等安全，
   // 爆炸半径印在按钮上（Consequence-First 只约束不可逆动作）。
+  // 但幂等安全不等于不许叫停：按钮上要能看见走到了第几部，也要能在第三步之前收手——
+  // 这三部是哪三部，就在 title 与 aria-description 里逐个写着。
   const [batchBusy, setBatchBusy] = React.useState(false);
+  const [batchDone, setBatchDone] = React.useState(0);
+  const haltBatch = React.useRef(false);
   const runBatch = async () => {
     if (batchBusy || taskRetry.busy.size > 0) return;
+    haltBatch.current = false;
+    setBatchDone(0);
     setBatchBusy(true);
     receiptLimitRef.current = Math.max(
       RECEIPT_LIMIT,
@@ -693,6 +847,7 @@ function NeedsAttention({
     );
     try {
       for (const { group, kind } of batchTargets) {
+        if (haltBatch.current) break;
         await taskRetry.retry(
           group.movieID,
           false,
@@ -705,6 +860,7 @@ function NeedsAttention({
           },
           { holdFocus: true },
         );
+        setBatchDone((done) => done + 1);
       }
       // 批量的焦点交接只在收尾做一次：行消失 → 下一颗可按的重试；否则回执列表。
       await afterPaint();
@@ -723,7 +879,7 @@ function NeedsAttention({
 
   return (
     <Card className={cn(total > 0 && "ring-status-danger-border")}>
-      <CardHeader>
+      <CardHeader className="max-sm:grid-cols-1">
         <div>
           {/* 页标题已经说了「N 件事需要人工」，卡片不把同一个词再说一遍：可见的首行
               就是它的构成（失败几部 · 停滞几部 · 驻留几条），标题只留给大纲与读屏。 */}
@@ -744,16 +900,34 @@ function NeedsAttention({
         </div>
         {/* One-Action Rule 的主操作位：批量重试印作用域，行级按钮仍是逐行动作。 */}
         {batchTargets.length > 0 && batchVersions > 0 ? (
-          <CardAction>
-            <RowAction
-              variant="outline"
-              disabled={batchBusy}
-              data-batch-retry=""
-              onClick={() => void runBatch()}
-            >
-              <RotateCcw className={cn("size-3.5", batchBusy && "animate-spin")} aria-hidden />
-              重试 {batchTargets.length} 部 · {batchVersions} 条版本
-            </RowAction>
+          <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
+            <div className="flex items-center gap-2 max-sm:w-full">
+              <RowAction
+                variant="outline"
+                disabled={batchBusy}
+                data-batch-retry=""
+                onClick={() => void runBatch()}
+                className="max-sm:flex-1"
+                /* 一行地方印不下名单：逐部发什么，就在 title 与 aria-description 里写全。 */
+                title={`逐部重试：${batchTargets.map(({ group }) => group.number).join("、")}`}
+                aria-description={`逐部重试：${batchTargets.map(({ group }) => group.number).join("、")}`}
+              >
+                <RotateCcw className={cn("size-3.5", batchBusy && "animate-spin")} aria-hidden />
+                {batchBusy
+                  ? `正在重试 ${Math.min(batchDone + 1, batchTargets.length)}/${batchTargets.length}`
+                  : `重试 ${batchTargets.length} 部 · ${batchVersions} 条版本`}
+              </RowAction>
+              {batchBusy ? (
+                <RowAction
+                  variant="ghost"
+                  onClick={() => {
+                    haltBatch.current = true;
+                  }}
+                >
+                  停下
+                </RowAction>
+              ) : null}
+            </div>
           </CardAction>
         ) : null}
       </CardHeader>
@@ -783,7 +957,7 @@ function NeedsAttention({
 
               {stalledGroups.length > 0 ? (
                 <section aria-label="停滞的下载" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="停滞" />
+                  <AttentionHeading label="停滞" detail={ageNote(oldestAt(stalledGroups), now)} />
                   {/* 停滞的补法按这一轮的状态给：能修的组都已重新加种时，
                       「先去 qBittorrent 确认」是过去时，改说等什么。 */}
                   <p className="mb-2 dense leading-relaxed text-foreground">
@@ -825,24 +999,36 @@ function NeedsAttention({
 
               {elsewhereGroups.length > 0 ? (
                 <section aria-label="要去别处修的失败版本" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="要去别处修" />
+                  <AttentionHeading
+                    label="要去别处修"
+                    detail={ageNote(oldestAt(elsewhereGroups), now)}
+                  />
                   <div className="divide-y">
                     {elsewhereGroups.map((group) => renderFailedGroup(group, true))}
                   </div>
                 </section>
               ) : null}
 
-              {stuck.length > 0 ? (
+              {stuckGroups.length > 0 ? (
                 <section aria-label="驻留的副作用" className="py-3 first:pt-0 last:pb-0">
-                  <AttentionHeading label="驻留副作用" />
+                  <AttentionHeading
+                    label="驻留副作用"
+                    detail={
+                      stuck.length > stuckGroups.length
+                        ? `${stuck.length} 条，${stuckGroups.length} 种原因`
+                        : undefined
+                    }
+                  />
                   <div className="divide-y">
-                    {stuck.map((effect) => (
+                    {stuckGroups.map((group) => (
                       <StuckRow
-                        key={effect.id}
-                        effect={effect}
-                        notice={sideEffect.errors[effect.id]}
-                        busy={sideEffect.busy === effect.id}
-                        onRetry={() => void sideEffect.retry(effect.id, sideEffectTitle(effect))}
+                        key={group.cause}
+                        group={group}
+                        notices={group.effects
+                          .map((effect) => sideEffect.errors[effect.id])
+                          .filter((text): text is string => Boolean(text))}
+                        busy={stuckBusy === group.cause}
+                        onRetry={() => void retryStuckGroup(group)}
                       />
                     ))}
                   </div>
@@ -975,9 +1161,35 @@ function ReceiptList({
  * AttentionHeading 只报分节名，不再报数：数已经有唯一的说话人（页标题 + 构成行）。
  * 以前这里写「失败 4 条版本」而构成行写「失败 3 部」，两个单位并排 40px，
  * 人得自己算它们是不是同一个东西。
+ *
+ * `detail` 只放一个东西：这一组最早挂上去是多久前。分组里没有当场的动作时，
+ * 「我躲了它多久」就是人在这里唯一要判断的事实。
  */
-function AttentionHeading({ label }: { label: string }) {
-  return <h3 className="mb-1 text-xs font-medium text-muted-foreground">{label}</h3>;
+function AttentionHeading({ label, detail }: { label: string; detail?: string }) {
+  return (
+    <h3 className="mb-1 flex flex-wrap items-baseline gap-x-2 text-xs font-medium text-muted-foreground">
+      <span>{label}</span>
+      {detail ? <span className="font-normal tabular-nums">{detail}</span> : null}
+    </h3>
+  );
+}
+
+/** 这一组里最早的那条失败/停滞发生在何时（毫秒）；认不出时间的行不算。 */
+function firstSeenAt(group: FailureGroup): number {
+  return Math.min(...group.items.map((item) => Date.parse(item.at)));
+}
+
+/** 一组里最早的那一条；没有可认的时间就给 null，不编一个「刚刚」。 */
+function oldestAt(groups: FailureGroup[]): number | null {
+  const stamps = groups
+    .flatMap((group) => group.items.map((item) => Date.parse(item.at)))
+    .filter((at) => !Number.isNaN(at));
+  return stamps.length === 0 ? null : Math.min(...stamps);
+}
+
+/** 分节标题上的「最早 N 天前」；没有时间就不写。 */
+function ageNote(at: number | null, now: number): string | undefined {
+  return at === null ? undefined : `最早 ${formatAge(at, now)}`;
 }
 
 /**
@@ -1097,7 +1309,7 @@ function VersionGroup({
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         {retryTargets.length > 0 ? (
           <RowAction
             variant="outline"
@@ -1143,11 +1355,15 @@ function ReceiptAnnouncer({ receipts }: { receipts: Receipt[] }) {
  */
 function CollapsibleRemedy({ hint }: { hint: string }) {
   const [open, setOpen] = React.useState(false);
+  // aria-expanded 必须说出它展开的是哪一块：没有 aria-controls 时，读屏只知道
+  // 「收起了」，不知道展开后会多出什么。
+  const hintID = React.useId();
   return (
     <div>
       <button
         type="button"
         aria-expanded={open}
+        aria-controls={hintID}
         onClick={() => setOpen((current) => !current)}
         className="dense inline-flex min-h-11 items-center gap-1 rounded-sm text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:min-h-0"
       >
@@ -1156,49 +1372,77 @@ function CollapsibleRemedy({ hint }: { hint: string }) {
         {open ? "收起原因" : "展开原因"}
       </button>
       {open ? (
-        <p className="dense leading-relaxed break-words text-foreground">{hint}</p>
+        <p id={hintID} className="dense leading-relaxed break-words text-foreground">
+          {hint}
+        </p>
       ) : null}
     </div>
   );
 }
 
-/** StuckRow 是驻留副作用的一行：它缺的那一样东西在哪一节，就给哪一节的链接。 */
+/**
+ * StuckRow 是驻留副作用的一行：它缺的那一样东西在哪一节，就给哪一节的链接。
+ *
+ * 一行是**一条病因**，不是一条数据库行：同一个坏 token 卡住三条通知时，人要改的是
+ * 那格 token 一次，不是分三次按同一颗按钮。以前三条各占一行、各给一颗「重发」，
+ * 标题上的数于是只会涨不会落，那个数最后就变成了墙纸。多条的组把「哪几条」写在
+ * 第二行，按钮上印会动几条。
+ */
 function StuckRow({
-  effect,
-  notice,
+  group,
+  notices,
   busy,
   onRetry,
 }: {
-  effect: SideEffect;
-  notice?: string;
+  group: StuckGroup;
+  /** 组内逐条重发失败的原因：一次只可能一条，但类型上给全。 */
+  notices: string[];
   busy: boolean;
   onRetry: () => void;
 }) {
-  const remedy = remedyForSideEffect(effect);
+  const first = group.effects[0];
+  const many = group.effects.length > 1;
+  const remedy = remedyForSideEffect(first);
+  // 组内各条的尝试次数不一定一样：说最大的那个，不说平均值——这里要的是「试到哪一步了」。
+  const attempts = Math.max(...group.effects.map((effect) => effect.attempts));
+  const titles = group.effects.map(sideEffectTitle);
+  const roster = titles.slice(0, 4).join("、") + (titles.length > 4 ? ` 等 ${titles.length} 条` : "");
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4">
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 dense font-medium">
-          {sideEffectTitle(effect)}
+          {many ? sideEffectKindName(first.kind) : sideEffectTitle(first)}
           <Badge
             variant="outline"
             className="border-transparent bg-status-danger-surface text-status-danger-text"
           >
             驻留副作用
           </Badge>
+          {many ? (
+            <span className="text-xs font-normal tabular-nums text-muted-foreground">
+              {group.effects.length} 条同一原因
+            </span>
+          ) : null}
           <span className="text-xs font-normal tabular-nums text-muted-foreground">
-            {effect.attempts > 0 ? `已试 ${effect.attempts} 次` : "还没试过"}
+            {attempts > 0 ? `已试 ${attempts} 次` : "还没试过"}
           </span>
         </div>
+        {many ? (
+          <p className="text-xs leading-relaxed break-words text-muted-foreground">{roster}</p>
+        ) : null}
         <p className="dense leading-relaxed break-words text-foreground">
-          {effect.last_error || "自动重试已放弃，等人工重发。"}
+          {first.last_error || "自动重试已放弃，等人工重发。"}
         </p>
         {remedy.hint ? (
           <p className="text-xs leading-relaxed break-words text-muted-foreground">{remedy.hint}</p>
         ) : null}
-        {notice ? (
-          <div className="pt-0.5">
-            <Notice tone="bad">{notice}</Notice>
+        {notices.length > 0 ? (
+          <div className="space-y-1 pt-0.5">
+            {notices.map((text) => (
+              <Notice key={text} tone="bad">
+                {text}
+              </Notice>
+            ))}
           </div>
         ) : null}
       </div>
@@ -1210,7 +1454,7 @@ function StuckRow({
         ) : null}
         <RowAction variant={remedy.settings ? "ghost" : "outline"} disabled={busy} onClick={onRetry}>
           <RotateCcw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
-          重发
+          {many ? `重发 ${group.effects.length} 条` : "重发"}
         </RowAction>
       </div>
     </div>
@@ -1470,7 +1714,7 @@ function useSideEffectRetry(
   const [errors, setErrors] = React.useState<Record<number, string>>({});
 
   const retry = React.useCallback(
-    async (id: number, title = `副作用 ${id}`) => {
+    async (id: number, title = `副作用 ${id}`, options?: { quiet?: boolean }) => {
       const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (busy === id) return;
       setBusy(id);
@@ -1483,7 +1727,8 @@ function useSideEffectRetry(
       try {
         await api.retrySideEffect(id);
         onReceipt?.({ title, tone: "ok", verb: "重发", text: "已重发，回到副作用队列。" });
-        await onRefresh();
+        // quiet：成组重发时由调用方在收尾统一刷一次，不为组里每一条拉一遍整面板。
+        if (!options?.quiet) await onRefresh();
         // 忙位先放：等下一帧只属于焦点交接，不能把按钮的旋转一起拖住。
         setBusy(null);
         await afterPaint();
@@ -1569,7 +1814,7 @@ function SideEffectQueue({
                     </div>
                   ) : null}
                 </div>
-                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <RowAction
                     variant="outline"
                     disabled={busy === effect.id}
@@ -1598,8 +1843,22 @@ function sideEffectTitle(effect: SideEffect): string {
   return number ? `${number} · ${label}` : label;
 }
 
+/** 只报科目、不报事件：一行里合并了好几个事件时，拿第一条的事件当标题就是骗人。 */
+function sideEffectKindName(kind: SideEffectKind): string {
+  switch (kind) {
+    case "list_removal":
+      return "删清单项";
+    case "jellyfin_refresh":
+      return "刷新 Jellyfin";
+    case "notify":
+      return "发 Telegram";
+    default:
+      return kind;
+  }
+}
+
 /**
- * 待办的动作名。
+ * 待办的动作名（带事件）。
  *
  * 通知的三种死法要能分辨（规格 §5.6）：token 无效、chat 未激活、其余发送失败——
  * 因为驻留的通知**不会**自动禁用集成，人要看着这一行去改哪一格。
@@ -1631,7 +1890,7 @@ function RowAction({ className, variant = "outline", ...props }: React.Component
     <Button
       variant={variant}
       // 手机上一律 44px 热区：值班时是单手刷屏，36px 的行内动作实测要瞄。
-      className={cn("h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs", className)}
+      className={cn(ROW_ACTION_SIZE, className)}
       {...props}
     />
   );
@@ -1706,10 +1965,7 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
                   event.currentTarget.scrollIntoView({ inline: "nearest", block: "nearest" });
                 }}
                 // 「需人工」筛的是**任务级**状态：全部版本都失败的作品。失败版本本身属于
-                // 上面那张卡，两者口径不同，所以这里把它们说出来。
-                title={
-                  filter.value === "failed" ? "任务级：只算全部版本都失败的作品" : undefined
-                }
+                // 上面那张卡，两者口径不同；解释常驻在筛选条下方，不在这里再说一遍。
                 className={cn(
                   "h-11 shrink-0 rounded-lg px-3 dense transition-colors md:h-7 md:px-2.5 md:text-xs",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
@@ -1724,13 +1980,11 @@ function TaskFilters({ query, onQuery }: { query: PanelQuery; onQuery: (next: Pa
           })}
         </div>
       </div>
-      {/* 口径解释不能只活在 hover 的 title 里（触屏没有 hover）：
-          选中「需人工」的那一句话就地可见，没选中不占地方。 */}
-      {query.state === "failed" ? (
-        <p className="mt-1.5 dense text-muted-foreground">
-          任务级口径：只算全部版本都失败的作品；单版本失败在上面「需要人工」里。
-        </p>
-      ) : null}
+      {/* 口径解释不能只活在 hover 的 title 里：触屏没有 hover，而回到面板的第一件事
+          往往就是点「需人工」看见 0。这句常驻，因为它解释的正是「点了之后为什么是空的」。 */}
+      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+        「需人工」是任务级口径：只算全部版本都失败的作品；单版本失败在上面的「需要人工」里。
+      </p>
     </div>
   );
 }
@@ -1758,8 +2012,7 @@ function EmptyTasks({
         </p>
         <Button
           variant="outline"
-          size="sm"
-          className="mt-3"
+          className={cn(ROW_ACTION_SIZE, "mt-3")}
           onClick={() => onQuery({ page: 1, q: "", state: "" })}
         >
           清除筛选
@@ -1784,8 +2037,7 @@ function EmptyTasks({
       <p className="mt-1 text-xs">换个番号，或把状态筛选放回「全部」。</p>
       <Button
         variant="outline"
-        size="sm"
-        className="mt-3"
+        className={cn(ROW_ACTION_SIZE, "mt-3")}
         onClick={() => onQuery({ page: 1, q: "", state: "" })}
       >
         清除筛选
@@ -1868,6 +2120,23 @@ function sourceShortLabel(source: TaskVersion["source"]): string {
 }
 
 /**
+ * versionsSpoken 是窄屏任务行的一句话版本摘要。
+ *
+ * 整行是一个 `<button>`，而按钮上的 `aria-label` 会盖掉整棵子树：以前那句只报
+ * 「3 个版本」，子元素里每颗胶囊自己的 aria-label 于是全部成了死代码——手机上
+ * 看不到、也听不到版本级状态，而桌面表格有。现在这句话把状态带过去。
+ */
+function versionsSpoken(task: TaskRow): string {
+  if (task.versions.length === 0) return "没有版本";
+  return task.versions
+    .map(
+      (version) =>
+        `${version.label || sourceShortLabel(version.source)} ${versionState(version.status).label}`,
+    )
+    .join("、");
+}
+
+/**
  * TaskDrawer 是任务详情抽屉（规格 §8.2）：版本列表（infohash/来源/标签/失败原因）
  * + 事件时间线 + 重试/强制重刮。只看刮削字段以外的状态面（v1 不做 provenance）。
  */
@@ -1932,11 +2201,7 @@ function TaskDrawer({
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
-      const items = Array.from(
-        dialogRef.current.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((element) => element.offsetParent !== null);
+      const items = focusablesIn(dialogRef.current);
       if (items.length === 0) return;
       const first = items[0];
       const last = items[items.length - 1];
@@ -2125,7 +2390,6 @@ function DrawerActions({
       {confirming ? (
         <div
           role="group"
-          aria-live="polite"
           aria-label="确认强制重刮"
           className="space-y-2 rounded-lg border border-status-progress-border bg-status-progress-surface px-3 py-2"
         >
@@ -2135,7 +2399,7 @@ function DrawerActions({
           <div className="flex flex-wrap items-center gap-2">
             <Button
               ref={confirmRef}
-              className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
+              className={PANEL_ACTION_SIZE}
               disabled={busy}
               onClick={() => void retry(true)}
             >
@@ -2147,7 +2411,7 @@ function DrawerActions({
             </Button>
             <Button
               variant="ghost"
-              className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
+              className={PANEL_ACTION_SIZE}
               onClick={() => {
                 wantForceFocus.current = true;
                 setConfirming(false);
@@ -2160,7 +2424,7 @@ function DrawerActions({
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
+            className={PANEL_ACTION_SIZE}
             disabled={busy}
             data-drawer-retry=""
             title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
@@ -2176,7 +2440,7 @@ function DrawerActions({
             <Button
               ref={forceRef}
               variant="outline"
-              className="h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm"
+              className={PANEL_ACTION_SIZE}
               disabled={busy}
               onClick={() => setConfirming(true)}
             >
@@ -2320,12 +2584,6 @@ function eventKindLabel(kind: TaskEvent["kind"]): string {
 }
 
 /**
- * useNow 是一分钟一跳的「现在」。
- *
- * 相对时间（3 分钟前）不自己走的话，一屏「3 分钟前」会挂到用户关掉标签页为止，
- * 那比写绝对时间更骗人。
- */
-/**
  * ShortcutsHelp 是 ? 的帮助浮层：键表一列，桌面 only。
  *
  * 模式复用抽屉：portal 到 body、role=dialog、Esc 关闭、开着时外壳（与抽屉）inert。
@@ -2334,14 +2592,17 @@ function eventKindLabel(kind: TaskEvent["kind"]): string {
 function ShortcutsHelp({
   onClose,
   closeRef,
+  dialogRef,
 }: {
   onClose: () => void;
   closeRef: React.RefObject<HTMLButtonElement | null>;
+  dialogRef: React.RefObject<HTMLElement | null>;
 }) {
   if (typeof document === "undefined") return null;
   const rows: [string, string][] = [
     ["/", "聚焦搜索框"],
-    ["r", "重试：焦点所在行；抽屉内是抽屉那颗"],
+    ["r", "重试：焦点所在行；抽屉里是抽屉那颗"],
+    ["Shift + R", "重新读取面板"],
     ["j / k", "抽屉内下一部 / 上一部任务"],
     ["?", "打开 / 关闭本帮助"],
     ["Esc", "关闭抽屉或本帮助"],
@@ -2353,6 +2614,7 @@ function ShortcutsHelp({
       onClick={onClose}
     >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="shortcuts-title"
@@ -2388,6 +2650,13 @@ function ShortcutsHelp({
   );
 }
 
+/**
+ * useNow 是一分钟一跳的「现在」。
+ *
+ * 相对时间（3 分钟前）不自己走的话，一屏「3 分钟前」会挂到用户关掉标签页为止，
+ * 那比写绝对时间更骗人。间隔取 60s：秒级的「正在跑 43 秒」不是这一跳能兑现的精度，
+ * 那一行说的是「醒着」，不是秒表。
+ */
 function useNow(interval = 60_000): number {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {

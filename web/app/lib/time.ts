@@ -60,6 +60,27 @@ export function formatWhen(
   return formatAbsolute(date);
 }
 
+/**
+ * 「已经挂了多久」：给「需要人工」的分节标题用。
+ *
+ * 与 formatWhen 同一条阶梯，只有一处不同：超过一周也不回落到绝对时间。
+ * 「最早 12 天前」回答的是「这件事我躲了多久」，而 `2026/10/24 09:11` 回答的是
+ * 「这是哪一天」——后者要人自己减一遍，正是值班台不该让人做的算术。
+ */
+export function formatAge(
+  value: string | number | Date | null | undefined,
+  now: number = Date.now(),
+): string {
+  const date = parse(value);
+  if (!date) return "—";
+  const delta = Math.max(0, now - date.getTime());
+  if (delta < MINUTE) return "刚刚";
+  if (delta < HOUR) return `${Math.floor(delta / MINUTE)} 分钟前`;
+  if (delta < DAY) return `${Math.floor(delta / HOUR)} 小时前`;
+  const days = Math.floor(delta / DAY);
+  return days === 1 ? "昨天" : `${days} 天前`;
+}
+
 /** 「多久以后」：副作用的下次尝试时间通常在将来。 */
 export function formatFuture(
   value: string | number | Date | null | undefined,

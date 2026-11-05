@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatInterval, formatWhen, formatFuture, formatAbsolute, formatElapsed } from "./time.ts";
+import {
+  formatAbsolute,
+  formatAge,
+  formatElapsed,
+  formatFuture,
+  formatInterval,
+  formatWhen,
+} from "./time.ts";
 
 const at = (iso: string) => new Date(iso).getTime();
 const now = at("2026-11-04T14:42:05Z");
@@ -66,4 +73,11 @@ test("读不到间隔就不说，绝不编一个默认值", () => {
   assert.equal(formatInterval(undefined), null);
   assert.equal(formatInterval(0), null);
   assert.equal(formatInterval("abc"), null);
+});
+
+test("「最早」超过一周仍说多少天前：生日要绝对时间，欠账要天数", () => {
+  assert.equal(formatAge("2026-10-24T14:42:05Z", now), "11 天前");
+  assert.equal(formatAge("2026-11-03T14:42:05Z", now), "昨天");
+  assert.equal(formatAge("2026-11-04T13:42:05Z", now), "1 小时前");
+  assert.equal(formatAge(null, now), "—");
 });

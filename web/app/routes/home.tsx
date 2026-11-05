@@ -7,10 +7,10 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
-import { Panel, isTaskState, loopLines, useNow, type PanelQuery } from "~/components/panel";
+import { Panel, isTaskState, loopLines, useNow, ROW_ACTION_SIZE, PANEL_ACTION_SIZE, type PanelQuery } from "~/components/panel";
 import { attentionRowCount } from "~/lib/attention";
 import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
-import { formatInterval } from "~/lib/time";
+import { durationSeconds, formatInterval } from "~/lib/time";
 import {
   api,
   isGatewayAuthError,
@@ -161,6 +161,11 @@ export default function Home() {
     reconcile: formatInterval(appConfig.reconcile_interval),
     sidefx: formatInterval(appConfig.sidefx_interval),
   };
+  // 自动复读的节奏跟清单轮询同拍：那是上游真正会变的频率，比它快只会读到同一份数据。
+  // 读不到间隔就不自动读（宁可让人按 Shift+R）；下限 15s，免得一个写错的 app_config
+  // 把面板变成连点器。
+  const pollSeconds = durationSeconds(appConfig.poll_interval);
+  const autoRefreshMs = pollSeconds === null ? null : Math.max(pollSeconds * 1000, 15_000);
 
   // 标题只描述**地址**，不预判门禁：读到 snapshot 之前不说「未初始化」。
   // 标题、导航高亮与加载文案读**地址**（route.view），只有未初始化才被门禁改写：
@@ -175,12 +180,12 @@ export default function Home() {
     ? !snapshot
       ? loadError
         ? "值班台暂时读不到"
-        : "面板"
+        : "正在读取面板"
       : rows > 0
         ? `${rows}${cut ? "+" : ""} 件事需要人工`
         : "没有要动手的事"
     : !snapshot
-      ? "集成设置"
+      ? "正在读取设置"
       : initialized
         ? "集成设置"
         : "初始化向导";
@@ -317,16 +322,13 @@ export default function Home() {
                 : `${route.view === "panel" ? "刷新没成功" : "读不到设置"}：${loadErrorText}`}
             <span className="mt-1 flex flex-wrap items-center gap-2">
               {gatewayExpired || gatewayBad ? (
-                <Button
-                  className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
-                  onClick={() => window.location.reload()}
-                >
+                <Button className={ROW_ACTION_SIZE} onClick={() => window.location.reload()}>
                   刷新页面
                 </Button>
               ) : (
                 <Button
                   variant="outline"
-                  className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
+                  className={ROW_ACTION_SIZE}
                   onClick={() => void refresh()}
                 >
                   重试
@@ -348,6 +350,7 @@ export default function Home() {
               pageSize={pageSize}
               loadedAt={loadedAt}
               intervals={intervals}
+              autoRefreshMs={autoRefreshMs}
               onQuery={writeQuery}
               onRefresh={refresh}
             />
@@ -443,15 +446,15 @@ function Unavailable({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {gateway ? (
           <>
-            <Button className="h-11 px-3 md:h-8" onClick={() => window.location.reload()}>
+            <Button className={PANEL_ACTION_SIZE} onClick={() => window.location.reload()}>
               刷新页面
             </Button>
-            <Button variant="outline" className="h-11 px-3 md:h-8" onClick={onRetry}>
+            <Button variant="outline" className={PANEL_ACTION_SIZE} onClick={onRetry}>
               再试一次
             </Button>
           </>
         ) : (
-          <Button className="h-11 px-3 md:h-8" onClick={onRetry}>
+          <Button className={PANEL_ACTION_SIZE} onClick={onRetry}>
             重试
           </Button>
         )}
