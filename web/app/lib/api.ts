@@ -286,15 +286,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     | { error?: { code?: string; message?: string } }
     | null;
 
-  // 非 JSON 只可能是中间层接的：网关会话过期时，authelia 会回一个 200 的登录页。
-  // 以前这里把 null 当 T 返回，调用方随后在拉链里抛错，页面就永远停在 spinner 上。
+  // 非 JSON 只可能是中间层接的：但「哪一种病」要分开诊——
+  // 200 + 登录页是 authelia 的会话过期，治法是重登后刷新；
+  // 非 200（502/503）是网关或上游暂时没回话，重登没用，等一等再刷新。
+  // 以前两者同诊（gateway_html），于是上游 502 被教去登录，白白重登一次。
   if (!body) {
     throw new HttpError(
       response.status,
-      "gateway_html",
+      response.ok ? "gateway_auth" : "gateway_bad",
       response.ok
         ? "网关返回的是登录页，不是数据"
-        : `网关返回了 HTTP ${response.status}，不是 JSON`,
+        : `网关返回了 HTTP ${response.status}，不是数据`,
     );
   }
 
@@ -309,14 +311,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /**
- * isGatewayAuthError 认出「不是应用说的，是前面那层网关说的」那一类失败。
+ * isGatewayAuthError 认出「不是应用说的，是前面那层网关说的」且要重登的那一类失败。
  *
- * 应用层没有鉴权（长期约束），401/403 与非 JSON 回包只可能来自网关。这两类失败唯一
- * 有意义的动作是重登，不能靠重试同一个请求。
+ * 应用层没有鉴权（长期约束），登录页（200 + HTML）与 401/403 只可能来自网关。这类失败
+ * 唯一有意义的动作是重登，不能靠重试同一个请求。
  */
 export function isGatewayAuthError(error: unknown): boolean {
   if (!(error instanceof HttpError)) return false;
-  return error.code === "gateway_html" || error.status === 401 || error.status === 403;
+  return error.code === "gateway_auth" || error.status === 401 || error.status === 403;
+}
+
+/**
+ * isGatewayBadError 认出网关的另一种死法：上游没回话（502/503/504）或网关回了非 JSON。
+ *
+ * 应用自己只会说 200/400/429/500（JSON 信封），这三档状态码只可能出自中间层。
+ * 治法与登录页相反：会话没失效，重登是白跑一趟，稍等再刷新才有意义。
+ */
+export function isGatewayBadError(error: unknown): boolean {
+  if (!(error instanceof HttpError)) return false;
+  return (
+    error.code === "gateway_bad" ||
+    error.status === 502 ||
+    error.status === 503 ||
+    error.status === 504
+  );
 }
 
 export const api = {

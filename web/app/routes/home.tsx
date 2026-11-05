@@ -14,6 +14,7 @@ import { formatInterval } from "~/lib/time";
 import {
   api,
   isGatewayAuthError,
+  isGatewayBadError,
   type Attention,
   type ConfigSnapshot,
   type Overview,
@@ -135,18 +136,23 @@ export default function Home() {
 
   // 从设置回到面板时重读一次：改完 Telegram 再回来，得看到改完之后的队列，
   // 而不是离开前的快照。首次挂载不重复拉（上面那个 effect 已经拉过了）。
-  const previousView = React.useRef<View | null>(null);
+  // 比较的是**地址**（route.view），不是门禁加工后的 view：后者在 snapshot 为 null
+  // 时把「/」算成 settings，数据一到又翻回 panel——一次多余的 refresh，
+  // 冷加载变成完整两波请求（Playwright 网络轨迹实测过）。
+  const previousRouteView = React.useRef<View | null>(null);
   React.useEffect(() => {
-    const previous = previousView.current;
-    previousView.current = view;
-    if (previous === "settings" && view === "panel") void refresh();
-  }, [view, refresh]);
+    const previous = previousRouteView.current;
+    previousRouteView.current = route.view;
+    if (previous === "settings" && route.view === "panel") void refresh();
+  }, [route.view, refresh]);
 
   const loop = loopState(snapshot, overview);
 
-  // 失败提示说清是哪一层的事：应用自己说的错，还是前面那层网关拦下的。
+  // 失败提示说清是哪一层的事，而且是哪一种病：应用自己说的错、网关要重登、
+  // 还是网关/上游暂时没回话（后者重登没用，等一等才有意义）。
   const loadErrorText = loadError instanceof Error ? loadError.message : "";
   const gatewayExpired = isGatewayAuthError(loadError);
+  const gatewayBad = !gatewayExpired && isGatewayBadError(loadError);
 
   // 三条循环的间隔读自 app_config；读不到就是 null，不编默认值。
   const appConfig = (snapshot?.sections?.app?.data ?? {}) as Record<string, unknown>;
@@ -167,7 +173,9 @@ export default function Home() {
   const cut = Boolean(attention?.failed_truncated || attention?.stalled_truncated);
   const title = onPanel
     ? !snapshot
-      ? "面板"
+      ? loadError
+        ? "值班台暂时读不到"
+        : "面板"
       : rows > 0
         ? `${rows}${cut ? "+" : ""} 件事需要人工`
         : "没有要动手的事"
@@ -218,7 +226,10 @@ export default function Home() {
                 {loop.text}
               </span>
             </div>
-            {loopLines(overview, intervals, now)
+            {/* 失败的那条循环排最前：侧栏这两行是「要不要再等」的答案，
+                不能让恰好会失败的那条循环永远被 slice 掉。 */}
+            {[...loopLines(overview, intervals, now)]
+              .sort((a, b) => Number(b.failing) - Number(a.failing))
               .slice(0, 2)
               .map((line) => (
                 <div key={line.label} className="flex items-baseline justify-between gap-2">
@@ -294,9 +305,11 @@ export default function Home() {
           <Notice tone="bad" onClose={() => setLoadError(null)}>
             {gatewayExpired
               ? `网关拦下了这次请求：${loadErrorText}。登录后再刷新本页。`
-              : `${route.view === "panel" ? "刷新没成功" : "读不到设置"}：${loadErrorText}`}
+              : gatewayBad
+                ? `网关或上游暂时没回话：${loadErrorText}。屏幕上还是上一次的数据，稍等一下再重试。`
+                : `${route.view === "panel" ? "刷新没成功" : "读不到设置"}：${loadErrorText}`}
             <span className="mt-1 flex flex-wrap items-center gap-2">
-              {gatewayExpired ? (
+              {gatewayExpired || gatewayBad ? (
                 <Button
                   className="h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs"
                   onClick={() => window.location.reload()}
@@ -343,7 +356,7 @@ export default function Home() {
           <Unavailable
             scope={route.view === "panel" ? "面板" : "设置"}
             errorText={loadErrorText}
-            gatewayExpired={gatewayExpired}
+            gatewayKind={gatewayExpired ? "auth" : gatewayBad ? "bad" : null}
             onRetry={() => void refresh()}
           />
         ) : (
@@ -382,19 +395,24 @@ function useAnnouncement(text: string, ready: boolean): string {
  *
  * 从前这里渲染 `null`：错误提示跟一个 `×`，关掉之后就只剩那句「正在读取…」，
  * 而取数 effect 不会再跑——人就被锁在永久的转圈里。现在它给完整的一句话、
- * 为什么，以及唯一有效的那个动作（网关续期后刷新页面 > 重试同一个失效会话）。
+ * 为什么，以及按病给的第一个动作。
+ *
+ * 网关的两种死法不再同诊：会话过期（登录页/401/403）教人重登；上游没回话
+ * （502/503）教人稍等再刷新——重登是白跑一趟。安抚句也按面给：面板只读是事实，
+ * 设置面恰恰可写，不能把同一句硬编码到两处。
  */
 function Unavailable({
   scope,
   errorText,
-  gatewayExpired,
+  gatewayKind,
   onRetry,
 }: {
   scope: string;
   errorText: string;
-  gatewayExpired: boolean;
+  gatewayKind: "auth" | "bad" | null;
   onRetry: () => void;
 }) {
+  const gateway = gatewayKind !== null;
   return (
     <section
       aria-labelledby="unavailable-title"
@@ -405,12 +423,18 @@ function Unavailable({
       </h2>
       <p className="mt-1.5 dense leading-relaxed text-foreground">{errorText}</p>
       <p className="mt-1 dense leading-relaxed text-muted-foreground">
-        {gatewayExpired
-          ? "这个应用自己没有登录页：401/403 与非 JSON 回包只可能来自前面那层网关。登录然后刷新，本页会自己读到数据。"
-          : "数据库或上游暂时没回话。重试是安全的：面板只读，不会重复下发任何动作。"}
+        {gatewayKind === "auth"
+          ? "这个应用自己没有登录页：登录页与 401/403 只可能来自前面那层网关。登录然后刷新，本页会自己读到数据。"
+          : gatewayKind === "bad"
+            ? `网关或上游暂时没回话。稍等一下再刷新页面；会话没有失效，不需要重新登录。`
+            : `数据库或上游暂时没回话。重试是安全的：${
+                scope === "面板"
+                  ? "面板只读，不会重复下发任何动作。"
+                  : "这一步只是重新读取，不会改任何设置。"
+              }`}
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {gatewayExpired ? (
+        {gateway ? (
           <>
             <Button className="h-11 px-3 md:h-8" onClick={() => window.location.reload()}>
               刷新页面
