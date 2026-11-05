@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput } from "~/components/form";
+import { CONFUSABLES, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER } from "~/lib/copy";
 import { groupByNumber, groupStuck, oldestCreatedAt, attentionRowCount, type FailureGroup, type StuckGroup } from "~/lib/attention";
 import {
   formatAbsolute,
@@ -104,6 +105,8 @@ export function Panel({
   loadedAt,
   intervals,
   autoRefreshMs,
+  helpOpen,
+  onHelpOpen,
   onQuery,
   onRefresh,
 }: {
@@ -121,6 +124,9 @@ export function Panel({
   intervals: { poll: string | null; reconcile: string | null; sidefx: string | null };
   /** 自动复读的间隔（毫秒）；null = 读不到轮询间隔，宁可不自动读、也不编一个默认值。 */
   autoRefreshMs: number | null;
+  /** 帮助浮层开着没有。状态住在 routes/home.tsx：侧栏那颗入口也在那边。 */
+  helpOpen: boolean;
+  onHelpOpen: (open: boolean) => void;
   onQuery: (next: PanelQuery) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -166,7 +172,6 @@ export function Panel({
   // ---- 快捷键：Alex 主循环的加速器（brief：/、r、j/k、?；输入框内静默；桌面 only）----
   // 它们是焦点的别名，不是第二套导航：r 只触发「焦点所在行」的动作，j/k 只在
   // 抽屉内走当前任务表顺序；触屏设备（无精确指针）不响应，手机零提示。
-  const [helpOpen, setHelpOpen] = React.useState(false);
   const helpCloseRef = React.useRef<HTMLButtonElement>(null);
   const helpDialogRef = React.useRef<HTMLElement>(null);
   const helpReturnRef = React.useRef<HTMLElement | null>(null);
@@ -189,9 +194,9 @@ export function Panel({
         if (!helpOpen) {
           helpReturnRef.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
-          setHelpOpen(true);
+          onHelpOpen(true);
         } else {
-          setHelpOpen(false);
+          onHelpOpen(false);
         }
         return;
       }
@@ -247,7 +252,7 @@ export function Panel({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, tasks, openTask, helpOpen, onRefresh]);
+  }, [selected, tasks, openTask, helpOpen, onHelpOpen, onRefresh]);
 
   // ---- 自动复读：值班台不能静止 ----
   //
@@ -294,7 +299,7 @@ export function Panel({
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        setHelpOpen(false);
+        onHelpOpen(false);
         return;
       }
       // 模态就得把 Tab 也管住：只抢 Esc 的弹层，键盘人一下 Tab 就回到了背后的页面上。
@@ -321,7 +326,7 @@ export function Panel({
       helpReturnRef.current = null;
       if (back?.isConnected) back.focus();
     };
-  }, [helpOpen]);
+  }, [helpOpen, onHelpOpen]);
 
   const counts = overview?.counts;
   // 统计行只放「还在动」的两个数。已入库是永远不需要动作的那个，挪到右端与新鲜度
@@ -411,7 +416,6 @@ export function Panel({
             className={ROW_ACTION_SIZE}
             onClick={() => void refresh()}
             disabled={refreshing}
-            title="重新读取面板（Shift + R）"
           >
             <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden />
             刷新
@@ -433,9 +437,7 @@ export function Panel({
 
       <Card>
         <CardHeader>
-          <CardTitle as="h2" title="一行一任务，按 movie_id 聚合；版本以小 chip 展示。">
-            任务
-          </CardTitle>
+          <CardTitle as="h2">任务</CardTitle>
           <CardDescription className="text-xs tabular-nums">
             {query.q || query.state ? `筛选后 ${total} 条` : `共 ${total} 条`}
           </CardDescription>
@@ -602,12 +604,7 @@ export function Panel({
 
       <Card>
         <CardHeader>
-          <CardTitle
-            as="h2"
-            title="三条循环各自单飞：轮询拉清单、对账补 qBittorrent 的漏、副作用队列各自重试。"
-          >
-            循环健康
-          </CardTitle>
+          <CardTitle as="h2">循环健康</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-1.5 dense">
           {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
@@ -674,9 +671,20 @@ export function Panel({
             );
           })}
           <Separator className="my-1" />
-          <Button variant="link" size="sm" asChild className="h-11 self-start px-0 text-sm md:h-7">
-            <Link to="/settings/app">去集成设置</Link>
-          </Button>
+          <div className="flex flex-wrap items-center gap-x-6">
+            <Button variant="link" size="sm" asChild className="h-11 self-start px-0 text-sm md:h-7">
+              <Link to="/settings/app">去集成设置</Link>
+            </Button>
+            {/* 帮助唯一可见的入口：手机上侧栏不存在，这是那条路。 */}
+            <Button
+              variant="link"
+              size="sm"
+              className="h-11 self-start px-0 text-sm md:h-7"
+              onClick={() => onHelpOpen(true)}
+            >
+              术语与快捷键
+            </Button>
+          </div>
         </CardContent>
       </Card>
       </div>
@@ -692,7 +700,7 @@ export function Panel({
 
       {helpOpen ? (
         <ShortcutsHelp
-          onClose={() => setHelpOpen(false)}
+          onClose={() => onHelpOpen(false)}
           closeRef={helpCloseRef}
           dialogRef={helpDialogRef}
         />
@@ -1821,12 +1829,7 @@ function SideEffectQueue({
   return (
     <Card>
       <CardHeader>
-        <CardTitle
-          as="h2"
-          title="删清单项、刷 Jellyfin、发通知都走这张表：同目标只排一条，失败退避重试，耗尽后移到「需要人工」。"
-        >
-          副作用队列
-        </CardTitle>
+        <CardTitle as="h2">副作用队列</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
         <div className="divide-y">
@@ -1940,10 +1943,8 @@ function RowAction({ className, variant = "outline", ...props }: React.Component
 
 const STATE_FILTERS: { value: TaskState | ""; label: string }[] = [
   { value: "", label: "全部" },
-  { value: "downloading", label: "下载中" },
-  { value: "processing", label: "加工中" },
-  { value: "finished", label: "已入库" },
-  { value: "failed", label: "失败" },
+  // 顺序与名字都从 copy 来：chip 就是面板自己那一行状态。
+  ...STATUS_ORDER.map((state) => ({ value: state, label: STATUS_NAMES[state] })),
 ];
 
 /**
@@ -2099,19 +2100,19 @@ function EmptyTasks({
 /** 四个状态名的唯一真相：徽章、时间线、图例都从这里取文案与色调。 */
 const TASK_STATE_LOOK: Record<TaskState, { label: string; className: string }> = {
   downloading: {
-    label: "下载中",
+    label: STATUS_NAMES.downloading,
     className: "border-status-info-border bg-status-info-surface text-status-info-text",
   },
   processing: {
-    label: "加工中",
+    label: STATUS_NAMES.processing,
     className: "border-status-progress-border bg-status-progress-surface text-status-progress-text",
   },
   finished: {
-    label: "已入库",
+    label: STATUS_NAMES.finished,
     className: "border-status-done-border bg-status-done-surface text-status-done-text",
   },
   failed: {
-    label: "失败",
+    label: STATUS_NAMES.failed,
     className: "border-status-danger-border bg-status-danger-surface text-status-danger-text",
   },
 };
@@ -2478,7 +2479,6 @@ function DrawerActions({
             className={PANEL_ACTION_SIZE}
             disabled={busy}
             data-drawer-retry=""
-            title="重试＝回加工开头，或按存的交付材料重新加种；已入库的版本只有「强制重刮」才会重跑。"
             onClick={() => void retry(false)}
           >
             <RotateCcw
@@ -2635,10 +2635,16 @@ function eventKindLabel(kind: TaskEvent["kind"]): string {
 }
 
 /**
- * ShortcutsHelp 是 ? 的帮助浮层：键表一列，桌面 only。
+ * ShortcutsHelp 是 ? 的帮助浮层：先快捷键、后术语，桌面与手机都能开。
  *
- * 模式复用抽屉：portal 到 body、role=dialog、Esc 关闭、开着时外壳（与抽屉）inert。
- * 全站唯一不带阴影的浮层——阴影属于抽屉，这是卡片。
+ * 以前它只有一张键表，而「这个词在这块屏上是什么意思」只活在几个 hover 的 title 里，
+ * 触屏等于没有。术语段收的是**面板上真会出现、真会同屏混淆**的词：四个状态名（左侧挂
+ * 真徽章，颜色即教材）+ 四条易混的（任务级/版本级、需要人工是地方、驻留组、三个「重X」）。
+ * 完整词表在仓内的 GLOSSARY.md，末尾留一行指过去，不在这里复制一份。
+ *
+ * 键表只在精确指针上列：手机没有键盘，列出来只是噪声；术语段两个尺寸都给。
+ * 模式复用抽屉：portal 到 body、role=dialog、Esc 关闭、Tab 在内部循环、
+ * 开着时外壳（与抽屉）inert。全站唯一不带阴影的浮层——阴影属于抽屉，这是卡片。
  */
 function ShortcutsHelp({
   onClose,
@@ -2650,6 +2656,10 @@ function ShortcutsHelp({
   dialogRef: React.RefObject<HTMLElement | null>;
 }) {
   if (typeof document === "undefined") return null;
+  // 与 keydown 的门同一判据：能按键盘才列键盘。
+  const precisePointer =
+    typeof window !== "undefined" &&
+    window.matchMedia("(hover: hover) and (pointer: fine)").matches;
   const rows: [string, string][] = [
     ["/", "聚焦搜索框"],
     ["r", "重试：焦点所在行；抽屉里是抽屉那颗"],
@@ -2670,31 +2680,80 @@ function ShortcutsHelp({
         aria-modal="true"
         aria-labelledby="shortcuts-title"
         onClick={(event) => event.stopPropagation()}
-        className="w-full max-w-sm rounded-xl bg-card p-5 ring-1 ring-foreground/10"
+        className="max-h-[85dvh] w-full max-w-sm overflow-y-auto rounded-xl bg-card p-5 ring-1 ring-foreground/10"
       >
         <div className="flex items-center justify-between gap-3">
           <h2 id="shortcuts-title" className="font-heading text-base font-medium">
-            快捷键
+            快捷键与术语
           </h2>
           <button
             ref={closeRef}
             type="button"
             onClick={onClose}
-            aria-label="关闭快捷键帮助"
+            aria-label="关闭帮助"
             className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
             <X className="size-4" aria-hidden />
           </button>
         </div>
-        <dl className="mt-3 space-y-1.5">
-          {rows.map(([keys, desc]) => (
-            <div key={keys} className="flex items-baseline justify-between gap-4">
-              <dt className="font-mono text-xs text-foreground">{keys}</dt>
-              <dd className="dense text-right text-muted-foreground">{desc}</dd>
-            </div>
-          ))}
-        </dl>
-        <p className="mt-3 text-xs text-muted-foreground">输入框里打字时快捷键不生效。</p>
+
+        {precisePointer ? (
+          <section aria-labelledby="help-shortcuts" className="mt-4">
+            <h3 id="help-shortcuts" className="text-xs font-medium text-muted-foreground">
+              快捷键
+            </h3>
+            <dl className="mt-2 space-y-1.5">
+              {rows.map(([keys, desc]) => (
+                <div key={keys} className="flex items-baseline justify-between gap-4">
+                  <dt className="font-mono text-xs text-foreground">{keys}</dt>
+                  <dd className="dense text-right text-muted-foreground">{desc}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="mt-2 text-xs text-muted-foreground">输入框里打字时快捷键不生效。</p>
+          </section>
+        ) : null}
+
+        <section aria-labelledby="help-status" className="mt-4">
+          <h3 id="help-status" className="text-xs font-medium text-muted-foreground">
+            状态
+          </h3>
+          <dl className="mt-2 space-y-2.5">
+            {STATUS_ORDER.map((state) => (
+              <div key={state}>
+                <dt>
+                  <Badge
+                    variant="outline"
+                    className={cn("font-normal", TASK_STATE_LOOK[state].className)}
+                  >
+                    {STATUS_NAMES[state]}
+                  </Badge>
+                </dt>
+                <dd className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  {STATUS_NOTES[state]}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section aria-labelledby="help-confusables" className="mt-4">
+          <h3 id="help-confusables" className="text-xs font-medium text-muted-foreground">
+            容易混的
+          </h3>
+          <dl className="mt-2 space-y-2.5">
+            {CONFUSABLES.map((entry) => (
+              <div key={entry.term}>
+                <dt className="dense font-medium">{entry.term}</dt>
+                <dd className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                  {entry.note}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <p className="mt-4 text-xs text-muted-foreground">完整词表在仓库的 GLOSSARY.md。</p>
       </section>
     </div>,
     document.body,

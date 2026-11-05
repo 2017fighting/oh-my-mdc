@@ -59,6 +59,17 @@ export default function Home() {
   const [loadedAt, setLoadedAt] = React.useState<number | null>(null);
   // 侧栏与手机统计行都要相对时间，而它们挂在外壳上（不是 Panel 里）。
   const now = useNow();
+  // 帮助浮层由外壳持有：侧栏那颗入口在 aside 里，浮层本身 portal 到 body（Panel 里渲染），
+  // 两边都得够得着同一份开关。
+  //
+  // 开关存的是「开着时的地址」而不是布尔：换视图地址就变，浮层自然收起，不需要一个
+  // 在 effect 里改状态的补丁（那会让渲染多跑一轮，也会把「地址是真相」这条破掉）。
+  const [helpRoute, setHelpRoute] = React.useState<string | null>(null);
+  const helpOpen = helpRoute === location.pathname;
+  const setHelpOpen = React.useCallback(
+    (open: boolean) => setHelpRoute(open ? location.pathname : null),
+    [location.pathname],
+  );
 
   // 面板的筛选与页号住在 URL 里：F5 不丢，还能把「只看失败」发给自己的另一个标签页。
   const query = readQuery(params);
@@ -244,12 +255,16 @@ export default function Home() {
                   </span>
                 </div>
               ))}
-            {/* 快捷键的唯一可发现性入口：桌面 only（侧栏本身 md 起才显示），
-                手机零提示零占位。 */}
+            {/* 帮助的一个入口（另一个在循环健康卡底部，手机就靠那颗）：
+                侧栏本身 md 起才显示，所以这一颗仍然只是桌面。 */}
             {onPanel && initialized ? (
-              <p className="pt-1 text-xs text-muted-foreground">
-                按 <span className="font-mono">?</span> 看快捷键
-              </p>
+              <button
+                type="button"
+                onClick={() => setHelpOpen(true)}
+                className="rounded-sm pt-1 text-left text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                按 <span className="font-mono">?</span> 看快捷键与术语
+              </button>
             ) : null}
           </div>
         </div>
@@ -351,6 +366,8 @@ export default function Home() {
               loadedAt={loadedAt}
               intervals={intervals}
               autoRefreshMs={autoRefreshMs}
+              helpOpen={helpOpen}
+              onHelpOpen={setHelpOpen}
               onQuery={writeQuery}
               onRefresh={refresh}
             />
