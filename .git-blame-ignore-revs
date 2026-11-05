@@ -1,0 +1,9 @@
+# 纯空白 / 纯格式的提交：git blame 跳过它们，行号仍算在真实改动上。
+#
+# 用之前先让它生效（本地默认不读这个文件，GitHub 会读）：
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# 只有「零逻辑变更」的提交可以进这里，每一条都在提交信息里附了证据。
+
+# Web: 纯空白：把 Panel 那一屏 316 行重新缩进（零逻辑变更）
+989ed474a01aa993047becf3081f364435716bef

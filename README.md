@@ -42,9 +42,16 @@ make dev
 | `make docker-build` | 构建发布镜像（仅 linux/amd64） |
 | `make docker-run` | 起 compose Postgres 并跑镜像，<http://localhost:8080/> |
 | `make image-smoke` | 镜像冒烟：起容器断言 /readyz、版本注入、壳页、非 root |
+| `make contrast` | 对比度探针：读 `app.css` 的 token，用 Chromium 采色，不达标 exit 2（本机跑，改颜色之后跑一次） |
 | `make db-down` / `make db-reset` | 停 Postgres / 停并清库 |
 
 `make` 是构建门的唯一真源：CI 只调这些 target。
+
+仓库里有一份 `.git-blame-ignore-revs`（纯空白提交清单）。让本地 blame 也跳过它们：
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
 
 ## 镜像与发布
 
