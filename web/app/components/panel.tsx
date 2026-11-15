@@ -2431,7 +2431,16 @@ function versionState(status: TaskState): { label: string; className: string } {
 
 /** 胶囊里用来源的短名：112px 装不下「JavDB 磁力 + 已入库」，全名在 title 里。 */
 function sourceShortLabel(source: TaskVersion["source"]): string {
-  return source === "mteam_torrent" ? "M-Team" : "JavDB";
+  switch (source) {
+    case "mteam_torrent":
+      return "M-Team";
+    case "manual":
+      return "手工";
+    case "backfill":
+      return "补录";
+    default:
+      return "JavDB";
+  }
 }
 
 /**
@@ -2852,8 +2861,18 @@ function stateLabel(state: string | undefined): string {
   return isTaskState(state) ? TASK_STATE_LOOK[state].label : "—";
 }
 
+/** 来源的中文名（GLOSSARY：手工登记、补录各自有词条，不借「清单」的名字）。 */
 function sourceLabel(source: TaskVersion["source"]): string {
-  return source === "mteam_torrent" ? "M-Team 种子" : "JavDB 磁力";
+  switch (source) {
+    case "mteam_torrent":
+      return "M-Team 种子";
+    case "manual":
+      return "手工登记";
+    case "backfill":
+      return "补录";
+    default:
+      return "JavDB 磁力";
+  }
 }
 
 function phaseLabel(phase: TaskVersion["error_phase"] | AttentionItem["phase"]): string {

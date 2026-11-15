@@ -128,8 +128,9 @@ export type TaskState = "downloading" | "processing" | "finished" | "failed";
 /** 一条版本（面板 chip 与抽屉列表）。 */
 export type TaskVersion = {
   infohash: string;
-  source: "javdb_magnet" | "mteam_torrent";
-  delivery: "magnet" | "torrent";
+  /** 四个来源与后端 CHECK 同一套词：清单磁力、M-Team 私种、手工登记（#39）、补录（#43）。 */
+  source: "javdb_magnet" | "mteam_torrent" | "manual" | "backfill";
+  delivery: "magnet" | "torrent" | "none";
   /** best-effort 展示标签（如「中文」），空串表示没有可展示的标签。 */
   label: string;
   status: TaskState;
