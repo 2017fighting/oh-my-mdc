@@ -1021,3 +1021,97 @@ func TestRunOnceRecordsLoopHealth(t *testing.T) {
 		t.Errorf("门禁轮次不该计入迭代: %+v", health.Iterations)
 	}
 }
+
+// ------------------------------------------------------------------ 渲染对账（#41）
+
+// fakeRenders 是渲染对账接缝的假实现：只数「有没有被叫到」。
+type fakeRenders struct {
+	progress organize.ReconcileProgress
+	err      error
+	calls    int
+	// order 非 nil 时记下调用顺序（与 fakeProcessor / fakeOrganizer 共用一份）。
+	order *[]string
+}
+
+func (f *fakeRenders) ReconcileRenders(context.Context) (organize.ReconcileProgress, error) {
+	f.calls++
+	if f.order != nil {
+		*f.order = append(*f.order, "renders")
+	}
+	return f.progress, f.err
+}
+
+// withRenders 换上渲染对账的假推进器。
+func (f *fixture) withRenders(reconciler reconcile.RenderReconciler) {
+	f.opts.Renderer = reconciler
+	f.runner = reconcile.New(f.opts)
+}
+
+// TestRunOnceDrivesTheRenderReconciler 钉住渲染对账的周期挂靠：补译与字段修订
+// 不重跑 organize（#41 病灶），所以回流挂在对账循环上——每轮一次，结果上报面板。
+func TestRunOnceDrivesTheRenderReconciler(t *testing.T) {
+	f := newFixture(t)
+	renders := &fakeRenders{progress: organize.ReconcileProgress{Scanned: 3, Rewritten: 1, Unchanged: 2}}
+	f.withRenders(renders)
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if renders.calls != 1 {
+		t.Fatalf("渲染对账被叫了 %d 次, want 1", renders.calls)
+	}
+	if result.Renders.Rewritten != 1 || result.Renders.Scanned != 3 {
+		t.Errorf("result.Renders = %+v, want Scanned=3 Rewritten=1", result.Renders)
+	}
+}
+
+// TestRunOnceRunsScrapeOrganizeThenRenders 钉住三段顺序：先取数、再整理入库，
+// 最后渲染对账——刚入库的版本这一轮就有人对账（正常时序下它是空转，零写盘）。
+func TestRunOnceRunsScrapeOrganizeThenRenders(t *testing.T) {
+	f := newFixture(t)
+	order := []string{}
+	processor := &fakeProcessor{order: &order}
+	organizer := &fakeOrganizer{order: &order}
+	renders := &fakeRenders{order: &order}
+	f.withProcessor(processor)
+	f.withOrganizer(organizer)
+	f.withRenders(renders)
+
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(order) != 3 || order[0] != "scrape" || order[1] != "organize" || order[2] != "renders" {
+		t.Errorf("顺序 = %v, want 取数 → 整理 → 渲染对账", order)
+	}
+}
+
+// TestRunOnceSkipsTheRenderReconcilerWhenGated 确认门禁关着时渲染对账也不跑。
+func TestRunOnceSkipsTheRenderReconcilerWhenGated(t *testing.T) {
+	f := newFixture(t)
+	f.settings.snapshot = settings.Snapshot{Paused: true, Sections: map[string]settings.SectionState{}}
+	renders := &fakeRenders{}
+	f.withRenders(renders)
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !result.Gated {
+		t.Fatalf("result = %+v, want Gated", result)
+	}
+	if renders.calls != 0 {
+		t.Errorf("门禁关着仍跑了渲染对账 %d 次", renders.calls)
+	}
+}
+
+// TestRunOnceReportsRenderReconcileErrors 确认渲染对账的失败记进这一轮的错误
+// （循环日志看得见），不吞掉下载侧与加工侧已经做完的工作。
+func TestRunOnceReportsRenderReconcileErrors(t *testing.T) {
+	f := newFixture(t)
+	f.withRenders(&fakeRenders{err: errors.New("媒体库目录不可写")})
+
+	if _, err := f.runner.RunOnce(context.Background()); err == nil {
+		t.Fatal("渲染对账错误应当传出来")
+	}
+}

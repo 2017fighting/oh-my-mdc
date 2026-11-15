@@ -202,6 +202,8 @@ func run(logger *slog.Logger) error {
 					Logger:    logger,
 					Processor: scrapeRunner,
 					Organizer: organizeRunner,
+					// 渲染对账（#41）：补译与字段修订的兑底回流，随对账周期流回盘上 movie.nfo。
+					Renderer: organizeRunner,
 				})
 				// 重启复位（规格 §6.1 重启行）：只复位 processing，其它状态一概不动。
 				if reset, err := reconcileRunner.ResetOnStartup(ctx); err != nil {

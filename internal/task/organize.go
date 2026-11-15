@@ -123,6 +123,45 @@ func (s *Store) HasFinishedVersion(ctx context.Context, movieID, exceptInfohash 
 	return exists, nil
 }
 
+// FinishedTask 是渲染对账（#41）的一条目标：一部已入库的作品与它的番号。
+//
+// 目录是「一番号一目录」（ADR-0008），一部作品（可能多条版本）共享一份 movie.nfo，
+// 所以目标按 movie_id 去重，番号就是目录名。
+type FinishedTask struct {
+	MovieID string
+	Number  string
+}
+
+// FinishedTasks 列渲染对账的目标：有过 finished 版本的任务，按 movie_id 去重。
+//
+// 渲染对账是兑底回流（#41），入库与强制重刮的落盘路径不在这里——只挑已经
+// 入过库的：它们盘上必有 movie.nfo，漂移才有意义。
+func (s *Store) FinishedTasks(ctx context.Context) ([]FinishedTask, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT t.movie_id, t.number
+		 FROM task t
+		 JOIN task_version v ON v.movie_id = t.movie_id
+		 WHERE v.status = 'finished'
+		 ORDER BY t.movie_id`)
+	if err != nil {
+		return nil, fmt.Errorf("task: 列已入库任务: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := []FinishedTask{}
+	for rows.Next() {
+		var finished FinishedTask
+		if err := rows.Scan(&finished.MovieID, &finished.Number); err != nil {
+			return nil, fmt.Errorf("task: 扫已入库任务: %w", err)
+		}
+		tasks = append(tasks, finished)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("task: 遍历已入库任务: %w", err)
+	}
+	return tasks, nil
+}
+
 // TaskOwningNumber 报告是否另有任务占着同一个番号；返回那个任务的 movie_id。
 //
 // 目录是「一番号一目录」（ADR-0008），所以两个任务撞上同一个番号时谁进这个目录

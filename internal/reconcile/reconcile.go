@@ -98,6 +98,13 @@ type Organizer interface {
 	ProcessPending(ctx context.Context) (organize.Progress, error)
 }
 
+// RenderReconciler 是渲染对账（#41）的推进接缝：用库内刮削元数据重新渲染 movie.nfo，
+// 与盘上文件逐槽位比对，漂移才重写。真实实现是 organize.Runner——渲染槽位的唯一真源
+// 在整理一段，对账永远比着「整理段今天会写出的样子」。
+type RenderReconciler interface {
+	ReconcileRenders(ctx context.Context) (organize.ReconcileProgress, error)
+}
+
 // Options 装配一个推进引擎 / 对账循环。
 type Options struct {
 	Store    *task.Store
@@ -118,6 +125,8 @@ type Options struct {
 	Processor Processor
 	// Organizer 是加工第二段（整理入库）的推进接缝；nil 时 reconcile 不碰整理。
 	Organizer Organizer
+	// Renderer 是渲染对账（#41）的推进接缝；nil 时 reconcile 不碰已入库任务的 movie.nfo。
+	Renderer RenderReconciler
 }
 
 // Runner 是推进引擎与对账循环。
@@ -134,6 +143,7 @@ type Runner struct {
 	progress  *progressTracker
 	processor Processor
 	organizer Organizer
+	renders   RenderReconciler
 }
 
 // New 构造引擎。
@@ -164,6 +174,7 @@ func New(opts Options) *Runner {
 		progress:  newProgressTracker(),
 		processor: opts.Processor,
 		organizer: opts.Organizer,
+		renders:   opts.Renderer,
 	}
 }
 
@@ -188,6 +199,8 @@ type Result struct {
 	Processing scrape.Progress
 	// Organized 是本轮加工第二段（整理入库，#29）的结果。
 	Organized organize.Progress
+	// Renders 是本轮渲染对账（#41）的结果。
+	Renders organize.ReconcileProgress
 }
 
 // Run 跑对账循环直到 ctx 结束。第一轮立即跑，之后按 app_config 的 reconcile_interval 等。
@@ -237,7 +250,8 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 			"failed", result.Failed, "stalled", result.Stalled,
 			"waiting", result.Waiting, "skipped", result.Skipped,
 			"scraped", result.Processing.Fetched, "reused", result.Processing.Reused,
-			"filed", result.Organized.Filed, "organize_failed", result.Organized.Failed, "err", err)
+			"filed", result.Organized.Filed, "organize_failed", result.Organized.Failed,
+			"renders_written", result.Renders.Rewritten, "err", err)
 	} else if r.loops != nil {
 		// 门禁拦下的轮次不算迭代，也不能一直挂着「正在跑」。
 		r.loops.Stop(loops.Reconcile)
@@ -353,6 +367,16 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	if r.organizer != nil {
 		progress, err := r.organizer.ProcessPending(ctx)
 		result.Organized = progress
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	// 渲染对账（#41）走在两段之后：刚入库的版本这一轮就有人对账（正常时序下
+	// 是空转零写盘）；补译与字段修订最迟下一个对账周期流回 movie.nfo。
+	if r.renders != nil {
+		progress, err := r.renders.ReconcileRenders(ctx)
+		result.Renders = progress
 		if err != nil {
 			errs = append(errs, err)
 		}
