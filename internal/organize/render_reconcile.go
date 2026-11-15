@@ -47,10 +47,14 @@ type ReconcileProgress struct {
 	Skipped int
 	// Failed 是判出漂移但重写失败的任务数。
 	Failed int
+	// FacesUpdated 是待补齐标注被扫场代评改写的任务数（#44）：判据算出的定态与
+	// 库中标注不同才写，相同零写库（不计入）。
+	FacesUpdated int
 }
 
 // ReconcileRenders 跑一轮渲染对账：对每部已入库作品重新 Render，与盘上 movie.nfo
-// 逐槽位比对，漂移才重写。
+// 逐槽位比对，漂移才重写；顺带用同一份四面判据扫场代评待补齐标注（#44——
+// 入库时评是主时刻，扫场代评是兜底回流）。
 //
 // 它不抢版本租约：对账不碰版本状态机，只读任务元数据、写一个文件；
 // 文件写入是原子的（temp+rename），与整理段并发也只会看到完整的新旧其一。
@@ -74,11 +78,14 @@ func (r *Runner) ReconcileRenders(ctx context.Context) (ReconcileProgress, error
 	var errs []error
 	for _, target := range targets {
 		progress.Scanned++
-		rewritten, err := r.reconcileRender(ctx, target, env)
+		rewritten, facesChanged, err := r.reconcileRender(ctx, target, env)
 		if err != nil {
 			progress.Failed++
 			errs = append(errs, err)
 			continue
+		}
+		if facesChanged {
+			progress.FacesUpdated++
 		}
 		switch rewritten {
 		case renderRewritten:
@@ -93,7 +100,8 @@ func (r *Runner) ReconcileRenders(ctx context.Context) (ReconcileProgress, error
 	if progress.Scanned > 0 {
 		r.logger.Debug("渲染对账结束",
 			"scanned", progress.Scanned, "rewritten", progress.Rewritten,
-			"unchanged", progress.Unchanged, "skipped", progress.Skipped, "failed", progress.Failed)
+			"unchanged", progress.Unchanged, "skipped", progress.Skipped,
+			"failed", progress.Failed, "faces", progress.FacesUpdated)
 	}
 	return progress, errors.Join(errs...)
 }
@@ -107,31 +115,39 @@ const (
 	renderRewritten                      // 有漂移：重写 movie.nfo
 )
 
-// reconcileRender 对账一部作品：渲染期望 → 读盘 → 逐槽位比 → 漂移才写。
-func (r *Runner) reconcileRender(ctx context.Context, target task.FinishedTask, env environment) (renderOutcome, error) {
+// reconcileRender 对账一部作品：渲染期望 → 读盘 → 逐槽位比 → 漂移才写；缺面扫场
+// 代评（#44）走在读 NFO 之前——与渲染共用同一批门卫，但 NFO 缺文件/解不开只挡
+// 渲染回流，不挡缺面评估。返回渲染结局与「缺面标注是否被改写」。
+func (r *Runner) reconcileRender(ctx context.Context, target task.FinishedTask, env environment) (renderOutcome, bool, error) {
 	// 目录归属：同番号撞了别的任务（规格 §7.2 碰撞行，驻留等人工）时，
 	// 两边元数据不同——对账谁的重写都是给对方捣乱，跳过。
 	owner, err := r.store.TaskOwningNumber(ctx, target.Number, target.MovieID)
 	if err != nil {
-		return renderSkipped, err
+		return renderSkipped, false, err
 	}
 	if owner != "" {
 		r.logger.Debug("渲染对账：番号归别的任务，跳过",
 			"movie_id", target.MovieID, "number", target.Number, "owner", owner)
-		return renderSkipped, nil
+		return renderSkipped, false, nil
 	}
 
 	meta, exists, err := r.store.Metadata(ctx, target.MovieID)
 	if err != nil {
-		return renderSkipped, err
+		return renderSkipped, false, err
 	}
 	if !exists {
-		return renderSkipped, nil
+		return renderSkipped, false, nil
+	}
+
+	// 缺面扫场代评（#44）：走到这里，与渲染回流同一批门卫（目录归属、库内元数据）都在手了。
+	facesChanged, err := r.reassessFaces(ctx, target, meta, env)
+	if err != nil {
+		return renderSkipped, false, fmt.Errorf("渲染对账 %s: 评待补齐面: %w", target.Number, err)
 	}
 
 	want, body, err := expectedRender(meta, target.Number, env.translationExpected)
 	if err != nil {
-		return renderSkipped, fmt.Errorf("渲染对账 %s: %w", target.Number, err)
+		return renderSkipped, facesChanged, fmt.Errorf("渲染对账 %s: %w", target.Number, err)
 	}
 
 	path := filepath.Join(env.mediaRoot, target.Number, NFOName)
@@ -140,35 +156,69 @@ func (r *Runner) reconcileRender(ctx context.Context, target task.FinishedTask, 
 		// 缺文件不重建：媒体库挂载抖动时空目录会让对账批量「复活」假条目，
 		// 喂给 Jellyfin 一堆空壳。漂移兜底管「内容旧了」，不管「文件没了」（补录归 #43）。
 		r.logger.Debug("渲染对账：盘上没有 movie.nfo，跳过", "number", target.Number, "path", path)
-		return renderSkipped, nil
+		return renderSkipped, facesChanged, nil
 	}
 	if err != nil {
-		return renderSkipped, fmt.Errorf("渲染对账 %s: 读 %s: %w", target.Number, path, err)
+		return renderSkipped, facesChanged, fmt.Errorf("渲染对账 %s: 读 %s: %w", target.Number, path, err)
 	}
 
 	var have nfoMovie
 	if err := xml.Unmarshal(onDisk, &have); err != nil {
 		// 解不开的文件不覆盖：里面可能有 Jellyfin 的私有段或人工修改，宁跳过勿损。
 		r.logger.Warn("渲染对账：盘上 movie.nfo 解不开，跳过", "number", target.Number, "path", path, "err", err)
-		return renderSkipped, nil
+		return renderSkipped, facesChanged, nil
 	}
 
 	drifted := driftedSlots(want, have)
 	if len(drifted) == 0 {
-		return renderUnchanged, nil
+		return renderUnchanged, facesChanged, nil
 	}
 
 	written, err := writeIfChanged(path, body)
 	if err != nil {
-		return renderSkipped, fmt.Errorf("渲染对账 %s: 重写 %s: %w", target.Number, path, err)
+		return renderSkipped, facesChanged, fmt.Errorf("渲染对账 %s: 重写 %s: %w", target.Number, path, err)
 	}
 	if !written {
 		// 槽位漂移但字节相同（理论上到不了这里）：writeIfChanged 的内容同不重写兜住。
-		return renderUnchanged, nil
+		return renderUnchanged, facesChanged, nil
 	}
 	r.logger.Info("渲染对账：movie.nfo 落后于库内元数据，已重写",
 		"number", target.Number, "slots", drifted)
-	return renderRewritten, nil
+	return renderRewritten, facesChanged, nil
+}
+
+// reassessFaces 扫场代评缺面（#44）：入库那一刻的评估是主时刻，这里是兜底回流——
+// 0.3.0 前入库的存量任务 missing_faces 全空，由对账周期用同一份 MissingFaces 纯函数
+// 补评（dir、meta、演员行数、译文开关，与入库处同一份事实）。返回标注是否被改写。
+//
+// 三条纪律（与渲染回流同款）：
+//
+//   - 目录不在盘上（挂载抖动/被挪走）没法判「无任何图」：跳过，不把抖动写成标注；
+//   - 补录任务（全部版本 source=backfill）豁免演员面——与 markMissingFaces 同一条
+//     规则（规格 §6.3）：演员只来自 JavDB，补录结构性永缺，计入就永远摘不掉；
+//   - 算出的定态与库中相同就零写库，不制造假动静。
+func (r *Runner) reassessFaces(ctx context.Context, target task.FinishedTask, meta task.Metadata, env environment) (bool, error) {
+	dir := filepath.Join(env.mediaRoot, target.Number)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		r.logger.Debug("渲染对账：目录不在盘上，缺面没法判，跳过",
+			"movie_id", target.MovieID, "number", target.Number, "dir", dir)
+		return false, nil
+	}
+
+	faces := MissingFaces(dir, meta, target.ActorCount, env.translationExpected)
+	if target.BackfillOnly {
+		faces = slices.DeleteFunc(faces, func(face string) bool { return face == task.FaceActors })
+	}
+	if slices.Equal(faces, target.MissingFaces) {
+		return false, nil
+	}
+
+	if err := r.store.SetMissingFaces(ctx, target.MovieID, faces); err != nil {
+		return false, err
+	}
+	r.logger.Info("渲染对账：待补齐标注落后于盘上/库内事实，已改写",
+		"movie_id", target.MovieID, "number", target.Number, "faces", faces)
+	return true, nil
 }
 
 // expectedRender 用库内元数据渲染一份：返回 omd 拥有的槽位（比对用）与

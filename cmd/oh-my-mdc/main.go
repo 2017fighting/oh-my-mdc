@@ -191,6 +191,15 @@ func run(logger *slog.Logger) error {
 					Logger:   logger,
 				})
 
+				// 补录（GLOSSARY，#43）：面板的「未补录目录」扫描与一键登记。
+				// d298887 只接了半根线（声明与 nil 判断在、构造没写），
+				// /api/backfill/scan 实测 503「补录未装配」（#44）——这里补上装配。
+				backfillRunner = backfill.New(backfill.Options{
+					Store:    taskStore,
+					Settings: settingsStore,
+					Logger:   logger,
+				})
+
 				// 下载完成的第二条通道：qbt 回调（即时）+ 对账循环（5 分钟）。
 				// 两者共用一个推进引擎，互斥靠版本行租约（规格 §4.4）。
 				// 对账同时推进 processing：取数段交给 scrape（§6.2）。

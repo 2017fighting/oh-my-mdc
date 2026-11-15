@@ -316,6 +316,150 @@ func TestRenderReconcileLeavesForeignDirectoriesAlone(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- 缺面扫场（#44）
+
+// taskUpdatedAt 读任务的 updated_at：零写库断言用（SetMissingFaces 会更新它，
+// 没写就不动——比自报计数更硬的证据）。
+func taskUpdatedAt(t *testing.T, f *fixture, movieID string) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := f.database.Pool().QueryRow(context.Background(),
+		`SELECT updated_at FROM task WHERE movie_id = $1`, movieID,
+	).Scan(&at); err != nil {
+		t.Fatalf("读 updated_at: %v", err)
+	}
+	return at
+}
+
+// clearMissingFaces 把标注抹成空集：模拟 0.3.0 前入库的存量任务——那时入库路径
+// 还没有缺面评估，missing_faces 全空，「待补齐」区对旧伤失明（#44 的病灶）。
+func clearMissingFaces(t *testing.T, f *fixture, movieID string) {
+	t.Helper()
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`UPDATE task SET missing_faces = '{}' WHERE movie_id = $1`, movieID); err != nil {
+		t.Fatalf("抹标注: %v", err)
+	}
+}
+
+// TestRenderReconcileAssessesMissingFacesForLegacyTasks 钉住 #44 的主验收：
+// 存量任务（标注全空）盘上无图、库里无演员，渲染对账扫场用同一份四面判据代评，
+// 把缺面落进 task.missing_faces——待补齐区对旧伤不再失明（SVMGM-032 型）。
+func TestRenderReconcileAssessesMissingFacesForLegacyTasks(t *testing.T) {
+	f := newFixture(t)
+	fileOneVersion(t, f, metadata(time.Now().Add(-time.Hour).UTC(), nil, nil))
+	clearMissingFaces(t, f, movieID)
+
+	progress, err := f.runner.ReconcileRenders(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileRenders: %v", err)
+	}
+	if progress.FacesUpdated != 1 {
+		t.Fatalf("progress = %+v, want FacesUpdated=1（缺图缺演员，该落标注）", progress)
+	}
+	if faces := missingFacesOf(t, f, movieID); !equalFaces(faces, []string{task.FaceImages, task.FaceActors}) {
+		t.Errorf("missing_faces = %v, want [images actors]（默认夹具翻译禁用，title_zh 不判）", faces)
+	}
+}
+
+// TestRenderReconcileExemptsActorFaceForBackfillTasks 钉住补录豁免（规格 §6.3）：
+// 扫场代评与入库处同一条规则——补录任务（全部版本 source=backfill）的演员面是
+// 结构性永缺，不计入待补齐；其余面照评照写。
+func TestRenderReconcileExemptsActorFaceForBackfillTasks(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+
+	dir := filepath.Join(f.mediaRoot, backfillNumber)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("建目录: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SONE-682.mkv"), []byte("video-main"), 0o644); err != nil {
+		t.Fatalf("写视频: %v", err)
+	}
+	hash := task.BackfillInfohash(backfillNumber, "SONE-682.mkv")
+	seedBackfillVersion(t, f, backfillNumber, hash, "SONE-682.mkv", 111)
+	// 取到过元数据：简介在、无图、无演员（补录结构性取不到）。翻译禁用 → title_zh 不判。
+	if err := f.store.SaveMetadata(ctx, backfillNumber,
+		task.Lease{Infohash: hash, Owner: "scrape"}, metadata(fetchedAt, nil, nil), nil,
+	); err != nil {
+		t.Fatalf("SaveMetadata: %v", err)
+	}
+	if progress, err := f.runner.ProcessPending(ctx); err != nil || progress.Filed != 1 {
+		t.Fatalf("progress = %+v err = %v, want Filed=1", progress, err)
+	}
+	clearMissingFaces(t, f, backfillNumber)
+
+	progress, err := f.runner.ReconcileRenders(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileRenders: %v", err)
+	}
+	if progress.FacesUpdated != 1 {
+		t.Fatalf("progress = %+v, want FacesUpdated=1（缺图该落标注）", progress)
+	}
+	if faces := missingFacesOf(t, f, backfillNumber); !equalFaces(faces, []string{task.FaceImages}) {
+		t.Errorf("missing_faces = %v, want [images]（补录豁免演员面）", faces)
+	}
+}
+
+// TestRenderReconcileClearsStaleFacesWhenEverythingIsComplete 钉住摘标方向：
+// 四面事实都齐（图在盘、演员在库、简介与译文在列）而标注还是存量坏值时，
+// 扫场用同一份判据把空集写回去——代评不只「落标」，也包括「摘标」。
+func TestRenderReconcileClearsStaleFacesWhenEverythingIsComplete(t *testing.T) {
+	f := newFixture(t)
+	enableTranslation(f)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	plURL := "https://pics.test/abp123pl.jpg"
+	f.images.bodies[plURL] = imageBytes(t, 1200, 800, 255, "jpeg")
+	writeDownloads(t, f.downloads, map[string]string{number + ".mkv": "video"})
+	f.addProcessingVersion(t, movieID, number, hashA, "",
+		metadata(fetchedAt, []string{plURL}, nil))
+	// 译文是取数后的独立一步（SaveMetadata 不碰 zh 两列）。
+	if err := f.store.SaveTranslation(context.Background(), movieID,
+		task.Translated{TitleZH: "一个月禁欲的尽头", OutlineZH: "S1 纤细女优豪华共演"}); err != nil {
+		t.Fatalf("SaveTranslation: %v", err)
+	}
+	seedActors(t, f, movieID)
+	if progress, err := f.runner.ProcessPending(context.Background()); err != nil || progress.Filed != 1 {
+		t.Fatalf("progress = %+v err = %v, want Filed=1", progress, err)
+	}
+	// 存量坏标注：明明四面齐，老数据却带着缺口。
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`UPDATE task SET missing_faces = '{images,actors}' WHERE movie_id = $1`, movieID); err != nil {
+		t.Fatalf("种坏标注: %v", err)
+	}
+
+	progress, err := f.runner.ReconcileRenders(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileRenders: %v", err)
+	}
+	if progress.FacesUpdated != 1 {
+		t.Fatalf("progress = %+v, want FacesUpdated=1（标注与事实不符，该摘标）", progress)
+	}
+	if faces := missingFacesOf(t, f, movieID); len(faces) != 0 {
+		t.Errorf("missing_faces = %v, want 空（四面齐写空集）", faces)
+	}
+}
+
+// TestRenderReconcileLeavesUnchangedFacesUnwritten 钉住空转面：标注已是判据算出的
+// 定态时零写库——updated_at 不动，不制造假动静（与渲染回流「空转零写盘」同一纪律）。
+func TestRenderReconcileLeavesUnchangedFacesUnwritten(t *testing.T) {
+	f := newFixture(t)
+	fileOneVersion(t, f, metadata(time.Now().Add(-time.Hour).UTC(), nil, nil))
+	// 入库已标 [images actors]，与扫场将算出的一致。
+	before := taskUpdatedAt(t, f, movieID)
+
+	progress, err := f.runner.ReconcileRenders(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileRenders: %v", err)
+	}
+	if progress.FacesUpdated != 0 || progress.Unchanged != 1 {
+		t.Fatalf("progress = %+v, want FacesUpdated=0 Unchanged=1（定态零写库）", progress)
+	}
+	if after := taskUpdatedAt(t, f, movieID); !after.Equal(before) {
+		t.Errorf("无变化却写了库：updated_at %v → %v", before, after)
+	}
+}
+
 // TestRenderReconcileGatesLikeTheLoops 钉住门禁：未初始化/已暂停时对账零动作，
 // 与三条循环同一句判词（它跑在对账循环里，门禁不该另起一套）。
 func TestRenderReconcileGatesLikeTheLoops(t *testing.T) {

@@ -270,7 +270,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 **NFO 约定**（照搬 open-mdcng 实测 + 标题槽改造）：固定名 `movie.nfo`（多片目录里番号命名不会被读）；原子写 temp+rename；内容 hash 同则不重写（免无谓 rescan）；**`<sorttitle>` = 纯番号**；不写 uniqueid/dateadded/lockedfields/watched/playcount；数字零值省略；多值重复元素不拼接。
 
-**渲染对账**（#41，GLOSSARY 同名词条）：补译与字段修订只更新 DB、不重跑 organize，盘上 `movie.nfo` 会停在旧值——对账循环每轮用库内元数据重新 Render，与盘上文件**逐槽位**比对（槽位集 = 上表 NFO 槽列 + 演员序列；期望值由 Render 产出再解析回来，保证与整理段同一标准），漂移才重写，且走同一套原子写 + 内容同不重写。Jellyfin 的 NFO writer 会改写同一文件（lockdata/dateadded/playcount/watched/resume/fileinfo、演员头像换本地缓存路径），槽位值不变——这些不算漂移，**整文件比对会两边互覆永动**；演员只比 name 序列（thumb 归 Jellyfin 本地化）。对账是兑底回流：入库与强制重刮的落盘路径照旧；空转零写盘（mtime 不变，不触发 Jellyfin rescan）；盘上文件缺失不重建（挂载抖动时批量重建只会喂假条目，重建归补录）；同番号目录归别的任务时跳过（§7.2 碰撞行等人工，对账不掺和）。
+**渲染对账**（#41，GLOSSARY 同名词条）：补译与字段修订只更新 DB、不重跑 organize，盘上 `movie.nfo` 会停在旧值——对账循环每轮用库内元数据重新 Render，与盘上文件**逐槽位**比对（槽位集 = 上表 NFO 槽列 + 演员序列；期望值由 Render 产出再解析回来，保证与整理段同一标准），漂移才重写，且走同一套原子写 + 内容同不重写。Jellyfin 的 NFO writer 会改写同一文件（lockdata/dateadded/playcount/watched/resume/fileinfo、演员头像换本地缓存路径），槽位值不变——这些不算漂移，**整文件比对会两边互覆永动**；演员只比 name 序列（thumb 归 Jellyfin 本地化）。对账是兑底回流：入库与强制重刮的落盘路径照旧；空转零写盘（mtime 不变，不触发 Jellyfin rescan）；盘上文件缺失不重建（挂载抖动时批量重建只会喂假条目，重建归补录）；同番号目录归别的任务时跳过（§7.2 碰撞行等人工，对账不掺和）。渲染对账顺带**扫场代评**待补齐标注（#44）：0.3.0 前入库的存量任务 `missing_faces` 全空，对账逐任务调**同一份四面判据**（#42 的 `MissingFaces` 纯函数；dir＝`media_root/{番号}`、meta＝库值、演员数＝task_actor 行数、译文开关与排版同源），算出的定态与库中标注不符才写（相同零写库）；补录任务的演员面豁免与入库处同一条规则（§6.3）。入库时的评估照旧是主时刻（强刮摘标的时机不变），扫场代评是兜底回流；目录不在盘上（挂载抖动）没法判「无任何图」，跳过不写。
 
 **图片落盘**：`poster.jpg`（横版 sleeve 右裁 2:3，DMM 缺则 JavDB 封面右裁）、`fanart.jpg`（原横版）、`extrafanart/fanart{N}.jpg`（jp-N 预览）；扩展名随源 URL 不转格式；预览收缩时清理旧 fanartN。`<actor><thumb>` 直写 JavDB URL（Jellyfin 自拉），v1 不下载头像。
 

@@ -157,15 +157,30 @@ func (s *Store) HasFinishedVersion(ctx context.Context, movieID, exceptInfohash 
 type FinishedTask struct {
 	MovieID string
 	Number  string
+	// MissingFaces 是库中的待补齐标注现状（task.missing_faces）：渲染对账的扫场
+	// 代评（#44）拿判据算出的定态与它比对，相同零写库。
+	MissingFaces []string
+	// ActorCount 是 task_actor（role='actor'）的行数：四面判据的「无演员」面
+	// 用它评（#44；与整理段 markMissingFaces 读同一张表）。
+	ActorCount int
+	// BackfillOnly 表示这个任务的全部版本都是补录（source=backfill）：演员面对
+	// 补录是结构性永缺，扫场代评沿用入库处的豁免（规格 §6.3）。
+	BackfillOnly bool
 }
 
 // FinishedTasks 列渲染对账的目标：有过 finished 版本的任务，按 movie_id 去重。
+// 一并带上扫场代评缺面（#44）要用的三样库内事实：标注现状、演员行数、
+// 是否纯补录——都随这一条查询取齐，扫场不再逐任务补查。
 //
 // 渲染对账是兑底回流（#41），入库与强制重刮的落盘路径不在这里——只挑已经
 // 入过库的：它们盘上必有 movie.nfo，漂移才有意义。
 func (s *Store) FinishedTasks(ctx context.Context) ([]FinishedTask, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT t.movie_id, t.number
+		`SELECT DISTINCT t.movie_id, t.number, t.missing_faces,
+		        (SELECT count(*) FROM task_actor ta
+		          WHERE ta.movie_id = t.movie_id AND ta.role = 'actor'),
+		        NOT EXISTS (SELECT 1 FROM task_version v2
+		                     WHERE v2.movie_id = t.movie_id AND v2.source <> 'backfill')
 		 FROM task t
 		 JOIN task_version v ON v.movie_id = t.movie_id
 		 WHERE v.status = 'finished'
@@ -178,7 +193,8 @@ func (s *Store) FinishedTasks(ctx context.Context) ([]FinishedTask, error) {
 	tasks := []FinishedTask{}
 	for rows.Next() {
 		var finished FinishedTask
-		if err := rows.Scan(&finished.MovieID, &finished.Number); err != nil {
+		if err := rows.Scan(&finished.MovieID, &finished.Number, &finished.MissingFaces,
+			&finished.ActorCount, &finished.BackfillOnly); err != nil {
 			return nil, fmt.Errorf("task: 扫已入库任务: %w", err)
 		}
 		tasks = append(tasks, finished)
