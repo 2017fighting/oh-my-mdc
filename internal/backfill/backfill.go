@@ -3,14 +3,18 @@
 //
 //   - **Scan**：扫 media_root 下的 `{番号}/` 目录 ∧ 任务表无此番号 →「未补录目录」列表。
 //     列表与任务表实时一致——补录成功的那一刻，目录就从列表里消失。
-//   - **Backfill**（一键补录）：删目录里 mdcng 时代的 `{番号}*.nfo`（movie.nfo 除外），
-//     然后一个事务把任务与版本落库：目录里每个现有视频记为一条已就位的版本
-//     （source=backfill、delivery=none、processing、force_rescrape、无 add_pending）。
+//   - **Backfill**（一键补录）：一个事务把任务与版本落库：目录里每个现有视频记为
+//     一条已就位的版本（source=backfill、delivery=none、processing、force_rescrape、
+//     无 add_pending）；登记成功后删目录里 mdcng 时代的 `{番号}*.nfo`
+//     （movie.nfo 除外）——删除排在落库之后：先删后登记的崩溃窗口是
+//     「旧件已删、任务未建」，反过来最坏只是留下无害死重（Jellyfin 读 movie.nfo 优先）。
 //
 // 「立即强制重刮」不是这里另起的动作：登记出来的版本天生 processing + force_rescrape，
 // 下一轮对账循环的取数段会带着「不复用」标记去取数，整理段重写 NFO 与图片后照常
 // 入库——Jellyfin 刷新与「入库完成」通知由入库路径照发，「下载开始」不发（无下载）。
-// 补录完仍缺的关键面（演员等）由整理段按四面判据标「待补齐」（#42 的机器接着管）。
+// 补录完仍缺的关键面由整理段按四面判据标「待补齐」（#42 的机器接着管），
+// 唯演员面例外：取数只问 DMM，演员只来自 JavDB，它对补录是结构性永缺，
+// 不计入待补齐（否则强刮摘标永远摘不掉；规格 §6.3）。
 //
 // 碰撞沿用现有规则：番号已有任务（轮询/手工来的，另一个 movie_id）→ 幂等放行
 // （GLOSSARY「补录」：不抢别人的目录）；目录里没有视频 → 拒绝（没有可登记的版本，
@@ -142,11 +146,13 @@ type Result struct {
 	Reason string
 }
 
-// Backfill 对一个目录执行一键补录：删旧 NFO → 登记任务与版本（一个事务）。
+// Backfill 对一个目录执行一键补录：登记任务与版本（一个事务）→ 登记成功后删旧 NFO。
 //
 // 幂等的关键顺序：先查重（番号已有任务 → 直接回 duplicate，零写入零删除），
-// 再删旧 NFO（本身可重跑），最后落库。崩在删与落之间，目录仍在列表里，
-// 再点一次就补上——每一步都向同一终态收敛。
+// 落库成功之后才删旧 NFO（规格 §6.3）。先删后登记的崩溃窗口是「旧件已删、
+// 任务未建」——目录从「未补录」里消失却没人接管；反过来（登记→删）登记失败
+// 或崩在两步之间，旧件原地不动，最坏只是留下无害死重（Jellyfin 读 movie.nfo 优先），
+// 不会造成状态错。
 func (r *Runner) Backfill(ctx context.Context, number string) (Result, error) {
 	number = strings.TrimSpace(number)
 	if number == "" || number == "." || number == ".." || strings.ContainsAny(number, `/\`) {
@@ -167,13 +173,10 @@ func (r *Runner) Backfill(ctx context.Context, number string) (Result, error) {
 	if _, taken, err := r.store.TaskIDByNumber(ctx, number, ""); err != nil {
 		return Result{}, err
 	} else if taken {
-		return Result{
-			Number: number, MovieID: number, Outcome: OutcomeDuplicate,
-			Reason: "这个番号已经有任务了",
-		}, nil
+		return duplicateResult(number), nil
 	}
 
-	mediaRoot, err := r.mediaRoot(ctx)
+	mediaRoot, err := r.mediaRootConfigured(ctx)
 	if err != nil {
 		return Result{}, err
 	}
@@ -190,20 +193,18 @@ func (r *Runner) Backfill(ctx context.Context, number string) (Result, error) {
 		return Result{}, fmt.Errorf("%w：%s", ErrNoVideos, dir)
 	}
 
-	if err := removeLegacyNfos(dir, number); err != nil {
-		return Result{}, err
-	}
-
 	inserted, err := r.store.SaveBackfill(ctx, task.Backfill{Number: number, Videos: videos})
 	if err != nil {
 		return Result{}, err
 	}
 	if !inserted {
-		// 预检与落库之间有人建了同番号任务：同一句幂等出口，回执说清零写入。
-		return Result{
-			Number: number, MovieID: number, Outcome: OutcomeDuplicate,
-			Reason: "这个番号已经有任务了",
-		}, nil
+		// 预检与落库之间有人建了同番号任务：同一句幂等出口，零写入零删文件。
+		return duplicateResult(number), nil
+	}
+
+	// 登记成功了才动盘上的旧件（规格 §6.3 的顺序）：上面任何一步失败，旧 NFO 原样。
+	if err := removeLegacyNfos(dir, number); err != nil {
+		return Result{}, err
 	}
 
 	r.logger.Info("补录完成",
@@ -216,7 +217,19 @@ func (r *Runner) Backfill(ctx context.Context, number string) (Result, error) {
 	}, nil
 }
 
-// mediaRoot 读媒体库根目录；门禁没开或目录没配都不往下走。
+// duplicateResult 是「番号已有任务」的幂等回执（GLOSSARY「补录」碰撞行）：
+// 零写入、零删文件，回执把零写入说清。预检与落库两个出口同形，只有一处定义。
+func duplicateResult(number string) Result {
+	return Result{
+		Number:  number,
+		MovieID: number,
+		Outcome: OutcomeDuplicate,
+		Reason:  "这个番号已经有任务了",
+	}
+}
+
+// mediaRoot 读媒体库根目录；门禁没开或目录没配都不往下走（Scan 的入口：自己
+// 读快照、过门禁）。
 func (r *Runner) mediaRoot(ctx context.Context) (string, error) {
 	snapshot, err := r.settings.Load(ctx)
 	if err != nil {
@@ -225,6 +238,12 @@ func (r *Runner) mediaRoot(ctx context.Context) (string, error) {
 	if reason := snapshot.GateReason(); reason != "" {
 		return "", fmt.Errorf("%w：%s", ErrGated, reason)
 	}
+	return r.mediaRootConfigured(ctx)
+}
+
+// mediaRootConfigured 从设置里取媒体库根目录。门禁判断归调用方：Backfill 已经
+// 自己读过快照、过了门禁，从这里不再重复执行 Load 与门禁判断。
+func (r *Runner) mediaRootConfigured(ctx context.Context) (string, error) {
 	input, err := r.settings.Input(ctx, "jellyfin")
 	if errors.Is(err, settings.ErrNotConfigured) {
 		return "", fmt.Errorf("%w：Jellyfin 那一节还没配置", ErrGated)
@@ -239,14 +258,11 @@ func (r *Runner) mediaRoot(ctx context.Context) (string, error) {
 	return root, nil
 }
 
-// backfillVideo 是 dirVideos 的一行结果：task.BackfillVideo 的组装中间态。
-type backfillVideo = task.BackfillVideo
-
 // dirVideos 扫一个目录里的视频文件（递归，自然顺序），并给出每个文件的
 // §7.2 文件名分词（label 与分片序号）。rel_path 相对目录本身。
 //
 // 主分片是序号最小的那片；同序号的多片按出现顺序取第一片打标记。
-func dirVideos(dir string) ([]backfillVideo, int64, error) {
+func dirVideos(dir string) ([]task.BackfillVideo, int64, error) {
 	type found struct {
 		rel  string
 		size int64
@@ -283,7 +299,7 @@ func dirVideos(dir string) ([]backfillVideo, int64, error) {
 	}
 
 	number := filepath.Base(dir)
-	videos := make([]backfillVideo, 0, len(founds))
+	videos := make([]task.BackfillVideo, 0, len(founds))
 	primary := -1
 	primaryPart := 0
 	for _, f := range founds {
@@ -292,7 +308,7 @@ func dirVideos(dir string) ([]backfillVideo, int64, error) {
 		if primary == -1 || part < primaryPart {
 			primary, primaryPart = len(videos), part
 		}
-		videos = append(videos, backfillVideo{
+		videos = append(videos, task.BackfillVideo{
 			RelPath:   f.rel,
 			SizeBytes: f.size,
 			PartIndex: part,

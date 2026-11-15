@@ -276,20 +276,22 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, token
 	}
 
 	outcome := r.fetch(ctx, claimed, token)
+	// 瞬时错分类一次存局部：下面两个 case 各要问一遍，不必对同一轮取数重复分类。
+	transient := outcome.transientErr()
 	switch {
 	case outcome.permanentErr() != nil:
 		// 永久错：凭据失效/协议不兼容重试变不出来，一次就落 failed(scrape) 进需人工，
 		// 不烧 5 轮预算（internal/processing 的永久错口径）。错误不往循环上抛。
 		return outcomeFailed, r.fail(ctx, claimed, outcome.permanentErr())
-	case outcome.transientErr() != nil && claimed.Attempts+1 < processing.TransientMaxAttempts:
+	case transient != nil && claimed.Attempts+1 < processing.TransientMaxAttempts:
 		// 预算内：退避跨循环重试（#42，与副作用通知同一节奏）。上游不可达不算
 		// 循环失败（ADR-0011 口径）：错误只进时间线与日志，不往循环上抛。
-		if err := r.recorder.Retry(ctx, claimed, task.PhaseScrape, outcome.transientErr()); err != nil {
+		if err := r.recorder.Retry(ctx, claimed, task.PhaseScrape, transient); err != nil {
 			return outcomeFailed, err
 		}
-		r.recordAlert(ctx, claimed, fmt.Sprintf("%s：%v", task.ScrapeFailurePrefix, outcome.transientErr()))
+		r.recordAlert(ctx, claimed, fmt.Sprintf("%s：%v", task.ScrapeFailurePrefix, transient))
 		return outcomeFailed, nil
-	case outcome.transientErr() != nil:
+	case transient != nil:
 		// 五轮耗尽：照常入库不阻塞（#42）。按手头已有的源落元数据——哪怕两源
 		// 全没取到（provenance 全空值也证明「刮过一次」），缺哪几面由整理段
 		// 按四面判据标注「待补齐」，修复动作是面板上的强制重刮。
@@ -388,8 +390,9 @@ func (o fetchOutcome) missing() string {
 //
 // 唯一的例外是补录源（#43）：补录任务的主键是番号本身（JavDB App API 没有
 // 番号→movie_id 的检索端点），拿它调详情只会得到 404 类协议错、被 IsPermanent
-// 当成永久错打成 failed(scrape)。补录只问 DMM；演员等 JavDB 侧面的缺席由
-// 整理段按四面判据标「待补齐」，修复口径是面板的强制重刮。
+// 当成永久错打成 failed(scrape)。补录只问 DMM；演员面对补录是结构性永缺、
+// 不计待补齐（规格 §6.3），其余面的缺席由整理段标「待补齐」，修复口径是
+// 面板的强制重刮。
 func (r *Runner) fetch(ctx context.Context, version task.Version, token string) fetchOutcome {
 	outcome := fetchOutcome{}
 

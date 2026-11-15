@@ -17,6 +17,8 @@ const (
 	// FaceImages 是「无任何图」：入库目录里 poster/fanart/extrafanart 三处全空。
 	FaceImages = "images"
 	// FaceActors 是「无演员」：task_actor 一行都没有（JavDB actors=null 也算）。
+	// 唯一例外是补录任务（规格 §6.3）：取数只问 DMM、演员只来自 JavDB，演员面
+	// 对补录是结构性永缺，不计入待补齐——豁免在整理段入库标注处（按 source 分支）。
 	FaceActors = "actors"
 	// FaceOutline 是「无简介」：outline 列为空。
 	FaceOutline = "outline"

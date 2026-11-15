@@ -35,7 +35,8 @@ import (
 //   - SONE-682.nfo / SONE-682-C.nfo / SONE-682-4k.nfo 消失；
 //   - 视频文件字节不变（硬链不变多——目录里没有多出来的文件）；
 //   - 副作用照发（Jellyfin 刷新、「入库完成」通知）、「下载开始」不发；
-//   - 「未补录目录」列表与任务表实时一致；重复补录幂等；缺关键面照标「待补齐」。
+//   - 「未补录目录」列表与任务表实时一致；重复补录幂等；演员面结构性缺席不计
+//     待补齐（规格 §6.3：取数只问 DMM，缺演员不是强刮能修的，标了就永远摘不掉）。
 //
 // 只有上游是假的（httptest / 进程内假件），其余全是真的：真 Postgres、真文件系统、
 // 真的扫描-登记-取数-整理四段。
@@ -255,24 +256,17 @@ func TestEndToEndBackfillToRescrapeToFiled(t *testing.T) {
 		t.Errorf("副作用 = filed:%d download_started:%d refresh:%d, want 2/0/1", filed, started, refresh)
 	}
 
-	// 待补齐照标：DMM 只有 title/outline/图片，演员这一面空着（#42 的四面判据）。
+	// 待补齐不标：DMM 把图/简介/日文标题三面带齐了，剩下的演员面对补录是
+	// 结构性永缺（规格 §6.3：取数只问 DMM，演员只来自 JavDB，强刮也变不出来），
+	// 不计入待补齐——否则 #42 的一键强刮摘标永远摘不掉。
 	incomplete, err := store.Incomplete(ctx, 10)
 	if err != nil {
 		t.Fatalf("Incomplete: %v", err)
 	}
-	foundActors := false
 	for _, item := range incomplete {
-		if item.MovieID != number {
-			continue
+		if item.MovieID == number {
+			t.Errorf("补录任务竟标了待补齐 %v（演员面应豁免，其余三面 DMM 已带齐）", item.MissingFaces)
 		}
-		for _, face := range item.MissingFaces {
-			if face == task.FaceActors {
-				foundActors = true
-			}
-		}
-	}
-	if !foundActors {
-		t.Errorf("补录完没有按四面判据标出缺演员：%+v", incomplete)
 	}
 
 	// 重复补录幂等：再点一次零写入、零删除，版本还是两条。

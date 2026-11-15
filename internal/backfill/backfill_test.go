@@ -252,6 +252,39 @@ func TestBackfillIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestBackfillKeepsLegacyNfosWhenRegistrationFails 钉住顺序（规格 §6.3）：删旧
+// NFO 排在登记成功之后。先删后登记的崩溃窗口是「旧件已删、任务未建」——目录
+// 从「未补录」里消失却没有任何东西接管它；反过来（登记→删）登记失败时旧件
+// 原地不动，最坏也只是留下无害死重（Jellyfin 读 movie.nfo 优先）。
+func TestBackfillKeepsLegacyNfosWhenRegistrationFails(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 查重预检之后、落库之前取消上下文（落库事务起不来）：模拟登记失败。
+	f.settings.inputHook = func(section string) {
+		if section == "jellyfin" {
+			cancel()
+		}
+	}
+
+	dir := writeDir(t, f.mediaRoot, map[string]string{
+		"SONE-682.mkv": "video-main",
+		"SONE-682.nfo": "mdcng-era nfo",
+	})
+
+	if _, err := f.runner.Backfill(ctx, "SONE-682"); err == nil {
+		t.Fatal("登记失败竟被吞掉，want 报错")
+	}
+
+	// 登记没成：旧 NFO 原样，任务也没建（零写入）。
+	if _, err := os.Stat(filepath.Join(dir, "SONE-682.nfo")); err != nil {
+		t.Errorf("登记失败后旧 NFO 被动了（err=%v），want 原样", err)
+	}
+	if _, taken, err := f.store.TaskIDByNumber(context.Background(), "SONE-682", ""); err != nil || taken {
+		t.Errorf("任务竟建了（taken=%v err=%v），want 零写入", taken, err)
+	}
+}
+
 func TestBackfillDefersToExistingTaskOfSameNumber(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -326,6 +359,9 @@ func TestBackfillRejectsEmptyInput(t *testing.T) {
 type fakeSettings struct {
 	mediaRoot   string
 	initialized bool
+	// inputHook 在每次 Input 被调时触发（测试用它把上下文取消在预检之后、
+	// 落库之前：模拟登记失败）。
+	inputHook func(section string)
 }
 
 func (f *fakeSettings) Load(context.Context) (settings.Snapshot, error) {
@@ -333,6 +369,9 @@ func (f *fakeSettings) Load(context.Context) (settings.Snapshot, error) {
 }
 
 func (f *fakeSettings) Input(_ context.Context, section string) (settings.TestInput, error) {
+	if f.inputHook != nil {
+		f.inputHook(section)
+	}
 	if section != "jellyfin" {
 		return settings.TestInput{}, settings.ErrNotConfigured
 	}

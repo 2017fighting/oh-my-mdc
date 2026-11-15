@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -266,6 +267,10 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, env e
 // file 是入库一条版本的完整动作。任何一步失败都会让整条版本重来（幂等）：
 // 硬链同 inode、NFO 内容同、通知入箱唯一，重跑只会补上没做完的那一半。
 func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metadata, env environment) error {
+	// 补录分叉点（#43，GLOSSARY「补录」）：source=backfill 的重入库不问 qBittorrent
+	// （不回读、不硬链、不换 tag、分片账不重算），待补齐判据也豁免演员面（规格 §6.3）。
+	isBackfill := version.Source == task.SourceBackfill
+
 	clean := readMetadata(meta, version.Number)
 	if !env.translationExpected {
 		// P6-3：翻译禁用时 NFO/通知一律用日文原文。库里已存的译文不删（数据是数据），
@@ -289,8 +294,8 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 		videoBytes int64
 		plan       Plan
 	)
-	if version.Source == task.SourceBackfill {
-		// 补录重入库（#43，GLOSSARY「补录」）：视频与图片原地复用，没有 qbt 种子可
+	if isBackfill {
+		// 补录重入库：视频与图片原地复用，没有 qbt 种子可
 		// 回读、可换 tag、可再硬链；分片账已在补录登记时落好。这里只按取好的元数据
 		// 重写 movie.nfo 与图片，然后走与普通入库同一条收尾。目录不在盘上
 		// （媒体库被动过）是永久错：重试变不出一个目录。
@@ -364,7 +369,7 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 
 	// 分片账（version_file）：视频才有分片，字幕不算。补录版本的分片账已在登记时
 	// 落好（重入库不重算），只有下载路径在这里写。
-	if version.Source != task.SourceBackfill {
+	if !isBackfill {
 		partials := make([]task.VersionFile, 0, len(plan.Videos()))
 		for _, file := range plan.Videos() {
 			partials = append(partials, task.VersionFile{
@@ -380,7 +385,7 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 	}
 
 	// 入库成功才换 tag（失败不新增第三个 tag）：补录没有种子，tag 换装跳过。
-	if version.Source != task.SourceBackfill {
+	if !isBackfill {
 		if err := r.tags.TransitionTag(ctx, env.qbt, version.Infohash, qbittorrent.TagInProgress, qbittorrent.TagFinished); err != nil {
 			return fmt.Errorf("换 tag（%s → %s）: %w", qbittorrent.TagInProgress, qbittorrent.TagFinished, err)
 		}
@@ -406,7 +411,7 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 	r.record(ctx, version, task.EventStateChange, "processing", "finished",
 		fmt.Sprintf("入库完成：%s（%d 个视频文件）", dir, videoCount))
 	r.recordWarnings(ctx, version, clean, env.translationExpected, warnings)
-	r.markMissingFaces(ctx, version, dir, meta, env)
+	r.markMissingFaces(ctx, version, dir, meta, env, isBackfill)
 
 	r.logger.Info("入库完成",
 		"movie_id", version.MovieID, "number", version.Number,
@@ -486,14 +491,22 @@ func (e imageRetryError) Unwrap() error { return e.err }
 // 入库是唯一掌握全部事实的时刻：盘上的图、库里的演员/简介/译文。全齐写入空集——
 // 强制重刮补齐四面后重新入库，同一条语句负责摘标。写失败只记日志：入库已成，
 // 标注下一轮整理（或强刮后的重入库）会再校，不该让它把一次成功的入库变成失败。
-
-func (r *Runner) markMissingFaces(ctx context.Context, version task.Version, dir string, meta task.Metadata, env environment) {
+//
+// 唯一的判据豁免是补录（规格 §6.3）：source=backfill 的取数只问 DMM——没有
+// 番号→movie_id 的解析，演员只来自 JavDB——演员面对补录任务是**结构性永缺**，
+// 计入待补齐就永远摘不掉（#42 的一键强刮摘标会空转）。判据对补录任务跳过
+// 演员面，其余三面照旧；将来加了番号→movie_id 解析（JavDB 详情可查）即可
+// 放开这条豁免。
+func (r *Runner) markMissingFaces(ctx context.Context, version task.Version, dir string, meta task.Metadata, env environment, isBackfill bool) {
 	actors, err := r.store.Actors(ctx, version.MovieID)
 	if err != nil {
 		r.logger.Error("organize: 读演员失败，跳过待补齐标注", "movie_id", version.MovieID, "err", err)
 		return
 	}
 	faces := MissingFaces(dir, meta, len(actors), env.translationExpected)
+	if isBackfill {
+		faces = slices.DeleteFunc(faces, func(face string) bool { return face == task.FaceActors })
+	}
 	if err := r.store.SetMissingFaces(ctx, version.MovieID, faces); err != nil {
 		r.logger.Error("organize: 写待补齐标注失败",
 			"movie_id", version.MovieID, "faces", faces, "err", err)

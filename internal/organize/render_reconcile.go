@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
@@ -216,7 +217,7 @@ func driftedSlots(want, have nfoMovie) []string {
 	slot("director", want.Director == have.Director)
 	slot("set", want.Set == have.Set)
 	slot("trailer", want.Trailer == have.Trailer)
-	slot("tag", sameStrings(want.Tags, have.Tags))
+	slot("tag", slices.Equal(want.Tags, have.Tags))
 
 	if len(want.Actors) != len(have.Actors) {
 		slot("actor", false)
@@ -232,17 +233,4 @@ func driftedSlots(want, have nfoMovie) []string {
 		slot("actor", sameActors)
 	}
 	return drifted
-}
-
-// sameStrings 比两个槽的多值（tag 序列）：长度与逐位都一致才算没漂移。
-func sameStrings(want, have []string) bool {
-	if len(want) != len(have) {
-		return false
-	}
-	for i := range want {
-		if want[i] != have[i] {
-			return false
-		}
-	}
-	return true
 }
