@@ -1,14 +1,14 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router";
-import { AlertTriangle, ChevronRight, Loader2, RefreshCw, RotateCcw, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronRight, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
-import { Notice, TextInput } from "~/components/form";
+import { Notice, TextInput, Field } from "~/components/form";
 import { focusablesIn, holdShellInert } from "~/lib/modal";
 import { CONFUSABLES, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER, WIZARD_CONFUSABLES } from "~/lib/copy";
 import { groupByNumber, groupStuck, oldestCreatedAt, attentionRowCount, type FailureGroup, type StuckGroup } from "~/lib/attention";
@@ -32,6 +32,7 @@ import {
   notifyEventOf,
   type Attention,
   type AttentionItem,
+  type ManualRegistration,
   type Overview,
   type SideEffect,
   type SideEffectKind,
@@ -110,6 +111,8 @@ export function Panel({
 }) {
   const [selected, setSelected] = React.useState<string | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
+  // 手工登记的弹层：状态住在 Panel（入口按钮与回执播报位都在这棵树上）。
+  const [registerOpen, setRegisterOpen] = React.useState(false);
   // 相对时间要自己走，否则一屏「3 分钟前」会挂到用户关掉标签页为止。
   const now = useNow();
   // 回执挂在 Panel 上而不是 NeedsAttention 里：那张卡在清空之后整块不渲染，
@@ -423,6 +426,16 @@ export function Panel({
             <CardDescription className="text-xs tabular-nums">
               {query.q || query.state ? `筛选后 ${total} 条` : `共 ${total} 条`}
             </CardDescription>
+            <CardAction>
+              <Button
+                variant="outline"
+                className={PANEL_ACTION_SIZE}
+                onClick={() => setRegisterOpen(true)}
+              >
+                <Plus className="size-3.5" aria-hidden />
+                手工登记
+              </Button>
+            </CardAction>
           </CardHeader>
           <CardContent className="px-0">
             <TaskFilters query={query} onQuery={onQuery} />
@@ -679,6 +692,13 @@ export function Panel({
           onRefresh={onRefresh}
         />
       ) : null}
+
+      <RegisterDialog
+        open={registerOpen}
+        onClose={() => setRegisterOpen(false)}
+        onReceipt={receiptsState.push}
+        onRefresh={onRefresh}
+      />
 
       {helpOpen ? (
         <ShortcutsHelp
@@ -2814,3 +2834,196 @@ function loopLines(
 
 export { loopLines };
 
+
+/**
+ * RegisterDialog 是「手工登记」的弹层（GLOSSARY「手工登记」）：两串粘贴——磁力与
+ * JavDB 链接——把一部作品不经清单轮询直接交给流水线。
+ *
+ * 成功后收起弹层、发一条回执、刷一次面板；失败（贴错链接、番号撞车、门禁未开）
+ * 时错误文案按端点的 zh-CN 原话直译，输入一概保留。番号不用填：详情里取。
+ */
+function RegisterDialog({
+  open,
+  onClose,
+  onReceipt,
+  onRefresh,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [magnet, setMagnet] = React.useState("");
+  const [url, setUrl] = React.useState("");
+  const [error, setError] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const dialogRef = React.useRef<HTMLDivElement>(null);
+  const firstFieldRef = React.useRef<HTMLInputElement>(null);
+
+  // onClose 是父组件每次渲染新建的箭头函数，写进 effect 依赖会每个 render 重跑
+  // （StrictMode 下两次），把焦点归还搅乱——与抽屉同一只 ref 把手。
+  const onCloseRef = React.useRef(onClose);
+  React.useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  // 模态：开时外壳 inert、焦点进第一格，Esc 关、Tab 在内部循环，关时还焦点。
+  React.useEffect(() => {
+    if (!open) return;
+    const releaseShell = holdShellInert();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    firstFieldRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const items = focusablesIn(dialogRef.current);
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      releaseShell();
+      document.body.style.overflow = previousOverflow;
+      if (trigger?.isConnected) trigger.focus();
+    };
+  }, [open]);
+
+  if (!open || typeof document === "undefined") return null;
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    const trimmedMagnet = magnet.trim();
+    const trimmedUrl = url.trim();
+    if (!trimmedMagnet || !trimmedUrl) {
+      setError("两串都要贴：磁力链接与 JavDB 链接。");
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      const result = await api.manualRegister(trimmedMagnet, trimmedUrl);
+      onReceipt(registerReceipt(result));
+      setMagnet("");
+      setUrl("");
+      onCloseRef.current();
+      await onRefresh();
+    } catch (cause: unknown) {
+      // 错误文案来自端点的 zh-CN 信封（番号撞车、门禁、贴错链接），直译即可；
+      // 网关类失败（登录页/502）有自己的一套话。
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 p-4"
+      role="presentation"
+      onClick={() => onCloseRef.current()}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="register-dialog-title"
+        onClick={(event) => event.stopPropagation()}
+        className="w-full max-w-md overflow-hidden rounded-xl border bg-background shadow-2xl"
+      >
+        <form onSubmit={(event) => void submit(event)} className="flex flex-col gap-4 p-4">
+          <div>
+            <h2 id="register-dialog-title" className="font-heading text-lg font-semibold">
+              手工登记
+            </h2>
+            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+              贴磁力链接与 JavDB 链接，直接交给流水线；番号从链接详情里取，不用填。
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <Field id="register-magnet" label="磁力链接">
+              <TextInput
+                id="register-magnet"
+                ref={firstFieldRef}
+                value={magnet}
+                onChange={(event) => setMagnet(event.target.value)}
+                placeholder="magnet:?xt=urn:btih:…"
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono text-xs"
+              />
+            </Field>
+            <Field id="register-url" label="JavDB 链接" hint="网页地址或裸 id 都行">
+              <TextInput
+                id="register-url"
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder="https://javdb.com/v/…"
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono text-xs"
+              />
+            </Field>
+          </div>
+
+          {error ? (
+            <Notice tone="bad" onClose={() => setError(null)}>
+              {error}
+            </Notice>
+          ) : null}
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" className={PANEL_ACTION_SIZE} onClick={() => onCloseRef.current()}>
+              取消
+            </Button>
+            <Button type="submit" className={PANEL_ACTION_SIZE} disabled={busy}>
+              {busy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+              {busy ? "登记中…" : "登记"}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** registerReceipt 把登记结局翻成回执：五种结局都算「登记成了」，语调分两档。 */
+function registerReceipt(result: ManualRegistration): ReceiptDraft {
+  switch (result.outcome) {
+    case "deferred":
+      return {
+        title: result.number,
+        tone: "warn",
+        text: `已登记 ${result.number}，${result.message ?? "加种稍后由清单轮询完成"}`,
+      };
+    case "duplicate":
+      return {
+        title: result.number,
+        tone: "ok",
+        text: result.message ?? `这条种子已经登记过（${result.number}）`,
+      };
+    case "adopted":
+      return { title: result.number, tone: "ok", text: `已登记 ${result.number}，收编了 qBittorrent 里已有的种子` };
+    case "already_tracked":
+      return { title: result.number, tone: "ok", text: `已登记 ${result.number}，种子已在 qBittorrent 手里` };
+    default:
+      return { title: result.number, tone: "ok", text: `已登记 ${result.number}，已交给 qBittorrent 下载` };
+  }
+}

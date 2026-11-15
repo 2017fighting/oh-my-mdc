@@ -213,6 +213,17 @@ export type TaskRetryResult = {
 /** 副作用的三种 kind（规格 §4.2）。 */
 export type SideEffectKind = "list_removal" | "jellyfin_refresh" | "notify";
 
+/** 手工登记的回执（GLOSSARY「手工登记」）：outcome 是后端的登记结局。 */
+export type ManualRegistration = {
+  ok: boolean;
+  movie_id: string;
+  infohash: string;
+  number: string;
+  outcome: "added" | "adopted" | "already_tracked" | "deferred" | "duplicate";
+  /** deferred / duplicate 时给人看的那句话。 */
+  message?: string;
+};
+
 /** 副作用队列的两个筛选（规格 §8.4）：pending = 排队中，stuck = 驻留（需人工）。 */
 export type SideEffectState = "pending" | "stuck";
 
@@ -425,5 +436,12 @@ export const api = {
     request<{ ok: boolean; id: string; name: string }>("/api/javdb/lists", {
       method: "POST",
       body: JSON.stringify({ name, description }),
+    }),
+
+  /** 手工登记：贴磁力 + JavDB 链接，不经清单轮询直接建任务加种（GLOSSARY）。 */
+  manualRegister: (magnet: string, javdbUrl: string) =>
+    request<ManualRegistration>("/api/manual-tasks", {
+      method: "POST",
+      body: JSON.stringify({ magnet, javdb_url: javdbUrl }),
     }),
 };
