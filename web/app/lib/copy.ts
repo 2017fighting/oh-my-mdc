@@ -1,4 +1,4 @@
-import type { TaskState } from "./api";
+import type { MissingFace, TaskState } from "./api";
 
 /**
  * 面板上的词，与它们的一句话解释——单一真相。
@@ -32,6 +32,18 @@ export const STATUS_NOTES: Record<TaskState, string> = {
 /** 显示顺序：与筛选 chip 一致，读起来就是面板自己那一行。 */
 export const STATUS_ORDER: TaskState[] = ["downloading", "processing", "finished", "failed"];
 
+/**
+ * 待补齐四面（#42）的机器名 → 面板 chip 文案。
+ *
+ * 机器名与后端 task.missing_faces（internal/task/faces.go）同一套词；中文以
+ * GLOSSARY「待补齐」的判据原文为准（无图 / 无演员 / 无简介 / 翻译启用却无中文标题）。 */
+export const MISSING_FACE_LABELS: Record<MissingFace, string> = {
+  images: "缺图",
+  actors: "缺演员",
+  outline: "缺简介",
+  title_zh: "缺中文标题",
+};
+
 /** 一条术语：词 + 一句解释（不写第二段，浮层里每行都要能一眼扫完）。 */
 export type GlossaryEntry = { term: string; note: string };
 
@@ -48,6 +60,10 @@ export const CONFUSABLES: GlossaryEntry[] = [
   {
     term: "驻留副作用",
     note: "退避耗尽的旁路待办（删清单项、刷 Jellyfin、发通知），等人工「重发」。同目标只排一条；同一原因卡住的多条收成一组，一组算一行、一颗「重发 N 条」，所以构成行写「2 组 4 条」。",
+  },
+  {
+    term: "待补齐",
+    note: "已入库但关键面仍有缺口（缺图 / 缺演员 / 缺简介 / 缺中文标题），且上游重试已耗尽。它不是状态、不算「需要人工」：聚合成单独一区，修复动作是逐部「强制重刮」，四面补齐后自动摘标。",
   },
   {
     term: "重试 / 重发 / 强制重刮",

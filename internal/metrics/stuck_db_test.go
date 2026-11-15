@@ -37,7 +37,7 @@ func TestStuckGaugeMatchesResidentRows(t *testing.T) {
 		}
 	}
 
-	m := metrics.New(nil, sidefx.New(database.Pool()), nil)
+	m := metrics.New(nil, sidefx.New(database.Pool()), nil, nil)
 	families := render(t, m)
 
 	want := map[string]float64{"notify": 2, "list_removal": 1, "jellyfin_refresh": 0}

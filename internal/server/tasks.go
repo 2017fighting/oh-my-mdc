@@ -217,15 +217,23 @@ func toEventBody(event task.Event) taskEventBody {
 	}
 }
 
-// attentionBody 是 GET /api/attention 的回执（面板「需要人工」区的任务侧两半）。
+// attentionBody 是 GET /api/attention 的回执：面板待办区的任务侧三半。
+//
+// 失败与停滞是「需要人工」（版本行）；待补齐（#42）是另一档：已入库、不需要抢救，
+// 但关键面有缺口，修复动作是强制重刮——它不是任务状态，也不是「需要人工」，
+// 所以单独成半，面板也单独成区。
 type attentionBody struct {
 	OK      bool            `json:"ok"`
 	Failed  []attentionItem `json:"failed"`
 	Stalled []attentionItem `json:"stalled"`
-	// FailedTruncated / StalledTruncated：这一半到了上限、后面还有。
-	// 面板据此把数字写成「50+」，而不是把队列的总量说成 50。
-	FailedTruncated  bool `json:"failed_truncated"`
-	StalledTruncated bool `json:"stalled_truncated"`
+	// Incomplete 是待补齐的任务行（任务级，无 infohash/source）：
+	// missing_faces 是缺的那几面（images/actors/outline/title_zh）。
+	Incomplete []incompleteItem `json:"incomplete"`
+	// FailedTruncated / StalledTruncated / IncompleteTruncated：
+	// 这一半到了上限、后面还有。面板据此把数字写成「50+」，而不是把队列的总量说成 50。
+	FailedTruncated     bool `json:"failed_truncated"`
+	StalledTruncated    bool `json:"stalled_truncated"`
+	IncompleteTruncated bool `json:"incomplete_truncated"`
 }
 
 // attentionItem 是「需要人工」区的一行：失败的版本或停滞的下载。
@@ -240,12 +248,20 @@ type attentionItem struct {
 	At       time.Time `json:"at"`
 }
 
-// attention 返回「需要人工」区的任务侧两半（规格 §8.2）。
+// incompleteItem 是「待补齐」区的一行：一个任务 + 它缺的那几面（#42）。
+type incompleteItem struct {
+	MovieID      string    `json:"movie_id"`
+	Number       string    `json:"number"`
+	MissingFaces []string  `json:"missing_faces"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// attention 返回面板待办区的任务侧三半：失败 / 停滞 / 待补齐（规格 §8.2 + #42）。
 //
 // 驻留副作用不在这里：它属于副作用域，面板用 GET /api/side-effects?state=stuck
 // 拼进同一个区，两边的行各带自己的操作（重发 / 看任务）。
-// attentionLimit 是「需要人工」区每一半最多回多少行。
-// 超过它的队列会被截断，但回执会带上 *_truncated，面板因此不会把 50 说成总量。
+// attentionLimit 是每一半最多回多少行；超过它的队列会被截断，
+// 但回执会带上 *_truncated，面板因此不会把 50 说成总量。
 const attentionLimit = 50
 
 func (s *server) attention(w http.ResponseWriter, r *http.Request) {
@@ -259,19 +275,39 @@ func (s *server) attention(w http.ResponseWriter, r *http.Request) {
 		s.writeTaskError(w, err)
 		return
 	}
+	incomplete, err := store.Incomplete(r.Context(), attentionLimit)
+	if err != nil {
+		s.writeTaskError(w, err)
+		return
+	}
 
 	body := attentionBody{
-		OK:               true,
-		Failed:           []attentionItem{},
-		Stalled:          []attentionItem{},
-		FailedTruncated:  attention.FailedTruncated,
-		StalledTruncated: attention.StalledTruncated,
+		OK:                  true,
+		Failed:              []attentionItem{},
+		Stalled:             []attentionItem{},
+		Incomplete:          []incompleteItem{},
+		FailedTruncated:     attention.FailedTruncated,
+		StalledTruncated:    attention.StalledTruncated,
+		IncompleteTruncated: len(incomplete) > attentionLimit,
+	}
+	if len(incomplete) > attentionLimit {
+		incomplete = incomplete[:attentionLimit]
 	}
 	for _, item := range attention.Failed {
 		body.Failed = append(body.Failed, toAttentionItem(item))
 	}
 	for _, item := range attention.Stalled {
 		body.Stalled = append(body.Stalled, toAttentionItem(item))
+	}
+	for _, row := range incomplete {
+		faces := row.MissingFaces
+		if faces == nil {
+			faces = []string{}
+		}
+		body.Incomplete = append(body.Incomplete, incompleteItem{
+			MovieID: row.MovieID, Number: row.Number,
+			MissingFaces: faces, UpdatedAt: row.UpdatedAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, body)
 }

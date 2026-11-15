@@ -1,7 +1,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router";
-import { AlertTriangle, ChevronRight, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronRight, CircleDashed, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
@@ -10,7 +10,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput, Field } from "~/components/form";
 import { focusablesIn, holdShellInert } from "~/lib/modal";
-import { CONFUSABLES, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER, WIZARD_CONFUSABLES } from "~/lib/copy";
+import { CONFUSABLES, MISSING_FACE_LABELS, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER, WIZARD_CONFUSABLES } from "~/lib/copy";
 import { groupByNumber, groupStuck, oldestCreatedAt, attentionRowCount, type FailureGroup, type StuckGroup } from "~/lib/attention";
 import {
   formatAbsolute,
@@ -32,6 +32,7 @@ import {
   notifyEventOf,
   type Attention,
   type AttentionItem,
+  type IncompleteItem,
   type ManualRegistration,
   type Overview,
   type SideEffect,
@@ -420,6 +421,14 @@ export function Panel({
           onRefresh={onRefresh}
         />
 
+        <IncompleteTasks
+          items={attention?.incomplete ?? []}
+          truncated={attention?.incomplete_truncated ?? false}
+          now={now}
+          onOpenTask={openTask}
+          onRefresh={onRefresh}
+        />
+
         <Card>
           <CardHeader>
             <CardTitle as="h2">任务</CardTitle>
@@ -708,6 +717,139 @@ export function Panel({
         />
       ) : null}
     </>
+  );
+}
+
+/** IncompleteTasks 是「待补齐」聚合区（#42 / GLOSSARY「待补齐」）。
+ *
+ * 已入库但关键面仍有缺口的任务：不是状态、也不算「需要人工」——条目已经在
+ * 媒体库里，唯一要做的决定是「上游恢复了吗」，然后逐部「强制重刮」，
+ * 四面补齐后后端自动摘标，这一行就退场。空区整块不渲染（面板不为「没有事」留家具）。
+ */
+function IncompleteTasks({
+  items,
+  truncated,
+  now,
+  onOpenTask,
+  onRefresh,
+}: {
+  items: IncompleteItem[];
+  truncated: boolean;
+  now: number;
+  onOpenTask: (movieID: string) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const taskRetry = useTaskRetry(onRefresh);
+  if (items.length === 0) return null;
+
+  return (
+    <Card role="region" aria-labelledby="incomplete-heading">
+      <CardHeader className="max-sm:grid-cols-1">
+        <div>
+          <h2 id="incomplete-heading" className="font-heading text-base font-medium">
+            待补齐
+          </h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            已入库但缺关键面，且上游重试已耗尽。上游恢复后逐部「强制重刮」重新取数，四面补齐自动摘标。
+          </p>
+        </div>
+        <CardAction className="max-sm:col-start-1 max-sm:row-start-2">
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {items.length}
+            {truncated ? "+" : ""} 部
+          </span>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        {taskRetry.error ? (
+          <div className="mb-2">
+            <Notice tone="bad" onClose={taskRetry.clearError}>
+              {taskRetry.error}
+            </Notice>
+          </div>
+        ) : null}
+        <div className="divide-y">
+          {items.map((item) => {
+            const notice = taskRetry.notices[item.movie_id];
+            const busy = taskRetry.busy.has(taskRetryKey(item.movie_id, true));
+            return (
+              <div
+                key={item.movie_id}
+                data-incomplete={item.movie_id}
+                className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-x-4"
+              >
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 dense font-medium tabular-nums">
+                    {item.number}
+                    <span className="font-mono text-xs font-normal break-all text-muted-foreground">
+                      {item.movie_id}
+                    </span>
+                    <span
+                      className="text-xs font-normal text-muted-foreground"
+                      title={formatAbsolute(item.updated_at)}
+                    >
+                      有动静于 {formatWhen(item.updated_at, now)}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {item.missing_faces.map((face) => (
+                      <Badge
+                        key={face}
+                        variant="outline"
+                        className="border-status-danger-border bg-status-danger-surface font-normal text-status-danger-text"
+                      >
+                        {MISSING_FACE_LABELS[face] ?? face}
+                      </Badge>
+                    ))}
+                  </div>
+                  {notice ? (
+                    <p
+                      className={cn(
+                        "text-xs leading-relaxed",
+                        notice.tone === "ok"
+                          ? "text-status-done-text"
+                          : notice.tone === "warn"
+                            ? "text-status-progress-text"
+                            : "text-status-danger-text",
+                      )}
+                    >
+                      {notice.text}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <Button
+                    variant="outline"
+                    className={ROW_ACTION_SIZE}
+                    disabled={busy}
+                    onClick={() =>
+                      void taskRetry.retry(item.movie_id, true, {
+                        title: item.number,
+                      })
+                    }
+                    title={`强制重刮 ${item.number}：重新取数并重写 NFO 与图片，完成后这一行自动退场`}
+                  >
+                    {busy ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <CircleDashed className="size-3.5" aria-hidden />
+                    )}
+                    强制重刮
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className={ROW_ACTION_SIZE}
+                    onClick={() => onOpenTask(item.movie_id)}
+                  >
+                    查看
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

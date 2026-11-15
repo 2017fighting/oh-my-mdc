@@ -139,6 +139,13 @@ func (r *Runner) backfillTranslation(ctx context.Context, version task.Version, 
 		r.logger.Error("scrape: 补译落库失败", "movie_id", version.MovieID, "err", err)
 		return
 	}
+	// 待补齐的 title_zh 面随译文摘除（#42「四面补齐自动摘标」）：补译不触发
+	// 整理段重入库，这一面的摘标只能在这里做；其它三面现状没变，不动。
+	if strings.TrimSpace(metadata.TitleZH) == "" && strings.TrimSpace(translated.Title) != "" {
+		if err := r.store.ClearMissingFace(ctx, version.MovieID, task.FaceTitleZH); err != nil {
+			r.logger.Error("scrape: 摘待补齐面失败", "movie_id", version.MovieID, "err", err)
+		}
+	}
 	r.logger.Info("scrape: 译文已补齐", "movie_id", version.MovieID, "number", version.Number)
 }
 

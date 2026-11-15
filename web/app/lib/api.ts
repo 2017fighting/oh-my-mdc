@@ -270,9 +270,22 @@ export type Attention = {
   ok: boolean;
   failed: AttentionItem[];
   stalled: AttentionItem[];
+  incomplete: IncompleteItem[];
   /** 每半上限 50 行；被截断时面板写「50+」，不把 50 说成总量。 */
   failed_truncated: boolean;
   stalled_truncated: boolean;
+  incomplete_truncated: boolean;
+};
+
+/** 缺的那一面（#42）：机器名与后端 task.missing_faces、copy.ts 的文案同一套词。 */
+export type MissingFace = "images" | "actors" | "outline" | "title_zh";
+
+/** IncompleteItem 是「待补齐」区的一行：一个任务 + 它缺的那几面（无 infohash/source：缺口是任务级的）。 */
+export type IncompleteItem = {
+  movie_id: string;
+  number: string;
+  missing_faces: MissingFace[];
+  updated_at: string;
 };
 
 /** autorun 改写的前后对比：GET 只读预览，POST 是人工确认后的落地。 */

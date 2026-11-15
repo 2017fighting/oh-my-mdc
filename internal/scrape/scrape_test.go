@@ -167,6 +167,16 @@ func (f *fixture) version(t *testing.T, infohash string) task.Version {
 	return version
 }
 
+// expireBackoff 把一条版本的退避推到过去：真实退避是分钟级，测试不等。
+func (f *fixture) expireBackoff(t *testing.T, infohash string) {
+	t.Helper()
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`UPDATE task_version SET next_attempt_at = now() - interval '1 second' WHERE infohash = $1`,
+		infohash); err != nil {
+		t.Fatalf("推进退避: %v", err)
+	}
+}
+
 const (
 	firstMovie = "ZY5eq"
 	firstHash  = "1111111111111111111111111111111111111111"
@@ -322,6 +332,8 @@ func TestProcessPendingReusesEvenWhenOnlyProvenanceExists(t *testing.T) {
 // TestProcessPendingSchedulesRetryOnUpstreamFailure 是失败面：
 // 地区阻断（blocked）**不许**降级成 JavDB 元数据 —— 版本留在 processing、
 // attempts+1、退避期内不再重试、时间线上有一条告警。
+// 上游失败也不许让循环报错（#42 / ADR-0011 口径）：健康位回答「循环自己
+// 还跑得动吗」，不回答「上游此刻可达吗」——可达性归上游指标。
 func TestProcessPendingSchedulesRetryOnUpstreamFailure(t *testing.T) {
 	f := newFixture(t)
 	f.seedProcessing(t, firstMovie, firstNum, firstHash)
@@ -333,8 +345,8 @@ func TestProcessPendingSchedulesRetryOnUpstreamFailure(t *testing.T) {
 	}
 
 	progress, err := f.runner.ProcessPending(context.Background())
-	if err == nil {
-		t.Fatal("取数失败应当报出来（循环日志要看得见）")
+	if err != nil {
+		t.Fatalf("上游失败不该让循环报错（ADR-0011 口径）: %v", err)
 	}
 	if progress.Failed != 1 || progress.Fetched != 0 {
 		t.Fatalf("progress = %+v, want Failed=1", progress)
@@ -379,70 +391,191 @@ func TestProcessPendingSchedulesRetryOnUpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestProcessPendingFailsWhenJavDBIsUnavailable 确认 JavDB 是必成的源：
-// 它挂了就不该先花 DMM 的请求，版本留在 processing 等重试。
-func TestProcessPendingFailsWhenJavDBIsUnavailable(t *testing.T) {
+// TestProcessPendingRetriesWhenJavDBIsUnavailable 确认两个源各取各的（#42）：
+// JavDB 挂了不再挡住 DMM 的取数——退避重试期间哪边活着哪边先取到，
+// 耗尽降级时才能按「手头有多少算多少」入库。本轮两源都没取齐：版本留 processing 等重试。
+func TestProcessPendingRetriesWhenJavDBIsUnavailable(t *testing.T) {
 	f := newFixture(t)
 	f.seedProcessing(t, firstMovie, firstNum, firstHash)
 	f.javdb.err = errors.New("javdb 502")
 
-	if progress, err := f.runner.ProcessPending(context.Background()); err == nil || progress.Failed != 1 {
-		t.Fatalf("progress = %+v err = %v, want Failed=1 且有错误", progress, err)
+	progress, err := f.runner.ProcessPending(context.Background())
+	if err != nil {
+		t.Fatalf("上游失败不该让循环报错（ADR-0011 口径）: %v", err)
 	}
-	if f.dmm.hit() != 0 {
-		t.Errorf("JavDB 先失败却问了 DMM %d 次", f.dmm.hit())
+	if progress.Failed != 1 || progress.Fetched != 0 {
+		t.Fatalf("progress = %+v, want Failed=1", progress)
+	}
+	if f.dmm.hit() == 0 {
+		t.Error("JavDB 挂了却没问 DMM：取数段该两源各取各的")
+	}
+	_, exists, metaErr := f.store.Metadata(context.Background(), firstMovie)
+	if metaErr != nil {
+		t.Fatalf("Metadata: %v", metaErr)
+	}
+	if exists {
+		t.Fatal("两源没取齐就落了元数据：本轮该退避重试")
 	}
 }
 
-// TestExhaustedScrapeLandsFailedAndNotifiesOnce 钉住加工失败的终局（#29 的失败语义）：
-// 三次取数失败 → failed(scrape, reason) 驻留 + 一条「加工失败」通知。
-func TestExhaustedScrapeLandsFailedAndNotifiesOnce(t *testing.T) {
+// TestExhaustedFetchDegradesAndFiles 钉住 #42 的韧性语义：瞬时失败退避跨循环重试
+// 5 轮（与副作用通知同一节奏），第 5 轮仍缺上游就**照常入库不阻塞**——
+// 用手头已有的源落元数据（这里 JavDB 活着：title_ja 走 §7.1 的单向回退），
+// 版本回 processing 等整理入库，缺哪几面由整理段按四面判据标注。
+func TestExhaustedFetchDegradesAndFiles(t *testing.T) {
 	f := newFixture(t)
 	f.seedProcessing(t, firstMovie, firstNum, firstHash)
-	f.dmm.err = &dmm.Error{Code: settings.CodeProtocol, Op: "graphql", Detail: "地区阻断", Region: true}
+	f.dmm.err = &dmm.Error{Code: settings.CodeNetwork, Op: "graphql", Detail: "EOF"}
 
 	ctx := context.Background()
-	for round := 1; round <= 3; round++ {
-		if _, err := f.runner.ProcessPending(ctx); err == nil {
-			t.Fatalf("第 %d 轮应当报出取数失败", round)
+	for round := 1; round <= 4; round++ {
+		progress, err := f.runner.ProcessPending(ctx)
+		if err != nil {
+			t.Fatalf("第 %d 轮循环不该报错（ADR-0011 口径）: %v", round, err)
+		}
+		if progress.Failed != 1 || progress.Degraded != 0 {
+			t.Fatalf("第 %d 轮 progress = %+v, want Failed=1 未降级", round, progress)
+		}
+		version := f.version(t, firstHash)
+		if version.Status != task.StatusProcessing {
+			t.Fatalf("第 %d 轮 version = %q, want processing", round, version.Status)
+		}
+		if version.Attempts != round {
+			t.Fatalf("第 %d 轮 attempts = %d, want %d", round, version.Attempts, round)
 		}
 		// 退避推进到过去，下一轮马上到期（真实退避是分钟级，测试不等）。
-		if _, err := f.database.Pool().Exec(ctx,
-			`UPDATE task_version SET next_attempt_at = now() - interval '1 second' WHERE infohash = $1`,
-			firstHash); err != nil {
-			t.Fatalf("推进退避: %v", err)
+		f.expireBackoff(t, firstHash)
+	}
+
+	// 第 5 轮：耗尽 → 降级入库（JavDB 一面），版本回 processing 等整理。
+	progress, err := f.runner.ProcessPending(ctx)
+	if err != nil {
+		t.Fatalf("降级轮循环不该报错: %v", err)
+	}
+	if progress.Degraded != 1 || progress.Fetched != 0 || progress.Failed != 0 {
+		t.Fatalf("progress = %+v, want Degraded=1", progress)
+	}
+	metadata, exists, metaErr := f.store.Metadata(ctx, firstMovie)
+	if metaErr != nil || !exists {
+		t.Fatalf("降级该照常入库: exists=%v err=%v", exists, metaErr)
+	}
+	if metadata.TitleJA == "" {
+		t.Error("JavDB 活着，title_ja 该走 §7.1 的单向回退，不该是空")
+	}
+	version := f.version(t, firstHash)
+	if version.Status != task.StatusProcessing || version.Attempts != 0 {
+		t.Errorf("version = status %q attempts %d, want processing/0（等整理）",
+			version.Status, version.Attempts)
+	}
+
+	// 降级不发「加工失败」通知：版本没落 failed，面板的待办区不该被它占一行。
+	var notifies int
+	if err := f.database.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM side_effect WHERE kind = 'notify' AND target_key LIKE 'processing_failed:%'`,
+	).Scan(&notifies); err != nil {
+		t.Fatalf("读 side_effect: %v", err)
+	}
+	if notifies != 0 {
+		t.Errorf("降级发了 %d 条加工失败通知, want 0", notifies)
+	}
+
+	// 时间线上有一条「取数重试耗尽」告警：面板事件流要看得见为什么标了待补齐。
+	found := false
+	events, _ := f.store.Events(ctx, firstMovie, 20)
+	for _, event := range events {
+		if event.Kind == task.EventAlert && strings.HasPrefix(event.Reason, task.FetchExhaustedPrefix) {
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("时间线没有取数耗尽告警: %+v", events)
+	}
+
+	// 元数据已落：下轮是复用判据的天下（0 次网络），不会反复打已恢复无望的上游。
+	f.dmm.err = nil
+	if progress, err := f.runner.ProcessPending(ctx); err != nil || progress.Scanned != 1 || progress.Reused != 1 {
+		t.Errorf("降级后该走复用判据: progress = %+v err = %v", progress, err)
+	}
+}
+
+// TestExhaustedWithBothSourcesDownStillFiles 钉住断网场景（验收第一条）：
+// JavDB 与 DMM 同时不可达，五轮耗尽后照样降级入库——provenance 全空值也是
+// 「刮过一次」的证据（复用判据），整理段照常落盘，四面全缺 → 全部标待补齐。
+func TestExhaustedWithBothSourcesDownStillFiles(t *testing.T) {
+	f := newFixture(t)
+	f.seedProcessing(t, firstMovie, firstNum, firstHash)
+	f.javdb.err = errors.New("dial tcp: connection refused")
+	f.dmm.err = &dmm.Error{Code: settings.CodeNetwork, Op: "graphql", Detail: "EOF"}
+
+	ctx := context.Background()
+	for round := 1; round <= 4; round++ {
+		if _, err := f.runner.ProcessPending(ctx); err != nil {
+			t.Fatalf("第 %d 轮循环不该报错: %v", round, err)
+		}
+		f.expireBackoff(t, firstHash)
+	}
+	progress, err := f.runner.ProcessPending(ctx)
+	if err != nil {
+		t.Fatalf("降级轮循环不该报错: %v", err)
+	}
+	if progress.Degraded != 1 {
+		t.Fatalf("progress = %+v, want Degraded=1", progress)
+	}
+	// 空手而归也入库：复用判据认 provenance，下轮不再打已恢复无望的上游。
+	_, exists, metaErr := f.store.Metadata(ctx, firstMovie)
+	if metaErr != nil || !exists {
+		t.Fatalf("断网耗尽后该照常入库: exists=%v err=%v", exists, metaErr)
+	}
+	version := f.version(t, firstHash)
+	if version.Status != task.StatusProcessing {
+		t.Errorf("version = %q, want processing（等整理入库，不是 failed）", version.Status)
+	}
+	// 耗尽告警把两个源都点名。
+	events, _ := f.store.Events(ctx, firstMovie, 20)
+	exhausted := ""
+	for _, event := range events {
+		if event.Kind == task.EventAlert && strings.HasPrefix(event.Reason, task.FetchExhaustedPrefix) {
+			exhausted = event.Reason
+		}
+	}
+	if !strings.Contains(exhausted, "JavDB、DMM") {
+		t.Errorf("耗尽告警 = %q, want 点名 JavDB、DMM", exhausted)
+	}
+}
+
+// TestPermanentFetchFailureStillLandsFailed 钉住永久错的边界：凭据失效（JavDB token
+// 被踢）重试变不出来，不烧 5 轮预算，一次就落 failed(scrape) 进需人工 + 一条
+// 「加工失败」通知——这条通道与 #42 的降级无关，保持 #29 的失败语义。
+func TestPermanentFetchFailureStillLandsFailed(t *testing.T) {
+	f := newFixture(t)
+	f.seedProcessing(t, firstMovie, firstNum, firstHash)
+	f.javdb.err = &appapi.AuthError{Action: "detail", Message: "JWTVerificationError"}
+
+	progress, err := f.runner.ProcessPending(context.Background())
+	if err != nil {
+		t.Fatalf("永久失败也不该让循环报错（ADR-0011 口径）: %v", err)
+	}
+	if progress.Failed != 1 || progress.Degraded != 0 {
+		t.Fatalf("progress = %+v, want Failed=1 未降级", progress)
 	}
 
 	version := f.version(t, firstHash)
 	if version.Status != task.StatusFailed || version.ErrorPhase != task.PhaseScrape {
 		t.Fatalf("version = status %q phase %q, want failed(scrape)", version.Status, version.ErrorPhase)
 	}
-	if !strings.Contains(version.ErrorReason, "地区阻断") {
-		t.Errorf("reason = %q, want 带上游原因", version.ErrorReason)
+	if version.Attempts != 0 {
+		t.Errorf("永久错烧了 %d 次预算, want 0（一次就驻留）", version.Attempts)
 	}
 
-	rows, err := f.database.Pool().Query(ctx,
-		`SELECT target_key FROM side_effect WHERE kind = 'notify'`)
-	if err != nil {
+	var notifies int
+	if err := f.database.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM side_effect WHERE kind = 'notify' AND target_key = $1`,
+		"processing_failed:"+firstHash,
+	).Scan(&notifies); err != nil {
 		t.Fatalf("读 side_effect: %v", err)
 	}
-	defer rows.Close()
-	keys := []string{}
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			t.Fatalf("扫 target_key: %v", err)
-		}
-		keys = append(keys, key)
-	}
-	if len(keys) != 1 || keys[0] != "processing_failed:"+firstHash {
-		t.Errorf("notify = %v, want 一条 processing_failed", keys)
-	}
-
-	// 落 failed 之后不再自动重试。
-	if progress, err := f.runner.ProcessPending(ctx); err != nil || progress.Scanned != 0 {
-		t.Errorf("failed 版本仍被自动捞起: progress = %+v err = %v", progress, err)
+	if notifies != 1 {
+		t.Errorf("notify = %d 条, want 一条加工失败通知", notifies)
 	}
 }
 

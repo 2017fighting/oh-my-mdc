@@ -4,7 +4,10 @@
 //
 //   - 退避：每次都更长（1m 起，翻倍，封顶 30m），到期的判据落在 task_version.next_attempt_at；
 //   - 耗尽：app_config.max_attempts（默认 3）次之后落 failed(phase, reason)，版本驻留等人工；
-//   - 永久错：碰撞/跨设备这类「再试也一样」的失败不烧预算，一次就落 failed；
+//   - 韧性预算（#42）：取数与图片下载的瞬时失败另有一份固定节奏（TransientMaxAttempts，
+//     与副作用通知同口径），Retry 只排退避不落终局——预算用尽的处置（降级入库并标
+//     待补齐）是调用方的决定，不是状态机的 failed；
+//   - 永久错：碰撞/跨设备/凭据失效这类「再试也一样」的失败不烧预算，一次就落 failed；
 //   - 通知：「加工失败」只发一条（Telegram 待办按 (event, infohash) 去重），执行归旁路引擎。
 //
 // 它不碰文件、不碰上游：只把一次失败翻成库里的状态与一条待办。这样取数段与整理段
@@ -31,6 +34,10 @@ const (
 	RetryCap = 30 * time.Minute
 	// DefaultMaxAttempts 与 app_config 的表默认值同一个数（读不到时才用它）。
 	DefaultMaxAttempts = sidefx.DefaultMaxAttempts
+	// TransientMaxAttempts 是取数与图片下载的瞬时失败自动重试上限（#42）：
+	// 与副作用通知同一节奏（sidefx.NotifyMaxAttempts 的 5 次退避口径），
+	// 不跟 app_config.max_attempts 走——降级入库是设计好的路径，不是失败驻留。
+	TransientMaxAttempts = sidefx.NotifyMaxAttempts
 )
 
 // Backoff 算第 attempts 次失败（从 1 起）之后要等多久：基数翻倍，封顶 RetryCap。
@@ -87,6 +94,25 @@ func NewRecorder(opts Options) *Recorder {
 		now:    now,
 		owner:  opts.Owner,
 	}
+}
+
+// Retry 记一次瞬时失败，只排退避、**不落终局**（#42）。
+//
+// 取数与图片下载的瞬时失败走这里：预算内（TransientMaxAttempts）失败只是
+// attempts+1 + next_attempt_at 推后，版本留在 processing 等下一轮；预算用尽的
+// 那一次由调用方降级（按手头数据入库并标待补齐），不归记账器。永久错仍走
+// Fail(permanent=true)——凭据失效重试变不出来，直接进需人工。
+//
+// 返回的错误只描述**记账本身**失败；phase 只进时间线告警的 phase 列。
+func (r *Recorder) Retry(ctx context.Context, version task.Version, phase task.Phase, cause error) error {
+	delay := Backoff(version.Attempts + 1)
+	if _, err := r.store.RecordProcessingRetry(ctx, version.Infohash, r.owner, r.now(), delay); err != nil {
+		return r.swallowClaimLost(err)
+	}
+	r.logger.Warn("瞬时失败，退避重试中",
+		"movie_id", version.MovieID, "infohash", version.Infohash, "phase", phase,
+		"attempts", version.Attempts+1, "retry_in", delay, "err", cause)
+	return nil
 }
 
 // Failure 是一次失败记账的结论（调用方据此写日志/决定要不要把错误传给循环）。

@@ -24,6 +24,11 @@ type fakeStuck map[string]int
 
 func (f fakeStuck) StuckByKind(context.Context) (map[string]int, error) { return f, nil }
 
+// fakeIncomplete 是 IncompleteSource 的测试替身：真实实现（task.Store）要真 Postgres。
+type fakeIncomplete int
+
+func (f fakeIncomplete) IncompleteCount(context.Context) (int, error) { return int(f), nil }
+
 type failingStuck struct{}
 
 func (failingStuck) StuckByKind(context.Context) (map[string]int, error) {
@@ -93,13 +98,13 @@ func labelsMatch(metric *dto.Metric, want map[string]string) bool {
 // 三循环与七上游的样本必须**恒列满**（没跑过/没打过也是 0），否则
 // `increase(mdc_upstream_requests_total{result="permanent"}[15m]) > 0` 这类表达式
 // 在无流量时没有系列可算。
-func TestWriteRendersAllFourFamilies(t *testing.T) {
+func TestWriteRendersAllFiveFamilies(t *testing.T) {
 	registry := loops.NewRegistry()
 	okAt := time.Now().Add(-2 * time.Minute)
 	registry.Record(loops.Poll, okAt, true)
 	registry.Record(loops.Reconcile, okAt, false)
 
-	m := metrics.New(registry, fakeStuck{"notify": 2, "list_removal": 0, "jellyfin_refresh": 1}, nil)
+	m := metrics.New(registry, fakeStuck{"notify": 2, "list_removal": 0, "jellyfin_refresh": 1}, fakeIncomplete(3), nil)
 	m.RecordUpstream(metrics.UpstreamJavDB, metrics.ResultPermanent)
 	m.RecordUpstream(metrics.UpstreamTelegram, metrics.ResultOK)
 	m.RecordUpstream(metrics.UpstreamTelegram, metrics.ResultOK)
@@ -111,6 +116,7 @@ func TestWriteRendersAllFourFamilies(t *testing.T) {
 		"mdc_loop_iterations_total":          dto.MetricType_COUNTER,
 		"mdc_upstream_requests_total":        dto.MetricType_COUNTER,
 		"mdc_side_effect_stuck":              dto.MetricType_GAUGE,
+		"mdc_task_incomplete":                dto.MetricType_GAUGE,
 	} {
 		family, ok := families[name]
 		if !ok {
@@ -159,6 +165,9 @@ func TestWriteRendersAllFourFamilies(t *testing.T) {
 	if got := sampleValue(t, families, "mdc_side_effect_stuck", map[string]string{"kind": "list_removal"}); got != 0 {
 		t.Errorf("stuck list_removal = %v, want 0", got)
 	}
+	if got := sampleValue(t, families, "mdc_task_incomplete", map[string]string{}); got != 3 {
+		t.Errorf("task_incomplete = %v, want 3（无标签 gauge）", got)
+	}
 }
 
 // TestLoopStalledThresholdsAreDerivable 钉住 LoopStalled 的三种阈值在本地可复现：
@@ -171,7 +180,7 @@ func TestLoopStalledThresholdsAreDerivable(t *testing.T) {
 	registry.Record(loops.Sidefx, now.Add(-11*time.Minute), true)    // 上一次成功
 	registry.Record(loops.Sidefx, now.Add(-time.Minute), false)      // 最近一次是失败（不刷新 last_success）
 
-	m := metrics.New(registry, nil, nil)
+	m := metrics.New(registry, nil, nil, nil)
 	families := render(t, m)
 
 	cases := []struct {
@@ -196,7 +205,7 @@ func TestLoopStalledThresholdsAreDerivable(t *testing.T) {
 // TestLoopNeverSucceededUsesStartBaseline 钉住「从没成功过」的取值：
 // 不是 0（那会让 time()-0 立刻变成停滞告警），而是进程启动时间。
 func TestLoopNeverSucceededUsesStartBaseline(t *testing.T) {
-	m := metrics.New(loops.NewRegistry(), nil, nil)
+	m := metrics.New(loops.NewRegistry(), nil, nil, nil)
 	families := render(t, m)
 
 	started := sampleValue(t, families, "mdc_loop_last_success_unix_seconds", map[string]string{"loop": loops.Poll})
@@ -208,7 +217,7 @@ func TestLoopNeverSucceededUsesStartBaseline(t *testing.T) {
 // TestUpstreamCredentialsInvalidThresholdIsDerivable 钉住第二条 VMRule 的数据前提：
 // 平时 permanent 恒 0（increase>0 不成立），凭据失效类失败后立刻 > 0。
 func TestUpstreamCredentialsInvalidThresholdIsDerivable(t *testing.T) {
-	m := metrics.New(nil, nil, nil)
+	m := metrics.New(nil, nil, nil, nil)
 
 	families := render(t, m)
 	for _, upstream := range metrics.Upstreams {
@@ -231,7 +240,7 @@ func TestUpstreamCredentialsInvalidThresholdIsDerivable(t *testing.T) {
 // TestStuckFamilyNeedsTheDatabase 钉住「读库失败只让驻留那一族缺席」：
 // /metrics 不折叠数据库，循环与上游照常出数。
 func TestStuckFamilyNeedsTheDatabase(t *testing.T) {
-	m := metrics.New(loops.NewRegistry(), failingStuck{}, nil)
+	m := metrics.New(loops.NewRegistry(), failingStuck{}, nil, nil)
 	families := render(t, m)
 
 	if _, ok := families["mdc_side_effect_stuck"]; ok {
@@ -246,7 +255,7 @@ func TestStuckFamilyNeedsTheDatabase(t *testing.T) {
 
 // TestHandlerServesPrometheusContentType 钉住端点本身：200 + 正式文本格式的 Content-Type。
 func TestHandlerServesPrometheusContentType(t *testing.T) {
-	m := metrics.New(loops.NewRegistry(), fakeStuck{"notify": 0}, nil)
+	m := metrics.New(loops.NewRegistry(), fakeStuck{"notify": 0}, nil, nil)
 
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))

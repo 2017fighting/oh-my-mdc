@@ -238,6 +238,12 @@ func TestAttentionListsFailedAndStalled(t *testing.T) {
 		t.Fatalf("记停滞告警: %v", err)
 	}
 
+	// 一条待补齐的任务（#42）：标注在 task 上，区里是任务行不是版本行。
+	if _, err := f.database.Pool().Exec(ctx,
+		`UPDATE task SET missing_faces = '{images,actors}' WHERE movie_id = 'k4EVE4'`); err != nil {
+		t.Fatalf("标待补齐: %v", err)
+	}
+
 	body := jsonOf(t, send(t, f.handler, http.MethodGet, "/api/attention", ""))
 
 	failed, _ := body["failed"].([]any)
@@ -256,6 +262,19 @@ func TestAttentionListsFailedAndStalled(t *testing.T) {
 	stalledRow, _ := stalled[0].(map[string]any)
 	if stalledRow["number"] != "SSIS-001" {
 		t.Errorf("停滞行 = %v, want SSIS-001", stalledRow)
+	}
+
+	incomplete, _ := body["incomplete"].([]any)
+	if len(incomplete) != 1 {
+		t.Fatalf("incomplete = %v, want 一条", body["incomplete"])
+	}
+	incompleteRow, _ := incomplete[0].(map[string]any)
+	if incompleteRow["number"] != "SSIS-001" {
+		t.Errorf("待补齐行 = %v, want SSIS-001（任务行，无 infohash/source）", incompleteRow)
+	}
+	faces, _ := incompleteRow["missing_faces"].([]any)
+	if len(faces) != 2 {
+		t.Errorf("missing_faces = %v, want 两面", faces)
 	}
 }
 
