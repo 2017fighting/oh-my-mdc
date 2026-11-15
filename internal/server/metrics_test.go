@@ -18,7 +18,7 @@ var errDatabaseDown = errors.New("连接被拒")
 // handler 出自指标包（Content-Type 与文本格式），不是 SPA 壳页，也不是 404。
 func TestMetricsEndpointIsWired(t *testing.T) {
 	registry := loops.NewRegistry()
-	m := metrics.New(registry, nil, nil)
+	m := metrics.New(registry, nil, nil, nil)
 	m.RecordUpstream(metrics.UpstreamJavDB, metrics.ResultOK)
 
 	h := newHandler(t, server.Options{Metrics: m})
@@ -62,7 +62,7 @@ func TestMetricsEndpointSaysSoWhenUnwired(t *testing.T) {
 func TestMetricsDoesNotFoldLivenessOrReadiness(t *testing.T) {
 	h := newHandler(t, server.Options{
 		DB:      pinger{err: errDatabaseDown},
-		Metrics: metrics.New(nil, nil, nil),
+		Metrics: metrics.New(nil, nil, nil, nil),
 	})
 
 	if rec := get(t, h, "/healthz"); rec.Code != http.StatusOK {

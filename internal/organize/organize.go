@@ -248,6 +248,15 @@ func (r *Runner) processVersion(ctx context.Context, version task.Version, env e
 	}
 
 	if err := r.file(ctx, claimed, meta, env); err != nil {
+		// 瞬时图片下载失败：排退避跨循环重试，版本留 processing（#42，与取数同一
+		// 节奏）。不往循环上抛（ADR-0011 口径）：CDN 拒了这次请求不是循环坏了。
+		var imgRetry imageRetryError
+		if errors.As(err, &imgRetry) {
+			if retryErr := r.recorder.Retry(ctx, claimed, task.PhaseOrganize, imgRetry.err); retryErr != nil {
+				return outcomeFailed, retryErr
+			}
+			return outcomeFailed, nil
+		}
 		// 记账成功就返回 nil：版本失败已经落在状态机里，不是循环故障。
 		return outcomeFailed, r.recordFailure(ctx, claimed, env, err)
 	}
@@ -315,8 +324,14 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 		return err
 	}
 
-	// 图片：部分成功不失败任务（规格 §5.3 / mdc-lite ADR-0015）。
-	warnings := r.writeImages(ctx, dir, clean)
+	// 图片：部分成功不失败任务（规格 §5.3 / mdc-lite ADR-0015）；但瞬时下载失败
+	// 没耗尽预算时整轮回退，下一轮再下（#42）——poster 不该一次网络抖动就永远缺席。
+	// 已写好的部分不动：硬链同 inode、NFO 内容同、落过的图判复用，重跑只补缺口。
+	warnings, imgErr := r.writeImages(ctx, dir, clean)
+	if imgErr != nil && version.Attempts+1 < processing.TransientMaxAttempts {
+		return imageRetryError{fmt.Errorf("下载图片失败（第 %d/%d 轮）：%w",
+			version.Attempts+1, processing.TransientMaxAttempts, imgErr)}
+	}
 
 	// 分片账（version_file）：视频才有分片，字幕不算。
 	partials := make([]task.VersionFile, 0, len(plan.Videos()))
@@ -357,6 +372,7 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 	r.record(ctx, version, task.EventStateChange, "processing", "finished",
 		fmt.Sprintf("入库完成：%s（%d 个视频文件）", dir, len(plan.Videos())))
 	r.recordWarnings(ctx, version, clean, env.translationExpected, warnings)
+	r.markMissingFaces(ctx, version, dir, meta, env)
 
 	r.logger.Info("入库完成",
 		"movie_id", version.MovieID, "number", version.Number,
@@ -423,30 +439,72 @@ type materialGone struct{ err error }
 func (e materialGone) Error() string { return e.err.Error() }
 func (e materialGone) Unwrap() error { return e.err }
 
-// writeImages 落三类图片，返回给人看的告警（部分成功不失败任务）。
+// imageRetryError 标记「图片下载这次没成但还能再试」（#42）：网络/超时类瞬时错，
+// 调用方排退避重试而不是把整条版本落 failed。裁剪失败不算——那是文件本身的病，
+// 重试变不出来，走部分成功告警。
+type imageRetryError struct{ err error }
+
+func (e imageRetryError) Error() string { return e.err.Error() }
+func (e imageRetryError) Unwrap() error { return e.err }
+
+// markMissingFaces 按四面判据写任务的待补齐标注（#42 / GLOSSARY「待补齐」）。
+//
+// 入库是唯一掌握全部事实的时刻：盘上的图、库里的演员/简介/译文。全齐写入空集——
+// 强制重刮补齐四面后重新入库，同一条语句负责摘标。写失败只记日志：入库已成，
+// 标注下一轮整理（或强刮后的重入库）会再校，不该让它把一次成功的入库变成失败。
+
+func (r *Runner) markMissingFaces(ctx context.Context, version task.Version, dir string, meta task.Metadata, env environment) {
+	actors, err := r.store.Actors(ctx, version.MovieID)
+	if err != nil {
+		r.logger.Error("organize: 读演员失败，跳过待补齐标注", "movie_id", version.MovieID, "err", err)
+		return
+	}
+	faces := MissingFaces(dir, meta, len(actors), env.translationExpected)
+	if err := r.store.SetMissingFaces(ctx, version.MovieID, faces); err != nil {
+		r.logger.Error("organize: 写待补齐标注失败",
+			"movie_id", version.MovieID, "faces", faces, "err", err)
+		return
+	}
+	if len(faces) > 0 {
+		r.logger.Info("任务标待补齐", "movie_id", version.MovieID, "number", version.Number, "faces", faces)
+	}
+}
+
+// writeImages 落三类图片，返回告警与「poster/fanart 这一轮的瞬时下载失败」。
 //
 // 三个不变的判断：
 //
 //   - 复用：目标图比 provenance 的抓取时刻新 → 这份元数据的图已经落过盘，零下载零改写；
 //     三组图各有自己的抓取时刻（sleeve 与预览图可能来自不同源），各判各的；
 //   - poster 由横版 sleeve 右裁 2:3；fanart 是同一张**原横版**（源不横就不写 fanart）；
-//   - 任何一张失败/裁不了都只记一条告警，接着做下一张。
-func (r *Runner) writeImages(ctx context.Context, dir string, meta cleanMetadata) []string {
+//   - 任何一张失败/裁不了都只记一条告警，接着做下一张；唯一例外是 sleeve 全部
+//     下载失败且至少一次是网络错——那返回给调用方排退避重试（#42），不在这里
+//     耗掉本轮。预览图（extrafanart）保持部分成功语义：单张失败只告警，
+//     它们缺了不构成「无任何图」。
+func (r *Runner) writeImages(ctx context.Context, dir string, meta cleanMetadata) ([]string, error) {
 	if r.images == nil {
-		return nil
+		return nil, nil
 	}
 
 	warnings := []string{}
+	var sleeveErr error
 	if len(meta.sleeve) > 0 && !imagesCurrent(dir, meta.sleeveFetchTime()) {
-		warnings = append(warnings, r.writeSleeveImages(ctx, dir, meta.sleeve)...)
+		var sleeveWarnings []string
+		sleeveWarnings, sleeveErr = r.writeSleeveImages(ctx, dir, meta.sleeve)
+		warnings = append(warnings, sleeveWarnings...)
 	}
 	warnings = append(warnings, r.writeExtraFanart(ctx, dir, meta.extraFanart, meta.extraFetchTime())...)
-	return warnings
+	return warnings, sleeveErr
 }
 
 // writeSleeveImages 落 poster 与 fanart：先挑横版 sleeve，再右裁出一张 2:3。
-func (r *Runner) writeSleeveImages(ctx context.Context, dir string, sleeves []sourcedImage) []string {
+//
+// 第二个返回值非 nil 表示一张 sleeve 都没下到、且至少一次是网络错：调用方在
+// 预算内应整轮回退重试（#42）。下载到了但裁不了（垃圾字节、怪几何）是文件的病，
+// 只告警不重试。
+func (r *Runner) writeSleeveImages(ctx context.Context, dir string, sleeves []sourcedImage) ([]string, error) {
 	warnings := []string{}
+	var downloadErrs []error
 
 	var (
 		chosen     *sourcedImage
@@ -458,6 +516,7 @@ func (r *Runner) writeSleeveImages(ctx context.Context, dir string, sleeves []so
 		body, err := r.images.Get(ctx, sleeve.URL)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("下载 sleeve 失败：%v", err))
+			downloadErrs = append(downloadErrs, err)
 			continue
 		}
 		candidate := sleeve
@@ -474,8 +533,13 @@ func (r *Runner) writeSleeveImages(ctx context.Context, dir string, sleeves []so
 		chosen, chosenBody = first, firstBody
 	}
 	if chosen == nil {
+		// 一张都没下到：有网络错就交给退避重试，纯 404 类也一并算——换张图 URL
+		// 不是这一轮能变出来的事，但下轮重试的代价只是一次 GET。
+		if len(downloadErrs) > 0 {
+			return warnings, errors.Join(downloadErrs...)
+		}
 		warnings = append(warnings, "sleeve 图片全部下载失败")
-		return warnings
+		return warnings, nil
 	}
 
 	// fanart 是**原横版**：源不横（JavDB 竖版封面兜底）就没有横版可原样落，宁缺勿歪。
@@ -493,14 +557,14 @@ func (r *Runner) writeSleeveImages(ctx context.Context, dir string, sleeves []so
 	poster, err := cropPoster(chosenBody)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("右裁 2:3 失败（poster 跳过）：%v", err))
-		return warnings
+		return warnings, nil
 	}
 	posterPath := filepath.Join(dir, PosterName+ext)
 	if _, err := writeIfChanged(posterPath, poster); err != nil {
 		warnings = append(warnings, fmt.Sprintf("落 poster 失败：%v", err))
 	}
 	removeStaleExtension(dir, PosterName, ext)
-	return warnings
+	return warnings, nil
 }
 
 // writeExtraFanart 落 extrafanart/fanart{N}.{ext}，并把多出来的旧图清掉（收缩清理）。

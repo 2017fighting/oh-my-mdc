@@ -222,7 +222,7 @@ func TestPermanentClassificationPerUpstream(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := metrics.New(nil, nil, nil)
+			m := metrics.New(nil, nil, nil, nil)
 			server := tc.server(t)
 
 			err := tc.drive(t, m, server)

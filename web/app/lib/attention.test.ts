@@ -108,8 +108,10 @@ test("「需要人工」的行数按病因数：三条同因通知算一件事",
     ok: true,
     failed: [item("mv_a", "SSIS-812", "aa")],
     stalled: [],
+    incomplete: [],
     failed_truncated: false,
     stalled_truncated: false,
+    incomplete_truncated: false,
   };
   assert.equal(
     attentionRowCount(attention, [

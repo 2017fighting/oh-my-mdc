@@ -98,9 +98,9 @@ func run(logger *slog.Logger) error {
 		// 任务域读模型与副作用出箱：面板与 poll 循环共用。
 		taskStore = task.NewStore(database.Pool())
 		sidefxOutbox = sidefx.New(database.Pool())
-		// 可观测性单点（规格 §9）：循环读登记处、驻留现数库里的行、上游由各客户端喂。
+		// 可观测性单点（规格 §9）：循环读登记处、驻留与待补齐现数库里的行、上游由各客户端喂。
 		// 它在所有集成之前装配，好让每一次上游请求都记到同一份计数上。
-		metricsRegistry = metrics.New(loopsRegistry, sidefxOutbox, logger)
+		metricsRegistry = metrics.New(loopsRegistry, sidefxOutbox, taskStore, logger)
 
 		// JavDB 集成门面：既是设置域的「测试读取」实现，也是向导探测/代建清单的客户端。
 		javdbIntegration = javdb.New(javdb.Options{Metrics: metricsRegistry})
@@ -282,9 +282,9 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
-	// 库连不上时上面那一段没执行：指标照常出循环与上游两族，驻留那族缺席。
+	// 库连不上时上面那一段没执行：指标照常出循环与上游两族，读库的两族缺席。
 	if metricsRegistry == nil {
-		metricsRegistry = metrics.New(loopsRegistry, nil, logger)
+		metricsRegistry = metrics.New(loopsRegistry, nil, nil, logger)
 	}
 
 	// nil 指针装进接口会变成非 nil 接口：引擎没起来时明确传 nil。

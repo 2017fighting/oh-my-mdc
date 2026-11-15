@@ -234,7 +234,9 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 7.1 字段映射全表
 
-固定归属 + 字段级回退（唯一回退方向 DMM→JavDB；JavDB 字段缺失留空不回退）：
+固定归属 + 字段级回退（唯一回退方向 DMM→JavDB；JavDB 字段缺失留空不回退；**不做 DMM↔JavDB 双向字段兑底**——#42 裁决：上游挂了的解法是重试，不是拿另一边的字段凑）：
+
+**刮削韧性（#42）**：取数两源各取各的，一个源挂了不挡另一个源。瞬时失败（网络/超时/5xx/地区阻断）按指数退避跨对账循环重试 **5 轮**（1 分钟起、翻倍、封顶 30 分钟，与副作用通知同一节奏；不跟 `max_attempts` 走）；期间版本留 processing、循环健康位不变红（上游不可达不算循环失败，ADR-0011 口径，可达性归 §9 上游指标）。五轮耗尽照常入库不阻塞——按手头已有的源落库，并按四面判据标**待补齐**（GLOSSARY）：无任何图 / 无演员 / 无简介 / 翻译启用却无中文标题，任一命中即算；个别 tag 缺不算。永久错（凭据失效、协议不兼容）不烧预算，一次落 `failed(scrape)` 进需人工。修复动作是面板逐部「强制重刮」，四面补齐自动摘标；`missing_faces` 落 `task` 行（迁移 00013），面板聚合成区、`/metrics` 出 `mdc_task_incomplete`。图片下载的瞬时失败同节奏：poster/fanart 的网络错退避重试 5 轮，耗尽照常入库（部分成功告警不变）；裁剪失败是文件的病，不重试只告警。
 
 | 字段（task 列） | 默认源 | 回退 | NFO 槽 |
 |---|---|---|---|
@@ -268,7 +270,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 - 非视频文件（txt/广告图/种子自带 nfo）不落盘（视频+字幕白名单）。
 - **硬链模式唯一**（无 move/copy/symlink 配置面）；**EXDEV = 任务失败**并明示换挂载，绝不静默降级 copy。
 - **碰撞**：同番号两条无标签版本（不同 infohash 都指向 `{番号}.ext`）→ 后到者失败驻留等人工；同番号不同 movie_id 的两任务相撞同样失败等人工。不覆盖、不自动 -v2（宁噪勿静默丢数据）。
-- AI 翻译失败 → title 降级日文原题照常入库 + task_event 告警，不阻塞。
+- AI 翻译失败 → title 降级日文原题照常入库 + task_event 告警，不阻塞；若 AI 翻译已启用，缺中文标题计入待补齐四面判据（#42，标见 §7.1 刮削韧性），补译补齐时单面摘标。
 
 ## 8. Web UI 与 REST 契约
 
@@ -286,7 +288,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.2 面板（表格为主体，要动手的事置顶）
 
-区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
+区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
 
 任务详情 = **右侧抽屉**，保持精简：版本列表（infohash、来源、标签、失败原因）+ 事件时间线 + 重试/强制重刮（force）。**不看刮削字段与 provenance**（v1 不做，不留占位）。
 
@@ -345,6 +347,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `mdc_loop_iterations_total` | counter | `loop,result∈{ok,error}` | 循环健康 |
 | `mdc_upstream_requests_total` | counter | `upstream∈{javdb,mteam,dmm,qbittorrent,jellyfin,telegram,openai},result∈{ok,transient,permanent}` | 凭据失效判定；permanent = 401/403 类（javdb JWTVerificationError、telegram 400/401/403、mteam 鉴权 code 等） |
 | `mdc_side_effect_stuck` | gauge | `kind` | 驻留副作用数（喂需人工区，不做告警规则） |
+| `mdc_task_incomplete` | gauge | — | 待补齐（#42：四面判据命中且上游重试耗尽）的任务数；与面板待补齐区同源 |
 
 - 最小 VMRule 两条（#12）：**LoopStalled**：`time() - mdc_loop_last_success_unix_seconds{loop="poll"} > 2400`（reconcile > 900、sidefx > 600）；**UpstreamCredentialsInvalid**：`increase(mdc_upstream_requests_total{result="permanent"}[15m]) > 0`。Grafana 面板不做。
 

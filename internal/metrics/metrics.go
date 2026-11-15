@@ -1,11 +1,12 @@
-// Package metrics 是规格 §9 的四族指标：数据、/metrics 的文本输出，以及各上游的计量接缝。
+// Package metrics 是规格 §9 的指标族：数据、/metrics 的文本输出，以及各上游的计量接缝。
 //
 // 数据来源分三类，各有唯一的出产处：
 //
 //   - 循环：loops.Registry 的 last_success 与迭代计数（poll / reconcile / sidefx 三条都读它）；
 //   - 上游：各客户端在自己的请求出口喂 Recorder（七个上游一个不少）；
-//   - 驻留副作用：StuckSource，真实实现是 sidefx.Outbox——抓取时按 kind 数库里的行，
-//     所以它与面板「需人工」区的数字同源。
+//   - 读库的两族：驻留副作用（StuckSource，真实实现 sidefx.Outbox）与待补齐
+//     任务数（IncompleteSource，真实实现 task.Store）——抓取时现数库里的行，
+//     与面板上对应区的数字同源。
 //
 // 实现不引 Prometheus 客户端库：v1 的最小集只有四族，手写 exposition 文本比拖一整个
 // 注册表省事，也避免「哪条指标存在」散落在库的初始化代码里。文本由测试里的官方
@@ -98,6 +99,14 @@ type StuckSource interface {
 	StuckByKind(ctx context.Context) (map[string]int, error)
 }
 
+// IncompleteSource 数待补齐（#42 / GLOSSARY「待补齐」）的任务。
+//
+// 与 StuckSource 同理不反向依赖 task：真实实现是 task.Store.IncompleteCount，
+// 抓取时数库里的行，与面板「待补齐」区的数字同源。
+type IncompleteSource interface {
+	IncompleteCount(ctx context.Context) (int, error)
+}
+
 // scrapeTimeout 是一次 /metrics 抓取最多等多久（只为那条要读库的驻留指标）。
 const scrapeTimeout = 3 * time.Second
 
@@ -123,6 +132,8 @@ type counterKey struct {
 type Registry struct {
 	loopStatus *loops.Registry
 	stuck      StuckSource
+	// incomplete 是待补齐计数源；nil 时那一族缺席（测试或未装配任务域）。
+	incomplete IncompleteSource
 	// startedAt 是「从没成功过」的基线：启动 40 分钟仍没成功就报停滞，
 	// 而不是一上来就把 time()-0 算成 55 年的停滞。
 	startedAt time.Time
@@ -132,15 +143,16 @@ type Registry struct {
 	upstream map[counterKey]uint64
 }
 
-// New 装配登记处。loopStatus 与 stuck 都允许为 nil（测试场景）：前者按「还没跑过」渲染，
-// 后者让驻留那族不出数。
-func New(loopStatus *loops.Registry, stuck StuckSource, logger *slog.Logger) *Registry {
+// New 装配登记处。三个数据源都允许为 nil（测试场景）：前者按「还没跑过」渲染，
+// 后两个让各自要读库的那族不出数。
+func New(loopStatus *loops.Registry, stuck StuckSource, incomplete IncompleteSource, logger *slog.Logger) *Registry {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Registry{
 		loopStatus: loopStatus,
 		stuck:      stuck,
+		incomplete: incomplete,
 		startedAt:  time.Now(),
 		logger:     logger,
 		upstream:   make(map[counterKey]uint64),
@@ -194,6 +206,7 @@ func (r *Registry) Write(ctx context.Context, w io.Writer) {
 	writeLoops(w, r.loopStatus, r.startedAt)
 	writeUpstreams(w, r)
 	writeStuck(ctx, w, r.stuck, r.logger)
+	writeIncomplete(ctx, w, r.incomplete, r.logger)
 }
 
 // writeLoops 写两条循环指标：最近一次成功的时间与迭代计数。
@@ -284,6 +297,23 @@ func writeStuck(ctx context.Context, w io.Writer, stuck StuckSource, logger *slo
 	for _, kind := range kinds {
 		fmt.Fprintf(w, "mdc_side_effect_stuck{kind=\"%s\"} %d\n", escapeLabel(kind), counts[kind])
 	}
+}
+
+// writeIncomplete 写待补齐任务数（#42）。读库失败只让这一族缺席：
+// 与驻留那族同一口径——抓取不该因为库抖了就整个失败。
+func writeIncomplete(ctx context.Context, w io.Writer, incomplete IncompleteSource, logger *slog.Logger) {
+	if incomplete == nil {
+		return
+	}
+	count, err := incomplete.IncompleteCount(ctx)
+	if err != nil {
+		logger.Warn("数待补齐任务失败，本次不输出 mdc_task_incomplete", "err", err)
+		return
+	}
+
+	fmt.Fprintln(w, "# HELP mdc_task_incomplete 待补齐（关键面缺口且上游重试耗尽）的任务数；抓取时数库里的行。")
+	fmt.Fprintln(w, "# TYPE mdc_task_incomplete gauge")
+	fmt.Fprintf(w, "mdc_task_incomplete %d\n", count)
 }
 
 func knownUpstream(upstream string) bool {

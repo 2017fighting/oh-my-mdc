@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CONFUSABLES, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER } from "./copy.ts";
+import { CONFUSABLES, MISSING_FACE_LABELS, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER } from "./copy.ts";
+import type { MissingFace } from "./api.ts";
 
 test("四个状态名与说明一一对应，不多不少", () => {
   assert.deepEqual(Object.keys(STATUS_NAMES).sort(), [...STATUS_ORDER].sort());
@@ -28,8 +29,8 @@ test("「失败」那条要说出 URL 里的写法：author 会手改地址栏",
   assert.match(STATUS_NOTES.failed, /\?state=failed/);
 });
 
-test("容易混的四条都有词有解释，且不复述状态名定义", () => {
-  assert.equal(CONFUSABLES.length, 4);
+test("容易混的五条都有词有解释，且不复述状态名定义", () => {
+  assert.equal(CONFUSABLES.length, 5);
   for (const entry of CONFUSABLES) {
     assert.ok(entry.term.length > 0, "术语缺词");
     assert.ok(entry.note.length >= 20, `「${entry.term}」的解释太短，说不清`);
@@ -41,5 +42,17 @@ test("容易混的四条都有词有解释，且不复述状态名定义", () =>
   );
   for (const entry of CONFUSABLES) {
     assert.ok(!bare.has(entry.term), `「${entry.term}」是状态名，不该在易混区再定义一遍`);
+  }
+});
+
+test("待补齐四面文案齐全、非空、够短：chip 要装得下", () => {
+  // 机器名与后端 task.missing_faces（internal/task/faces.go）同一套词，
+  // 漆一个面就有一面在面板上变成裸英文。
+  assert.deepEqual(Object.keys(MISSING_FACE_LABELS).sort(), ["actors", "images", "outline", "title_zh"].sort());
+  for (const face of Object.keys(MISSING_FACE_LABELS) as MissingFace[]) {
+    const label = MISSING_FACE_LABELS[face];
+    assert.ok(label.length > 0 && label.length <= 6, `「${face}」的文案「${label}」不在 1–6 字之间`);
+    assert.ok(label.startsWith("缺"), `「${face}」的文案「${label}」应当以「缺」开头（缺的是哪一面，一眼可读）`);
+    assert.ok(!label.includes("缺译"), `「${face}」的文案用了 GLOSSARY 的 _Avoid_ 词「缺译」`);
   }
 });

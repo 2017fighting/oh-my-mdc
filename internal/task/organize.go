@@ -66,6 +66,33 @@ func (s *Store) RecordProcessingFailure(ctx context.Context, infohash, owner str
 	return ProcessingFailure{Attempts: attempts, Exhausted: status == StatusFailed}, nil
 }
 
+// RecordProcessingRetry 记一次瞬时失败的退避重试，**永不落终局**（#42）。
+//
+// 与 RecordProcessingFailure 的差别只在耗尽行为：预算内的瞬时失败没有「耗尽」
+// 概念——预算用尽的处置（降级入库并标待补齐）是调用方的决定，不是状态机的
+// failed。两条语义（attempts+1、next_attempt_at 推后）与放回租约都一样；
+// 失败原因不落版本行（时间线的告警事件已带着它）。
+// 状态不是 processing 或租约不在自己手里 → ErrClaimLost。
+func (s *Store) RecordProcessingRetry(ctx context.Context, infohash, owner string, at time.Time, delay time.Duration) (ProcessingFailure, error) {
+	var attempts int
+	err := s.pool.QueryRow(ctx,
+		`UPDATE task_version
+		 SET attempts = attempts + 1,
+		     next_attempt_at = $3,
+		     claimed_at = NULL, claimed_by = '', updated_at = now()
+		 WHERE infohash = $1 AND claimed_by = $2 AND status = 'processing'
+		 RETURNING attempts`,
+		infohash, owner, at.Add(delay),
+	).Scan(&attempts)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ProcessingFailure{}, ErrClaimLost
+		}
+		return ProcessingFailure{}, fmt.Errorf("task: 记版本 %s 的退避重试: %w", infohash, err)
+	}
+	return ProcessingFailure{Attempts: attempts}, nil
+}
+
 // MarkProcessingFailed 直接落 failed(phase, reason)，不烧自动重试预算。
 //
 // 给永久错用（目录碰撞、跨设备硬链）：再试三次也不会让挂载变成同一块盘，

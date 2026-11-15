@@ -24,9 +24,17 @@ import (
 
 // ScrapeFailurePrefix 是刮削取数失败事件的 reason 前缀。
 //
-// 取数段每失败一次留一条（时间线要看得见尝试史）；三次耗尽的最后一条改由
-// processing.Recorder 统一写「加工失败」，所以这个前缀只标「还在重试的那几次」。
+// 取数段每失败一次留一条（时间线要看得见尝试史）；五轮耗尽的那一条改由
+// 取数段自己写「取数重试耗尽」（#42：耗尽不再落 failed，而是降级入库），
+// 所以这个前缀只标「还在重试的那几次」。
 const ScrapeFailurePrefix = "刮削取数失败"
+
+// FetchExhaustedPrefix 是「取数重试耗尽、降级入库」告警的固定开头（#42）。
+//
+// 与 ScrapeFailurePrefix 分开：一个标「这一轮没成、下一轮再试」，
+// 一个标「五轮全没成、已按手头数据入库并标待补齐」。两处必须同一个字面量：
+// 写方（scrape）与告警去重的读方（HasAlert）都从这里取词。
+const FetchExhaustedPrefix = "取数重试耗尽"
 
 // 两类 AI 翻译告警的前缀（规格 §5.7/§7.2）。
 //
