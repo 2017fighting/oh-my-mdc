@@ -267,7 +267,7 @@ func TestMarkAddedClearsPendingAndArmsListRemoval(t *testing.T) {
 	if _, err := store.Claim(ctx, hash, "owner"); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := store.MarkAdded(ctx, hash, "owner"); err != nil {
+	if err := store.MarkAdded(ctx, hash, "owner", true); err != nil {
 		t.Fatalf("MarkAdded: %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestMarkAddedClearsPendingAndArmsListRemoval(t *testing.T) {
 		t.Error("list_removal_pending = false, want true（置清单项待删）")
 	}
 
-	if err := store.MarkAdded(ctx, hash, "owner"); !errors.Is(err, task.ErrClaimLost) {
+	if err := store.MarkAdded(ctx, hash, "owner", true); !errors.Is(err, task.ErrClaimLost) {
 		t.Fatalf("无租约时 MarkAdded err = %v, want ErrClaimLost", err)
 	}
 }
@@ -401,5 +401,69 @@ func TestEventsAreAppendOnlyAndNewestFirst(t *testing.T) {
 	}
 	if events[1].Kind != task.EventStateChange {
 		t.Errorf("最早事件 kind = %q, want state_change", events[1].Kind)
+	}
+}
+
+// TestSaveCandidateManualHasNoList 钉住 00012：手工登记的候选不带清单 id，
+// 任务行落 NULL（不是空串、不冒充某张清单），读模型把它读成空串。
+func TestSaveCandidateManualHasNoList(t *testing.T) {
+	store, database := migrated(t)
+
+	manual := candidate("manual01", "ABP-777", "3333333333333333333333333333333333333333")
+	manual.ListID = ""
+	manual.Source = task.SourceManual
+	save(t, store, manual)
+
+	var listID *string
+	if err := database.Pool().QueryRow(context.Background(),
+		`SELECT list_id FROM task WHERE movie_id = 'manual01'`).Scan(&listID); err != nil {
+		t.Fatalf("读 task.list_id: %v", err)
+	}
+	if listID != nil {
+		t.Errorf("task.list_id = %q, want NULL（首次发现是手工，不是清单）", *listID)
+	}
+
+	// 读模型容忍 NULL：List 与 Detail 都把空串读回来，不炸。
+	row, err := store.List(context.Background(), task.ListFilter{Query: "ABP-777"})
+	if err != nil || len(row) != 1 {
+		t.Fatalf("List(ABP-777) = %v, %v, want 1 行", row, err)
+	}
+	if row[0].ListID != "" {
+		t.Errorf("读模型的 list_id = %q, want 空串", row[0].ListID)
+	}
+}
+
+// TestSaveCandidateStillRequiresListForPolledSources 钉住另一半：清单轮询的候选
+// 仍必须带清单 id——「首次发现来源」对它们是必填的，可空只属于手工登记。
+func TestSaveCandidateStillRequiresListForPolledSources(t *testing.T) {
+	store, _ := migrated(t)
+
+	polled := candidate("polled01", "ABP-888", "4444444444444444444444444444444444444444")
+	polled.ListID = ""
+	if _, err := store.SaveCandidate(context.Background(), polled); err == nil {
+		t.Fatalf("缺清单 id 的清单候选被放行了")
+	}
+}
+
+// TestTaskIDByNumber 钉住手工登记的番号预检判据：同番号别的 movie_id 占着才算撞车，
+// 自己的任务（哪怕已存在）不算。
+func TestTaskIDByNumber(t *testing.T) {
+	store, _ := migrated(t)
+	save(t, store, candidate("owner01", "MIDV-100", "5555555555555555555555555555555555555555"))
+
+	if owner, taken, err := store.TaskIDByNumber(context.Background(), "MIDV-100", "other99"); err != nil {
+		t.Fatalf("TaskIDByNumber: %v", err)
+	} else if !taken || owner != "owner01" {
+		t.Errorf("撞车判定 = %q/%v, want owner01/true", owner, taken)
+	}
+	if _, taken, err := store.TaskIDByNumber(context.Background(), "MIDV-100", "owner01"); err != nil {
+		t.Fatalf("TaskIDByNumber(自己): %v", err)
+	} else if taken {
+		t.Errorf("自己的任务被算成撞车")
+	}
+	if _, taken, err := store.TaskIDByNumber(context.Background(), "MIDV-404", "other99"); err != nil {
+		t.Fatalf("TaskIDByNumber(没登记过): %v", err)
+	} else if taken {
+		t.Errorf("没人占着的番号被算成撞车")
 	}
 }

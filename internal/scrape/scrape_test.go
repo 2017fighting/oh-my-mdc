@@ -147,7 +147,7 @@ func (f *fixture) seedProcessing(t *testing.T, movieID, number, infohash string)
 	if _, err := f.store.Claim(ctx, infohash, "owner-add"); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := f.store.MarkAdded(ctx, infohash, "owner-add"); err != nil {
+	if err := f.store.MarkAdded(ctx, infohash, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded: %v", err)
 	}
 	if _, err := f.store.Claim(ctx, infohash, "owner-scrape"); err != nil {

@@ -321,6 +321,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `GET /api/tasks?state=&q=&page=` | 任务行（`task_state` 视图 + 版本摘要 chip 数据） |
 | `GET /api/tasks/{movie_id}` | 任务 + 版本列表 + 最近事件（抽屉数据） |
 | `POST /api/tasks/{movie_id}/retry` | `{force: bool=false, infohashes?: [..]}`，语义照 §6.1 人工重试行；`infohashes` 省略＝整个任务（抽屉的强制重刮），给了就**只动这几条版本**（面板的行是版本组，按钮写几条就只动几条）；回执 `{results:[{infohash, action, from_state, to_state, reason, force_rescrape}]}`——逐版结果，版本侧被拒/失败不是 HTTP 错误 |
+| `POST /api/manual-tasks` | 手工登记（GLOSSARY）：`{magnet, javdb_url}`；回执 `{movie_id, infohash, number, outcome, message?}`，`outcome ∈ added/adopted/already_tracked/deferred/duplicate`（deferred＝登记成功、加种由轮询接着试）。错误信封：输入形状 400 `validation_error`、番号撞车 409 `number_taken`、种子已属别的任务 409 `infohash_taken`、门禁未开 409 `gate_closed`、详情读不到 502 `upstream_error` |
 | `GET /api/events?movie_id=&limit=` | 事件时间线 |
 | `GET /api/attention` | 「需要人工」区的任务侧两半（#26 落地 §8.2 时新增）：`{failed:[{movie_id,number,infohash,phase,reason,at}], stalled:[…], failed_truncated, stalled_truncated}`；每半上限 50 行，被截断时 `*_truncated=true`（面板据此写「50+」）。驻留副作用由下面那一条提供 |
 | `GET /api/side-effects?state=pending\|stuck` | 副作用队列（stuck = §4.2 驻留） |

@@ -159,6 +159,30 @@ func (s *Store) TaskOwningNumber(ctx context.Context, number, movieID string) (s
 	return owner, nil
 }
 
+// TaskIDByNumber 找出占着某番号的另一个任务；没有则第二个返回值为 false。
+//
+// 手工登记的预检判据（GLOSSARY「手工登记」）：目录是「一番号一目录」（ADR-0008），
+// 同番号的第二个任务在整理阶段注定驻留等人工（TaskOwningNumber 只会让它输），
+// 与其让用户晚几小时在需人工区看到，不如登记时就拦住。
+// excludeMovieID 是正要登记的任务：同作品自己的任务不算撞车。
+func (s *Store) TaskIDByNumber(ctx context.Context, number, excludeMovieID string) (string, bool, error) {
+	var owner string
+	err := s.pool.QueryRow(ctx,
+		`SELECT movie_id FROM task
+		 WHERE number = $1 AND movie_id <> $2
+		 ORDER BY created_at, movie_id
+		 LIMIT 1`,
+		number, excludeMovieID,
+	).Scan(&owner)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("task: 查番号 %s 的占用任务: %w", number, err)
+	}
+	return owner, true, nil
+}
+
 // VersionFile 是 version_file 的一行：一条版本里的一个分片视频。
 type VersionFile struct {
 	// RelPath 是分片相对下载根（content_path）的位置；单文件种子就是文件名。

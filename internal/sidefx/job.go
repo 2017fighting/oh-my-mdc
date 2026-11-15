@@ -221,7 +221,7 @@ func (o *Outbox) DrainPendingRemovals(ctx context.Context, limit int) (int, erro
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
 	rows, err := tx.Query(ctx,
-		`SELECT v.infohash, v.movie_id, t.number, t.list_id
+		`SELECT v.infohash, v.movie_id, t.number, COALESCE(t.list_id, '')
 		 FROM task_version v
 		 JOIN task t ON t.movie_id = v.movie_id
 		 WHERE v.list_removal_pending

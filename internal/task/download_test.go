@@ -198,7 +198,7 @@ func claimAndAdd(t *testing.T, store *task.Store, infohash string) {
 	if _, err := store.Claim(ctx, infohash, "owner-add"); err != nil {
 		t.Fatalf("Claim(%s): %v", infohash, err)
 	}
-	if err := store.MarkAdded(ctx, infohash, "owner-add"); err != nil {
+	if err := store.MarkAdded(ctx, infohash, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded(%s): %v", infohash, err)
 	}
 }

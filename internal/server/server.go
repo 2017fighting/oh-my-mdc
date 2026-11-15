@@ -16,6 +16,7 @@ import (
 
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/manual"
 	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/retry"
@@ -40,6 +41,13 @@ type Pinger interface {
 // 只有一件事：对一条任务的全部版本跑一次重试，逐条回结论（规格 §6.1 人工重试行）。
 type Retrier interface {
 	Retry(ctx context.Context, movieID string, infohashes []string, force bool) (retry.Result, error)
+}
+
+// Registrar 是手工登记的接缝（真实实现是 manual.Registrar）。
+//
+// 只有一件事：贴磁力与 JavDB 链接，把一部作品直接交给流水线（GLOSSARY「手工登记」）。
+type Registrar interface {
+	Register(ctx context.Context, request manual.Request) (manual.Result, error)
 }
 
 // Hooks 是 qBittorrent autorun 回调的接缝（真实实现是 reconcile.Runner）。
@@ -77,6 +85,8 @@ type Options struct {
 	Hooks Hooks
 	// Retrier 是人工重试（POST /api/tasks/{movie_id}/retry）；nil 时端点回 503 db_unavailable。
 	Retrier Retrier
+	// Registrar 是手工登记（POST /api/manual-tasks，GLOSSARY「手工登记」）；nil 时端点回 503。
+	Registrar Registrar
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
@@ -100,20 +110,21 @@ func New(opts Options) (http.Handler, error) {
 	}
 
 	s := &server{
-		version:  version,
-		db:       opts.DB,
-		assets:   opts.Assets,
-		unready:  opts.Unready,
-		settings: opts.Settings,
-		javdb:    opts.JavDB,
-		qbt:      opts.Qbt,
-		tasks:    opts.Tasks,
-		sidefx:   opts.Sidefx,
-		loops:    opts.Loops,
-		metrics:  opts.Metrics,
-		hooks:    opts.Hooks,
-		retrier:  opts.Retrier,
-		logger:   logger,
+		version:   version,
+		db:        opts.DB,
+		assets:    opts.Assets,
+		unready:   opts.Unready,
+		settings:  opts.Settings,
+		javdb:     opts.JavDB,
+		qbt:       opts.Qbt,
+		tasks:     opts.Tasks,
+		sidefx:    opts.Sidefx,
+		loops:     opts.Loops,
+		metrics:   opts.Metrics,
+		hooks:     opts.Hooks,
+		retrier:   opts.Retrier,
+		registrar: opts.Registrar,
+		logger:    logger,
 	}
 
 	shell, err := fs.ReadFile(opts.Assets, "index.html")
@@ -133,6 +144,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/tasks", s.tasksList)
 	mux.HandleFunc("GET /api/tasks/{movie_id}", s.taskDetail)
 	mux.HandleFunc("POST /api/tasks/{movie_id}/retry", s.taskRetry)
+	mux.HandleFunc("POST /api/manual-tasks", s.manualRegister)
 	mux.HandleFunc("GET /api/attention", s.attention)
 	mux.HandleFunc("GET /api/side-effects", s.sideEffectsList)
 	mux.HandleFunc("POST /api/side-effects/{id}/retry", s.sideEffectRetry)
@@ -149,21 +161,22 @@ func New(opts Options) (http.Handler, error) {
 }
 
 type server struct {
-	version  string
-	db       Pinger
-	assets   fs.FS
-	shell    []byte
-	unready  error
-	settings *settings.Store
-	javdb    *javdb.Integration
-	qbt      *qbittorrent.Integration
-	tasks    *task.Store
-	sidefx   *sidefx.Outbox
-	loops    *loops.Registry
-	metrics  *metrics.Registry
-	hooks    Hooks
-	retrier  Retrier
-	logger   *slog.Logger
+	version   string
+	db        Pinger
+	assets    fs.FS
+	shell     []byte
+	unready   error
+	settings  *settings.Store
+	javdb     *javdb.Integration
+	qbt       *qbittorrent.Integration
+	tasks     *task.Store
+	sidefx    *sidefx.Outbox
+	loops     *loops.Registry
+	metrics   *metrics.Registry
+	hooks     Hooks
+	retrier   Retrier
+	registrar Registrar
+	logger    *slog.Logger
 }
 
 // healthz 只看进程活不活：数据库或上游挂了也不该让编排器重启容器。

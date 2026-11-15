@@ -47,9 +47,10 @@ func (s *Store) SaveCandidate(ctx context.Context, candidate Candidate) (bool, e
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
-	// 清单 id 是「首次发现来源」：任务已存在时不改它（规格 §4.1）。
+	// 清单 id 是「首次发现来源」：任务已存在时不改它（规格 §4.1）。手工任务的来源
+	// 不是任何清单——空串落成 NULL（00012），而不是拿某张清单冒充。
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO task (movie_id, number, list_id) VALUES ($1, $2, $3)
+		`INSERT INTO task (movie_id, number, list_id) VALUES ($1, $2, NULLIF($3, ''))
 		 ON CONFLICT (movie_id) DO UPDATE
 		 SET number = EXCLUDED.number, updated_at = now()
 		 WHERE task.number IS DISTINCT FROM EXCLUDED.number`,
@@ -233,12 +234,16 @@ func (s *Store) Release(ctx context.Context, infohash, owner string) error {
 // MarkAdded 是「加种成功或已存在」的落库：清 add_pending、置清单项待删、清租约。
 //
 // 租约已被别人接手时返回 ErrClaimLost（说明这次的结果不能代表当前占用者）。
-func (s *Store) MarkAdded(ctx context.Context, infohash, owner string) error {
+//
+// listRemoval 间或置起「清单项待删」：清单轮询加的版本传 true（规格 §6.1 置待删行）；
+// 手工登记传 false——它的任务不在任何清单上，置起只会让删清单待办永远失败驻留。
+func (s *Store) MarkAdded(ctx context.Context, infohash, owner string, listRemoval bool) error {
+	set := "add_pending = false, claimed_at = NULL, claimed_by = '', updated_at = now()"
+	if listRemoval {
+		set = "list_removal_pending = true, " + set
+	}
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE task_version
-		 SET add_pending = false, list_removal_pending = true,
-		     claimed_at = NULL, claimed_by = '', updated_at = now()
-		 WHERE infohash = $1 AND claimed_by = $2`,
+		`UPDATE task_version SET `+set+` WHERE infohash = $1 AND claimed_by = $2`,
 		infohash, owner,
 	)
 	if err != nil {
@@ -288,7 +293,7 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]TaskRow, error) 
 	}
 
 	rows, err := s.pool.Query(ctx,
-		`SELECT t.movie_id, t.number, t.list_id, COALESCE(ts.state, ''), t.created_at, t.updated_at
+		`SELECT t.movie_id, t.number, COALESCE(t.list_id, ''), COALESCE(ts.state, ''), t.created_at, t.updated_at
 		 FROM task t
 		 LEFT JOIN task_state ts ON ts.movie_id = t.movie_id
 		 WHERE ($1 = '' OR ts.state = $1)
@@ -341,7 +346,7 @@ func (s *Store) Count(ctx context.Context, filter ListFilter) (int, error) {
 func (s *Store) Detail(ctx context.Context, movieID string, eventLimit int) (TaskRow, error) {
 	var row TaskRow
 	err := s.pool.QueryRow(ctx,
-		`SELECT t.movie_id, t.number, t.list_id, COALESCE(ts.state, ''), t.created_at, t.updated_at
+		`SELECT t.movie_id, t.number, COALESCE(t.list_id, ''), COALESCE(ts.state, ''), t.created_at, t.updated_at
 		 FROM task t
 		 LEFT JOIN task_state ts ON ts.movie_id = t.movie_id
 		 WHERE t.movie_id = $1`,
@@ -497,10 +502,13 @@ func scanVersion(row scanner) (Version, error) {
 	return version, nil
 }
 
-// discoveredReason 是版本创建事件的措辞：两条定源路径分开说，时间线才读得懂。
+// discoveredReason 是版本创建事件的措辞：三条来源路径分开说，时间线才读得懂。
 func discoveredReason(source Source) string {
-	if source == SourceMTeamTorrent {
+	switch source {
+	case SourceMTeamTorrent:
 		return "发现 M-Team 种子"
+	case SourceManual:
+		return "手工登记"
 	}
 	return "发现磁力候选"
 }
@@ -511,11 +519,11 @@ func validateCandidate(candidate Candidate) error {
 		return errors.New("task: 候选缺 movie_id")
 	case strings.TrimSpace(candidate.Number) == "":
 		return errors.New("task: 候选缺番号")
-	case strings.TrimSpace(candidate.ListID) == "":
-		return errors.New("task: 候选缺清单 id")
 	case strings.TrimSpace(candidate.Infohash) == "":
 		return errors.New("task: 候选缺 infohash")
-	case candidate.Source != SourceJavDBMagnet && candidate.Source != SourceMTeamTorrent:
+	case strings.TrimSpace(candidate.ListID) == "" && candidate.Source != SourceManual:
+		return errors.New("task: 候选缺清单 id（手工登记除外，它的首次发现不是清单）")
+	case candidate.Source != SourceJavDBMagnet && candidate.Source != SourceMTeamTorrent && candidate.Source != SourceManual:
 		return fmt.Errorf("task: 未知来源 %q", candidate.Source)
 	case candidate.Delivery != DeliveryMagnet && candidate.Delivery != DeliveryTorrent:
 		return fmt.Errorf("task: 未知交付形态 %q", candidate.Delivery)

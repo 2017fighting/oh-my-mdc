@@ -437,7 +437,7 @@ func (r *Runner) addOne(ctx context.Context, version task.Version, cfg qbittorre
 		return false, err
 	}
 
-	if err := r.store.MarkAdded(ctx, version.Infohash, r.owner); err != nil {
+	if err := r.store.MarkAdded(ctx, version.Infohash, r.owner, true); err != nil {
 		if errors.Is(err, task.ErrClaimLost) {
 			// 租约已经过期并被别人接手：这次的加种结果不该覆盖当前占用者的账。
 			return false, nil

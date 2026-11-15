@@ -183,7 +183,7 @@ func seedProcessingVersion(t *testing.T, store *task.Store, movieID, number, inf
 	if _, err := store.Claim(ctx, infohash, "owner-add"); err != nil {
 		t.Fatalf("Claim（加种）: %v", err)
 	}
-	if err := store.MarkAdded(ctx, infohash, "owner-add"); err != nil {
+	if err := store.MarkAdded(ctx, infohash, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded: %v", err)
 	}
 	if _, err := store.Claim(ctx, infohash, "owner-scrape"); err != nil {

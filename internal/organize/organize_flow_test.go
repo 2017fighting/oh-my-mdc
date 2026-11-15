@@ -581,7 +581,7 @@ func TestWithoutMetadataNothingHappens(t *testing.T) {
 	if _, err := f.store.Claim(ctx, hashA, "owner-add"); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := f.store.MarkAdded(ctx, hashA, "owner-add"); err != nil {
+	if err := f.store.MarkAdded(ctx, hashA, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded: %v", err)
 	}
 	if _, err := f.store.Claim(ctx, hashA, "owner-scrape"); err != nil {

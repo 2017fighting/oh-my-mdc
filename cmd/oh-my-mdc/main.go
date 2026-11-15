@@ -21,6 +21,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/jellyfin"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
+	"github.com/2017fighting/oh-my-mdc/internal/manual"
 	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
@@ -85,6 +86,7 @@ func run(logger *slog.Logger) error {
 	var metricsRegistry *metrics.Registry
 	var reconcileRunner *reconcile.Runner
 	var retryRunner *retry.Runner
+	var manualRegistrar *manual.Registrar
 	// loopDone 是循环退出的信号：关连接池之前要先等它们，别把在途查询踩掉。
 	var loopDone []chan struct{}
 	// 登记处不依赖数据库：库连不上时循环一个都不跑，但 /metrics 仍该把「没跑过」
@@ -172,6 +174,18 @@ func run(logger *slog.Logger) error {
 					Settings: settingsStore,
 					Qbt:      qbtIntegration,
 					Material: materials,
+					Logger:   logger,
+				})
+
+				// 手工登记（GLOSSARY）：面板贴磁力 + JavDB 链接，不经清单轮询直接建任务。
+				// 与 poll 同一条 Ensure 与出箱，加种不顺时由 poll 的补加种通道接着试。
+				manualRegistrar = manual.New(manual.Options{
+					Store:    taskStore,
+					Outbox:   sidefxOutbox,
+					Settings: settingsStore,
+					Source:   javdbIntegration,
+					Adder:    qbtIntegration,
+					Looker:   qbtIntegration,
 					Logger:   logger,
 				})
 
@@ -280,22 +294,27 @@ func run(logger *slog.Logger) error {
 	if retryRunner != nil {
 		retrier = retryRunner
 	}
+	var registrar server.Registrar
+	if manualRegistrar != nil {
+		registrar = manualRegistrar
+	}
 
 	handler, err := server.New(server.Options{
-		Version:  version,
-		DB:       pinger,
-		Assets:   web.Assets(),
-		Unready:  unready,
-		Settings: settingsStore,
-		JavDB:    javdbIntegration,
-		Qbt:      qbtIntegration,
-		Tasks:    taskStore,
-		Sidefx:   sidefxOutbox,
-		Loops:    loopsRegistry,
-		Metrics:  metricsRegistry,
-		Hooks:    hooks,
-		Retrier:  retrier,
-		Logger:   logger,
+		Version:   version,
+		DB:        pinger,
+		Assets:    web.Assets(),
+		Unready:   unready,
+		Settings:  settingsStore,
+		JavDB:     javdbIntegration,
+		Qbt:       qbtIntegration,
+		Tasks:     taskStore,
+		Sidefx:    sidefxOutbox,
+		Loops:     loopsRegistry,
+		Metrics:   metricsRegistry,
+		Hooks:     hooks,
+		Retrier:   retrier,
+		Registrar: registrar,
+		Logger:    logger,
 	})
 	if err != nil {
 		return err

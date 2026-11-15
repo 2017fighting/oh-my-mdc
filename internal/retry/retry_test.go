@@ -176,7 +176,7 @@ func (f *fixture) seedVersion(t *testing.T, infohash string, mutate func(id stri
 	if _, err := f.store.Claim(ctx, infohash, "owner-add"); err != nil {
 		t.Fatalf("Claim(加种): %v", err)
 	}
-	if err := f.store.MarkAdded(ctx, infohash, "owner-add"); err != nil {
+	if err := f.store.MarkAdded(ctx, infohash, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded: %v", err)
 	}
 	if mutate != nil {

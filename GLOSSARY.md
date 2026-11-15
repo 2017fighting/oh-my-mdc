@@ -75,6 +75,10 @@ _Avoid_: skip scrape、缓存命中
 加种时发现同 infohash 种子已在 qBittorrent 里但没有项目 tag，于是补 tag 与 category、把它当作本项目的版本继续走流程的动作。savepath 不动，当作不是抢来的。
 _Avoid_: 抢占、合并、认领（那指 Claim）
 
+**手工登记** (Manual registration)：
+不经清单轮询，在面板上贴磁力串与 JavDB 链接，把一部作品直接交给流水线的动作。movie_id 取自链接、番号取自详情响应；种子由本项目自己加进 qBittorrent（tag、分类、savepath 都归它），交付材料就是贴来的磁力；番号撞车当场拒绝，同 infohash 重复登记幂等放行。
+_Avoid_: 手动加种、认领、导入
+
 **人工重试** (Manual retry)：
 在面板上让一条任务按版本重来一次的动作，三条分支：回加工开头重跑、按存的交付材料重新加种（私种备份没了时与 poll 走同一处重取）、或强制重刮已入库的版本。qBittorrent 里仍在下载的版本永不重下。
 _Avoid_: 手动重跑、重新刮削（那是强制重刮）

@@ -564,7 +564,7 @@ func seedCompletedVersion(t *testing.T, f *fixture) {
 	if _, err := f.store.Claim(ctx, chineseHash, "seed-owner"); err != nil {
 		t.Fatalf("预置 claim: %v", err)
 	}
-	if err := f.store.MarkAdded(ctx, chineseHash, "seed-owner"); err != nil {
+	if err := f.store.MarkAdded(ctx, chineseHash, "seed-owner", true); err != nil {
 		t.Fatalf("预置 MarkAdded: %v", err)
 	}
 }

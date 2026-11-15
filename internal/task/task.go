@@ -25,6 +25,8 @@ type Source string
 const (
 	SourceJavDBMagnet  Source = "javdb_magnet"
 	SourceMTeamTorrent Source = "mteam_torrent"
+	// SourceManual 是手工登记（GLOSSARY）：人在面板上贴的磁力，不经清单轮询定源。
+	SourceManual Source = "manual"
 )
 
 type Delivery string

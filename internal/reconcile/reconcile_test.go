@@ -188,7 +188,7 @@ func (f *fixture) seedAddedVersion(t *testing.T, movieID, number, infohash strin
 	if _, err := f.store.Claim(ctx, infohash, "owner-add"); err != nil {
 		t.Fatalf("Claim(%s): %v", infohash, err)
 	}
-	if err := f.store.MarkAdded(ctx, infohash, "owner-add"); err != nil {
+	if err := f.store.MarkAdded(ctx, infohash, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded(%s): %v", infohash, err)
 	}
 }

@@ -26,7 +26,7 @@ func processingVersion(t *testing.T, store *task.Store, movieID, number, infohas
 	if _, err := store.Claim(context.Background(), infohash, "owner-add"); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := store.MarkAdded(context.Background(), infohash, "owner-add"); err != nil {
+	if err := store.MarkAdded(context.Background(), infohash, "owner-add", true); err != nil {
 		t.Fatalf("MarkAdded: %v", err)
 	}
 	if _, err := store.Claim(context.Background(), infohash, "owner-scrape"); err != nil {
