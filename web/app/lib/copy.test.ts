@@ -29,8 +29,8 @@ test("「失败」那条要说出 URL 里的写法：author 会手改地址栏",
   assert.match(STATUS_NOTES.failed, /\?state=failed/);
 });
 
-test("容易混的五条都有词有解释，且不复述状态名定义", () => {
-  assert.equal(CONFUSABLES.length, 5);
+test("容易混的六条都有词有解释，且不复述状态名定义", () => {
+  assert.equal(CONFUSABLES.length, 6);
   for (const entry of CONFUSABLES) {
     assert.ok(entry.term.length > 0, "术语缺词");
     assert.ok(entry.note.length >= 20, `「${entry.term}」的解释太短，说不清`);
@@ -43,6 +43,13 @@ test("容易混的五条都有词有解释，且不复述状态名定义", () =>
   for (const entry of CONFUSABLES) {
     assert.ok(!bare.has(entry.term), `「${entry.term}」是状态名，不该在易混区再定义一遍`);
   }
+});
+
+test("补录的词条把它与两个近邻划清界限（GLOSSARY「补录」的 Avoid）", () => {
+  const entry = CONFUSABLES.find((item) => item.term === "补录");
+  assert.ok(entry, "补录不在易混区");
+  assert.match(entry.note, /手工登记/);
+  assert.match(entry.note, /收编/);
 });
 
 test("待补齐四面文案齐全、非空、够短：chip 要装得下", () => {

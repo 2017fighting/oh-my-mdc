@@ -57,8 +57,8 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 ### 4.1 任务域
 
-- **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id text NOT NULL REFERENCES list_registry`（首次发现来源；清单 id 是字符串，见 §4.3）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`created_at`、`updated_at`。
-- **`task_version`**：`infohash text PK`、`movie_id FK`、`source text CHECK ('javdb_magnet','mteam_torrent')`、`delivery text CHECK ('magnet','torrent')`、`label text`（普通/中文/破解，best-effort）、`status text CHECK ('downloading','processing','finished','failed')`、`error_phase text CHECK ('downloading','scrape','organize')`、`error_reason text`、`claimed_at timestamptz`、`claimed_by text`、`attempts int NOT NULL DEFAULT 0`、`next_attempt_at timestamptz`、`add_pending bool`、`list_removal_pending bool`、`force_rescrape bool`（强制重刮：下一次取数不复用元数据，#31）、`payload text`（magnet 串或 .torrent 备份路径）、`created_at`、`updated_at`。
+- **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id text NULL REFERENCES list_registry`（首次发现来源；清单 id 是字符串，见 §4.3。**可空**：手工登记与补录的首次发现不是任何清单，空串冒充 id 过不了外键，写死想看清单是往「首次发现来源」里塞假话，00012 放宽）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`missing_faces text[] NOT NULL DEFAULT '{}'`（待补齐标注，#42，迁移 00013）、`created_at`、`updated_at`。
+- **`task_version`**：`infohash text PK`、`movie_id FK`、`source text CHECK ('javdb_magnet','mteam_torrent','manual','backfill')`（00012 放行 manual、00014 放行 backfill）、`delivery text CHECK ('magnet','torrent','none')`（00014 放行 none：补录零下载不过 qBittorrent，无交付形态；保持 NOT NULL 的诚实，读方按字面量理解）、`label text`（普通/中文/破解，best-effort）、`status text CHECK ('downloading','processing','finished','failed')`、`error_phase text CHECK ('downloading','scrape','organize')`、`error_reason text`、`claimed_at timestamptz`、`claimed_by text`、`attempts int NOT NULL DEFAULT 0`、`next_attempt_at timestamptz`、`add_pending bool`、`list_removal_pending bool`、`force_rescrape bool`（强制重刮：下一次取数不复用元数据，#31）、`payload text`（magnet 串或 .torrent 备份路径；补录版本恒空串，无交付材料）、`created_at`、`updated_at`。
 - **`version_file`**：`id bigint identity PK`、`infohash FK`、`rel_path`、`size_bytes`、`part_index`、`is_primary bool`。（入库幂等与「已落盘」判定的永久记录。）
 - **`task_event`**（append-only）：`id identity PK`、`movie_id`、`infohash NULL`、`kind text CHECK ('state_change','side_effect','alert','manual_retry')`、`from_state`、`to_state`、`phase`、`reason`、`detail jsonb`（结构化附注；强制重刮把旧 `raw_snapshot` 存这里做对比基准，#31）、`at timestamptz`。承担告警「只发一次」判据、面板历史、失败追问。
 - **`actor`**：`javdb_actor_id text PK`、`name`、`gender NULL`、`avatar_url NULL`、`updated_at`；**`task_actor (movie_id, javdb_actor_id, role)`** 多对多。刮削时随 JavDB 数据全量落行（含性别）；v1 不抓演员详情页（PLAN 15 就位）。
@@ -228,6 +228,18 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | sidefx | 1m | 删清单项 / 刷 Jellyfin / 发 Telegram，各自重试（瞬时退避、永久驻留） |
 | webhook | 即时 | 单版本推进（`GET /api/hooks/qbt?ih=`） |
 
+### 6.3 补录（#43，GLOSSARY「补录」，迁移 00014）
+
+把媒体库里已落盘、不归本项目的旧目录收进任务域。面板常驻「未补录目录」列表，一键补录后由现成流水线接手，本节只落补录自己的规则：
+
+- **扫描**：实时扫 `media_root` 下的一级目录 ∧ 任务表无此番号（每次面板读取现扫现比，不落快照）；隐藏目录（`.` 开头）与没有视频的目录不算。列表与任务表实时一致：任务一落，目录从列表里消失。
+- **建任务**：番号即任务主键（`movie_id = number`，`list_id NULL`）。JavDB App API 没有番号→movie_id 的检索端点，番号是补录唯一拿得到的身份；因此**取数只问 DMM**（按番号），JavDB 详情跳过——拿番号当 movie_id 调详情只会得到 404 类协议错被当永久错。演员/厂牌/发行日期等 JavDB 侧面因此缺席（§7.1 字段图不扩 DMM 兑底，#42 裁决）：照常入库并按四面判据标「待补齐」，修复动作是面板的强制重刮。
+- **登记版本**：目录里每个现有视频一条版本，`infohash = sha256(番号 + rel_path)`（确定性合成，重跑认得出同一条视频）；`source='backfill'`、`delivery='none'`、`payload=''`、`add_pending=false`（poll 不得把它捡去加种）、`status='processing'` + `force_rescrape=true`——「立即强制重刮」就是登记本身，下一轮对账自动取数重入库，无需再点。label 沿 §7.2 文件名分词（中文/破解/cdN；词表外后缀不猜），分片账（`version_file`）在登记时一次落好。
+- **重入库**：整理段对 `source='backfill'` 的版本不问 qBittorrent（不回读、不硬链、不换 tag、分片账不重算），只按取好的元数据重写 movie.nfo 与图片，然后走与普通入库同一条收尾：置刷库/「入库完成」通知待办、落 finished、标待补齐。「下载开始」不发——无下载。目录不在盘上是永久错（重试变不出一个目录）。
+- **删旧 NFO**：补录当场删目录里 `{番号}*.nfo`（movie.nfo 除外，词表外的 NFO 不碰）。依据：Jellyfin ≥10.9 读 movie.nfo 优先（jellyfin/jellyfin#10339，生产 10.11.11），旧件是死重；用户裁决直接删、不归档。先删后落库：崩在两步之间，目录仍在列表里，再点一次收敛（每一步幂等）。
+- **碰撞与幂等**：番号已有任务（轮询/手工/上次补录）→ 幂等放行（outcome=duplicate），零写入零删文件；两目录同番号在「目录名即番号」的口径下不存在。重复点击不重复建任务、不重复建版本、不重复删文件。
+- **门禁**：未初始化/已暂停时扫描与补录都拒（`gate_closed`）——与手工登记同一口径。
+
 ## 7. 刮削与整理
 
 （来源：#10；字段映射全表与分片细则是本票装配落定）
@@ -288,7 +300,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.2 面板（表格为主体，要动手的事置顶）
 
-区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
+区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ **「未补录目录」区**（#43：媒体库里不归本项目的旧目录逐行一键补录，空区不渲染，GLOSSARY「补录」）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
 
 任务详情 = **右侧抽屉**，保持精简：版本列表（infohash、来源、标签、失败原因）+ 事件时间线 + 重试/强制重刮（force）。**不看刮削字段与 provenance**（v1 不做，不留占位）。
 
@@ -326,6 +338,8 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `GET /api/tasks/{movie_id}` | 任务 + 版本列表 + 最近事件（抽屉数据） |
 | `POST /api/tasks/{movie_id}/retry` | `{force: bool=false, infohashes?: [..]}`，语义照 §6.1 人工重试行；`infohashes` 省略＝整个任务（抽屉的强制重刮），给了就**只动这几条版本**（面板的行是版本组，按钮写几条就只动几条）；回执 `{results:[{infohash, action, from_state, to_state, reason, force_rescrape}]}`——逐版结果，版本侧被拒/失败不是 HTTP 错误 |
 | `POST /api/manual-tasks` | 手工登记（GLOSSARY）：`{magnet, javdb_url}`；回执 `{movie_id, infohash, number, outcome, message?}`，`outcome ∈ added/adopted/already_tracked/deferred/duplicate`（deferred＝登记成功、加种由轮询接着试）。错误信封：输入形状 400 `validation_error`、番号撞车 409 `number_taken`、种子已属别的任务 409 `infohash_taken`、门禁未开 409 `gate_closed`、详情读不到 502 `upstream_error` |
+| `GET /api/backfill/scan` | 未补录目录列表（GLOSSARY「补录」，#43）：`{dirs: [{number, videos, bytes}]}`，实时扫盘比对任务表；门禁未开 409 `gate_closed` |
+| `POST /api/backfill` | 一键补录（GLOSSARY「补录」）：`{number}`；回执 `{movie_id, number, outcome, versions, message?}`，`outcome ∈ backfilled/duplicate`（duplicate＝番号已有任务，幂等放行零写入）。错误信封：输入形状 400 `validation_error`、门禁未开 409 `gate_closed`、目录已不在盘上 409 `dir_missing`、目录无视频 409 `no_videos` |
 | `GET /api/events?movie_id=&limit=` | 事件时间线 |
 | `GET /api/attention` | 「需要人工」区的任务侧两半（#26 落地 §8.2 时新增）：`{failed:[{movie_id,number,infohash,phase,reason,at}], stalled:[…], failed_truncated, stalled_truncated}`；每半上限 50 行，被截断时 `*_truncated=true`（面板据此写「50+」）。驻留副作用由下面那一条提供 |
 | `GET /api/side-effects?state=pending\|stuck` | 副作用队列（stuck = §4.2 驻留） |

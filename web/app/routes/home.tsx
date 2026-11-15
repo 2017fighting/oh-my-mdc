@@ -16,6 +16,7 @@ import {
   isGatewayAuthError,
   isGatewayBadError,
   type Attention,
+  type BackfillScan,
   type ConfigSnapshot,
   type Overview,
   type SectionName,
@@ -51,6 +52,7 @@ export default function Home() {
   const [total, setTotal] = React.useState(0);
   const [attention, setAttention] = React.useState<Attention | null>(null);
   const [sideEffects, setSideEffects] = React.useState<SideEffect[]>([]);
+  const [backfill, setBackfill] = React.useState<BackfillScan | null>(null);
   const [pageSize, setPageSize] = React.useState(50);
   // 存错误本身而不是一句话：网关类失败（登录页、401/403）要拿它决定给什么动作。
   const [loadError, setLoadError] = React.useState<unknown | null>(null);
@@ -94,6 +96,7 @@ export default function Home() {
     setTotal(loaded.total);
     setAttention(loaded.attention);
     setSideEffects(loaded.sideEffects);
+    setBackfill(loaded.backfill);
     setPageSize(loaded.pageSize);
     setLoadError(null);
     setLoadedAt(Date.now());
@@ -371,6 +374,7 @@ export default function Home() {
               total={total}
               attention={attention}
               sideEffects={sideEffects}
+              backfill={backfill}
               query={query}
               pageSize={pageSize}
               loadedAt={loadedAt}
@@ -604,17 +608,21 @@ type Dashboard = {
   total: number;
   attention: Attention;
   sideEffects: SideEffect[];
+  backfill: BackfillScan | null;
   page: number;
   pageSize: number;
 };
 
 async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
-  const [config, overview, taskList, attention, sideEffects] = await Promise.all([
+  const [config, overview, taskList, attention, sideEffects, backfill] = await Promise.all([
     api.config(),
     api.overview(),
     api.tasks({ page: query.page, q: query.q || undefined, state: query.state || undefined }),
     api.attention(),
     api.sideEffects(),
+    // 补录扫描是面板的一节，但它挂了不该拖死整页：读不到就当没有未补录目录，
+    // 卡片整体不渲染（门禁未开也会走到这里：未初始化的面板根本不渲染 Panel）。
+    api.backfillScan().catch(() => null),
   ]);
   return {
     config,
@@ -623,6 +631,7 @@ async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
     total: taskList.total,
     attention,
     sideEffects: sideEffects.side_effects,
+    backfill,
     page: taskList.page,
     pageSize: taskList.page_size,
   };

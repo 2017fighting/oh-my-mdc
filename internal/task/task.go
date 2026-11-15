@@ -27,6 +27,10 @@ const (
 	SourceMTeamTorrent Source = "mteam_torrent"
 	// SourceManual 是手工登记（GLOSSARY）：人在面板上贴的磁力，不经清单轮询定源。
 	SourceManual Source = "manual"
+	// SourceBackfill 是补录（GLOSSARY，#43）：扫描 media_root 下的旧目录登记成任务。
+	// 任务主键是番号本身——JavDB App API 没有番号→movie_id 的检索端点，
+	// 番号是补录唯一拿得到的身份。
+	SourceBackfill Source = "backfill"
 )
 
 type Delivery string
@@ -34,6 +38,8 @@ type Delivery string
 const (
 	DeliveryMagnet  Delivery = "magnet"
 	DeliveryTorrent Delivery = "torrent"
+	// DeliveryNone 是补录版本的交付形态：零下载、不过 qBittorrent，无交付材料（#43）。
+	DeliveryNone Delivery = "none"
 )
 
 // Status 是版本状态（规格 §3）。

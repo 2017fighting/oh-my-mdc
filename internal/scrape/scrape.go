@@ -385,12 +385,24 @@ func (o fetchOutcome) missing() string {
 // DMM→JavDB（Merge 的事，裁决不扩双向兑底）。没取到的源不进 raw_snapshot；
 // 它的字段在 provenance 里是空值——「上游没给出」与「字段本来没有」在这一面
 // 上不可分，但耗尽告警与待补齐标注会把「谁没取到」说清。
+//
+// 唯一的例外是补录源（#43）：补录任务的主键是番号本身（JavDB App API 没有
+// 番号→movie_id 的检索端点），拿它调详情只会得到 404 类协议错、被 IsPermanent
+// 当成永久错打成 failed(scrape)。补录只问 DMM；演员等 JavDB 侧面的缺席由
+// 整理段按四面判据标「待补齐」，修复口径是面板的强制重刮。
 func (r *Runner) fetch(ctx context.Context, version task.Version, token string) fetchOutcome {
 	outcome := fetchOutcome{}
 
-	detail, err := r.javdb.Detail(ctx, token, version.MovieID)
-	if err != nil {
-		outcome.javdbErr = fmt.Errorf("读 JavDB 详情 %s: %w", version.MovieID, err)
+	var detail appapi.DetailResult
+	if version.Source == task.SourceBackfill {
+		r.logger.Info("补录版本只问 DMM（无 JavDB movie_id 可查）",
+			"movie_id", version.MovieID, "number", version.Number)
+	} else {
+		var err error
+		detail, err = r.javdb.Detail(ctx, token, version.MovieID)
+		if err != nil {
+			outcome.javdbErr = fmt.Errorf("读 JavDB 详情 %s: %w", version.MovieID, err)
+		}
 	}
 	dmmResult, err := r.dmm.Lookup(ctx, version.Number)
 	if err != nil {

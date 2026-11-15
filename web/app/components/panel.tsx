@@ -32,6 +32,8 @@ import {
   notifyEventOf,
   type Attention,
   type AttentionItem,
+  type BackfillResult,
+  type BackfillScan,
   type IncompleteItem,
   type ManualRegistration,
   type Overview,
@@ -80,6 +82,7 @@ export function Panel({
   total,
   attention,
   sideEffects,
+  backfill,
   query,
   pageSize,
   loadedAt,
@@ -96,6 +99,8 @@ export function Panel({
   total: number;
   attention: Attention | null;
   sideEffects: SideEffect[];
+  /** 未补录目录的实时扫描（GLOSSARY「补录」）；null = 读不到，整块不渲染。 */
+  backfill: BackfillScan | null;
   query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
@@ -426,6 +431,12 @@ export function Panel({
           truncated={attention?.incomplete_truncated ?? false}
           now={now}
           onOpenTask={openTask}
+          onRefresh={onRefresh}
+        />
+
+        <BackfillDirs
+          backfill={backfill}
+          onReceipt={receiptsState.push}
           onRefresh={onRefresh}
         />
 
@@ -851,6 +862,113 @@ function IncompleteTasks({
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * BackfillDirs 是「未补录目录」区（#43 / GLOSSARY「补录」）。
+ *
+ * 媒体库里已落盘、不归本项目的旧目录：一键补录把它们收进任务域——现有视频原地
+ * 入库，重刮由流水线接着做（零下载、不过 qBittorrent）。补录成功的行随下次刷新
+ * 消失：列表与任务表实时一致，后端每个请求都现扫现比。空区整块不渲染
+ * （562 个目录收完之后，这里应该安静）。
+ */
+function BackfillDirs({
+  backfill,
+  onReceipt,
+  onRefresh,
+}: {
+  backfill: BackfillScan | null;
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const dirs = backfill?.dirs ?? [];
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  if (dirs.length === 0) return null;
+
+  const run = async (number: string) => {
+    if (busy) return;
+    setBusy(number);
+    setError(null);
+    try {
+      const result: BackfillResult = await api.backfill(number);
+      onReceipt(backfillReceipt(result));
+      await onRefresh();
+    } catch (cause: unknown) {
+      // 错误文案来自端点的 zh-CN 信封（门禁、目录没了、没有视频），直译即可。
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card role="region" aria-labelledby="backfill-heading">
+      <CardHeader className="max-sm:grid-cols-1">
+        <div>
+          <h2 id="backfill-heading" className="font-heading text-base font-medium">
+            未补录目录
+          </h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            媒体库里还不归本项目的旧目录。一键补录：现有视频原地入库，随即强制重刮重写 NFO 与图片；
+            旧的 {'{番号}'}.nfo 会被删掉（movie.nfo 除外）。零下载、不过 qBittorrent。
+          </p>
+        </div>
+        <CardAction className="max-sm:col-start-1 max-sm:row-start-2">
+          <span className="text-xs tabular-nums text-muted-foreground">{dirs.length} 个目录</span>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        {error ? (
+          <div className="mb-2">
+            <Notice tone="bad" onClose={() => setError(null)}>
+              {error}
+            </Notice>
+          </div>
+        ) : null}
+        <div className="divide-y">
+          {dirs.map((dir) => (
+            <div
+              key={dir.number}
+              data-backfill={dir.number}
+              className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-x-4"
+            >
+              <div className="min-w-0 flex-1 space-y-1 font-medium tabular-nums">
+                {dir.number}
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {dir.videos} 个视频
+                </span>
+              </div>
+              <RowAction
+                onClick={() => void run(dir.number)}
+                disabled={busy !== null}
+                aria-label={`补录 ${dir.number}`}
+              >
+                {busy === dir.number ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
+                补录
+              </RowAction>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** backfillReceipt 把补录结局翻成回执：两种结局都算「按成了」，语调分两档。 */
+function backfillReceipt(result: BackfillResult): ReceiptDraft {
+  if (result.outcome === "duplicate") {
+    return {
+      title: result.number,
+      tone: "ok",
+      text: result.message ?? `${result.number} 已有任务，不用补录`,
+    };
+  }
+  return {
+    title: result.number,
+    tone: "ok",
+    text: `已补录 ${result.number}（${result.versions} 条版本），重刮会重写 NFO 与图片`,
+  };
 }
 
 /** NeedsAttention 是「需要人工」区（规格 §8.2：置顶，行内直接动手）。
@@ -2313,7 +2431,16 @@ function versionState(status: TaskState): { label: string; className: string } {
 
 /** 胶囊里用来源的短名：112px 装不下「JavDB 磁力 + 已入库」，全名在 title 里。 */
 function sourceShortLabel(source: TaskVersion["source"]): string {
-  return source === "mteam_torrent" ? "M-Team" : "JavDB";
+  switch (source) {
+    case "mteam_torrent":
+      return "M-Team";
+    case "manual":
+      return "手工";
+    case "backfill":
+      return "补录";
+    default:
+      return "JavDB";
+  }
 }
 
 /**
@@ -2734,8 +2861,18 @@ function stateLabel(state: string | undefined): string {
   return isTaskState(state) ? TASK_STATE_LOOK[state].label : "—";
 }
 
+/** 来源的中文名（GLOSSARY：手工登记、补录各自有词条，不借「清单」的名字）。 */
 function sourceLabel(source: TaskVersion["source"]): string {
-  return source === "mteam_torrent" ? "M-Team 种子" : "JavDB 磁力";
+  switch (source) {
+    case "mteam_torrent":
+      return "M-Team 种子";
+    case "manual":
+      return "手工登记";
+    case "backfill":
+      return "补录";
+    default:
+      return "JavDB 磁力";
+  }
 }
 
 function phaseLabel(phase: TaskVersion["error_phase"] | AttentionItem["phase"]): string {

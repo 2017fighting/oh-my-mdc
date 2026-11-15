@@ -283,36 +283,65 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 			version.Number, owner))
 	}
 
-	status, found, err := r.qbt.Lookup(ctx, env.qbt, version.Infohash)
-	if err != nil {
-		return fmt.Errorf("回读下载落盘路径: %w", err)
-	}
-	if !found {
-		return materialGone{fmt.Errorf("种子已从 qBittorrent 移除，无法定位下载文件（%s）", version.Infohash)}
-	}
-
-	videos, subtitles, err := discover(status.ContentPath)
-	if err != nil {
-		return err
-	}
-	plan, err := planFiles(version.Number, version.Label, videos, subtitles)
-	if err != nil {
-		if errors.Is(err, ErrNoVideoFiles) {
-			return materialGone{err}
+	var (
+		dir        string
+		videoCount int
+		videoBytes int64
+		plan       Plan
+	)
+	if version.Source == task.SourceBackfill {
+		// 补录重入库（#43，GLOSSARY「补录」）：视频与图片原地复用，没有 qbt 种子可
+		// 回读、可换 tag、可再硬链；分片账已在补录登记时落好。这里只按取好的元数据
+		// 重写 movie.nfo 与图片，然后走与普通入库同一条收尾。目录不在盘上
+		// （媒体库被动过）是永久错：重试变不出一个目录。
+		dir = filepath.Join(env.mediaRoot, version.Number)
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			return permanently(fmt.Errorf("补录目录 %s 不在盘上（媒体库被挪过？）：%v", dir, statErr))
 		}
-		return err // 计划里的 ErrCollision 是永久错（由 isPermanent() 认出来）
-	}
-
-	dir := filepath.Join(env.mediaRoot, version.Number)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("建目录 %s: %w", dir, err)
-	}
-
-	// 视频与字幕：只硬链，EXDEV 直接失败（绝不降级 copy）。
-	for _, file := range plan.Files {
-		if _, err := linkFile(file.Source.Path, filepath.Join(dir, file.TargetName)); err != nil {
-			return err
+		files, filesErr := r.store.VersionFiles(ctx, version.Infohash)
+		if filesErr != nil {
+			return filesErr
 		}
+		for _, file := range files {
+			videoBytes += file.SizeBytes
+		}
+		videoCount = len(files)
+	} else {
+		status, found, err := r.qbt.Lookup(ctx, env.qbt, version.Infohash)
+		if err != nil {
+			return fmt.Errorf("回读下载落盘路径: %w", err)
+		}
+		if !found {
+			return materialGone{fmt.Errorf("种子已从 qBittorrent 移除，无法定位下载文件（%s）", version.Infohash)}
+		}
+
+		var discoverErr error
+		var videos, subtitles []sourceFile
+		videos, subtitles, discoverErr = discover(status.ContentPath)
+		if discoverErr != nil {
+			return discoverErr
+		}
+		plan, discoverErr = planFiles(version.Number, version.Label, videos, subtitles)
+		if discoverErr != nil {
+			if errors.Is(discoverErr, ErrNoVideoFiles) {
+				return materialGone{discoverErr}
+			}
+			return discoverErr // 计划里的 ErrCollision 是永久错（由 isPermanent() 认出来）
+		}
+
+		dir = filepath.Join(env.mediaRoot, version.Number)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("建目录 %s: %w", dir, err)
+		}
+
+		// 视频与字幕：只硬链，EXDEV 直接失败（绝不降级 copy）。
+		for _, file := range plan.Files {
+			if _, err := linkFile(file.Source.Path, filepath.Join(dir, file.TargetName)); err != nil {
+				return err
+			}
+		}
+		videoCount = len(plan.Videos())
+		videoBytes = plan.VideoBytes
 	}
 
 	// NFO：原子写、内容同不重写。
@@ -333,23 +362,28 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 			version.Attempts+1, processing.TransientMaxAttempts, imgErr)}
 	}
 
-	// 分片账（version_file）：视频才有分片，字幕不算。
-	partials := make([]task.VersionFile, 0, len(plan.Videos()))
-	for _, file := range plan.Videos() {
-		partials = append(partials, task.VersionFile{
-			RelPath:   file.Source.RelPath,
-			SizeBytes: file.Source.Size,
-			PartIndex: file.PartIndex,
-			IsPrimary: file.IsPrimary,
-		})
-	}
-	if err := r.store.SaveVersionFiles(ctx, version.Infohash, partials); err != nil {
-		return err
+	// 分片账（version_file）：视频才有分片，字幕不算。补录版本的分片账已在登记时
+	// 落好（重入库不重算），只有下载路径在这里写。
+	if version.Source != task.SourceBackfill {
+		partials := make([]task.VersionFile, 0, len(plan.Videos()))
+		for _, file := range plan.Videos() {
+			partials = append(partials, task.VersionFile{
+				RelPath:   file.Source.RelPath,
+				SizeBytes: file.Source.Size,
+				PartIndex: file.PartIndex,
+				IsPrimary: file.IsPrimary,
+			})
+		}
+		if err := r.store.SaveVersionFiles(ctx, version.Infohash, partials); err != nil {
+			return err
+		}
 	}
 
-	// 入库成功才换 tag：mdc:in-progress → mdc:finished（失败不新增第三个 tag）。
-	if err := r.tags.TransitionTag(ctx, env.qbt, version.Infohash, qbittorrent.TagInProgress, qbittorrent.TagFinished); err != nil {
-		return fmt.Errorf("换 tag（%s → %s）: %w", qbittorrent.TagInProgress, qbittorrent.TagFinished, err)
+	// 入库成功才换 tag（失败不新增第三个 tag）：补录没有种子，tag 换装跳过。
+	if version.Source != task.SourceBackfill {
+		if err := r.tags.TransitionTag(ctx, env.qbt, version.Infohash, qbittorrent.TagInProgress, qbittorrent.TagFinished); err != nil {
+			return fmt.Errorf("换 tag（%s → %s）: %w", qbittorrent.TagInProgress, qbittorrent.TagFinished, err)
+		}
 	}
 
 	// 「新版本入库」文案的判据要在落 finished 之前取：落完就变成它自己了。
@@ -357,7 +391,7 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 	if err != nil {
 		return err
 	}
-	if err := r.enqueueFiled(ctx, version, clean, plan, newVersion); err != nil {
+	if err := r.enqueueFiled(ctx, version, clean, videoBytes, newVersion); err != nil {
 		return err
 	}
 
@@ -370,20 +404,20 @@ func (r *Runner) file(ctx context.Context, version task.Version, meta task.Metad
 	}
 
 	r.record(ctx, version, task.EventStateChange, "processing", "finished",
-		fmt.Sprintf("入库完成：%s（%d 个视频文件）", dir, len(plan.Videos())))
+		fmt.Sprintf("入库完成：%s（%d 个视频文件）", dir, videoCount))
 	r.recordWarnings(ctx, version, clean, env.translationExpected, warnings)
 	r.markMissingFaces(ctx, version, dir, meta, env)
 
 	r.logger.Info("入库完成",
 		"movie_id", version.MovieID, "number", version.Number,
-		"infohash", version.Infohash, "dir", dir, "videos", len(plan.Videos()))
+		"infohash", version.Infohash, "dir", dir, "videos", videoCount)
 	return nil
 }
 
 // enqueueFiled 把入库的两个旁路副作用入箱：刷 Jellyfin 与「已入库」通知（规格 §5.5/§5.6）。
 //
 // 入箱在落 finished 之前：反过来的话入箱失败就再也没有下一轮来补，通知会永久丢掉。
-func (r *Runner) enqueueFiled(ctx context.Context, version task.Version, meta cleanMetadata, plan Plan, newVersion bool) error {
+func (r *Runner) enqueueFiled(ctx context.Context, version task.Version, meta cleanMetadata, videoBytes int64, newVersion bool) error {
 	if r.outbox == nil {
 		return nil
 	}
@@ -403,7 +437,7 @@ func (r *Runner) enqueueFiled(ctx context.Context, version task.Version, meta cl
 		"number":   version.Number,
 		"label":    version.Label,
 		"source":   string(version.Source),
-		"size_mib": float64(plan.VideoBytes) / (1024 * 1024),
+		"size_mib": float64(videoBytes) / (1024 * 1024),
 		"title":    meta.title(),
 	}
 	if newVersion {

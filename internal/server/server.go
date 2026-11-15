@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2017fighting/oh-my-mdc/internal/backfill"
 	"github.com/2017fighting/oh-my-mdc/internal/javdb"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/manual"
@@ -48,6 +49,14 @@ type Retrier interface {
 // 只有一件事：贴磁力与 JavDB 链接，把一部作品直接交给流水线（GLOSSARY「手工登记」）。
 type Registrar interface {
 	Register(ctx context.Context, request manual.Request) (manual.Result, error)
+}
+
+// Backfiller 是补录的接缝（真实实现是 backfill.Runner）。
+//
+// 只有两件事：扫「未补录目录」、一键把一个旧目录登记成任务（GLOSSARY「补录」）。
+type Backfiller interface {
+	Scan(ctx context.Context) ([]backfill.Candidate, error)
+	Backfill(ctx context.Context, number string) (backfill.Result, error)
 }
 
 // Hooks 是 qBittorrent autorun 回调的接缝（真实实现是 reconcile.Runner）。
@@ -87,6 +96,9 @@ type Options struct {
 	Retrier Retrier
 	// Registrar 是手工登记（POST /api/manual-tasks，GLOSSARY「手工登记」）；nil 时端点回 503。
 	Registrar Registrar
+	// Backfiller 是补录（GET /api/backfill/scan、POST /api/backfill，GLOSSARY「补录」）；
+	// nil 时端点回 503。
+	Backfiller Backfiller
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
@@ -124,6 +136,7 @@ func New(opts Options) (http.Handler, error) {
 		hooks:     opts.Hooks,
 		retrier:   opts.Retrier,
 		registrar: opts.Registrar,
+		backfill:  opts.Backfiller,
 		logger:    logger,
 	}
 
@@ -145,6 +158,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/tasks/{movie_id}", s.taskDetail)
 	mux.HandleFunc("POST /api/tasks/{movie_id}/retry", s.taskRetry)
 	mux.HandleFunc("POST /api/manual-tasks", s.manualRegister)
+	mux.HandleFunc("GET /api/backfill/scan", s.backfillScan)
+	mux.HandleFunc("POST /api/backfill", s.backfillRun)
 	mux.HandleFunc("GET /api/attention", s.attention)
 	mux.HandleFunc("GET /api/side-effects", s.sideEffectsList)
 	mux.HandleFunc("POST /api/side-effects/{id}/retry", s.sideEffectRetry)
@@ -176,6 +191,7 @@ type server struct {
 	hooks     Hooks
 	retrier   Retrier
 	registrar Registrar
+	backfill  Backfiller
 	logger    *slog.Logger
 }
 
