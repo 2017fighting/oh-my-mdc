@@ -15,7 +15,7 @@ import (
 //   - `<sorttitle>` = **纯番号**（Jellyfin 排序靠它，标签/译名都不许混进去）；
 //   - `<plot>` 单槽（译文或原文，outline_zh 有就用它）；
 //   - `premiered` + `releasedate` 双写；
-//   - `<tag>` 承载 tags，**不写 `<genre>`**；发行商降级成一个 tag「发行: X」；
+//   - `<tag>` 承载 tags，**不写 `<genre>`**（ADR-0012）；发行商降级成一个 tag「发行: X」；
 //   - 演员全写、女优排前、组内保 JavDB 顺序，`<thumb>` 直写 URL；
 //   - 零值省略（runtime/rating 没有就不写），多值不拼接（一个值一个元素）。
 

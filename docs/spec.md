@@ -244,7 +244,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `outline_zh` | AI 翻译 | 无 | 同上 |
 | 图片 | DMM `pl/ps` + `jp-N` | JavDB 封面/预览 | poster.jpg / fanart.jpg / extrafanart |
 | 演员 | JavDB（含性别） | — | `<actor>` 全写、女优排前、组内保 JavDB 顺序 |
-| `tags` | JavDB tags | — | `<tag>`（**不写 `<genre>`**，Jellyfin 按 `/` 拆） |
+| `tags` | JavDB tags | — | `<tag>`（**不写 `<genre>`**，ADR-0012） |
 | `publisher` | JavDB label | — | 降级为 tag「发行: X」 |
 | `rating` | JavDB | — | `<rating>` |
 | `studio` | JavDB maker | — | `<studio>` |
