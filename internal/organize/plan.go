@@ -112,6 +112,28 @@ func labelSuffix(label string) string {
 	return ""
 }
 
+// ParseFileNameTokens 是 labelSuffix 与 shardIndexOf 的反方向（#43 补录用）：
+// 从 §7.2 形状的现存文件名（去扩展名的 stem）里把 (label, 分片序号) 读回来。
+//
+// 分词与 planFiles 同一份词表：中文/破解 认标签，cd/disc/disk/part 认分片序号；
+// 词表外的后缀（mdcng 时代的 -C、-4k）不猜标签、序号回 1。番号前缀剥不掉也不影响：
+// 序号正则对整根 stem 有效，标签词看的是番号之后的那一段。
+func ParseFileNameTokens(number, stem string) (string, int) {
+	rest := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(stem), strings.TrimSpace(number)), "-")
+	var label string
+	switch {
+	case strings.Contains(rest, labelChinese):
+		label = labelChinese
+	case strings.Contains(rest, labelCracked):
+		label = labelCracked
+	}
+	part, ok := shardIndexOf(stem)
+	if !ok {
+		part = 1
+	}
+	return label, part
+}
+
 // discover 扫下载落盘的位置，按白名单挑出视频与字幕（别的文件一律不落盘）。
 //
 // contentPath 可能是单个视频文件，也可能是种子的根目录：单个文件时 RelPath 就是

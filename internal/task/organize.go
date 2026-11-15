@@ -189,6 +189,27 @@ func (s *Store) FinishedTasks(ctx context.Context) ([]FinishedTask, error) {
 	return tasks, nil
 }
 
+// TaskNumbers 列任务表里的全部番号（补录扫描的“已认领”集合，#43）。
+//
+// 列表与任务表的实时一致性靠它：每次扫描都现读任务表，不落快照。
+func (s *Store) TaskNumbers(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx, `SELECT number FROM task`)
+	if err != nil {
+		return nil, fmt.Errorf("task: 列任务番号: %w", err)
+	}
+	defer rows.Close()
+
+	numbers := map[string]bool{}
+	for rows.Next() {
+		var number string
+		if err := rows.Scan(&number); err != nil {
+			return nil, fmt.Errorf("task: 扫任务番号: %w", err)
+		}
+		numbers[number] = true
+	}
+	return numbers, rows.Err()
+}
+
 // TaskOwningNumber 报告是否另有任务占着同一个番号；返回那个任务的 movie_id。
 //
 // 目录是「一番号一目录」（ADR-0008），所以两个任务撞上同一个番号时谁进这个目录
