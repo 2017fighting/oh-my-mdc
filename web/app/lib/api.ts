@@ -224,6 +224,29 @@ export type ManualRegistration = {
   message?: string;
 };
 
+/** 「未补录目录」的一行（GLOSSARY「补录」）：媒体库里的旧目录，任务表还没有它的番号。 */
+export type BackfillDir = {
+  number: string;
+  /** 目录里的视频文件数：0 的目录进不了列表（没有可登记的版本）。 */
+  videos: number;
+  bytes: number;
+};
+
+export type BackfillScan = {
+  ok: boolean;
+  dirs: BackfillDir[];
+};
+
+/** 补录的回执（GLOSSARY「补录」）：duplicate = 番号已有任务，幂等放行零写入。 */
+export type BackfillResult = {
+  ok: boolean;
+  movie_id: string;
+  number: string;
+  outcome: "backfilled" | "duplicate";
+  versions: number;
+  message?: string;
+};
+
 /** 副作用队列的两个筛选（规格 §8.4）：pending = 排队中，stuck = 驻留（需人工）。 */
 export type SideEffectState = "pending" | "stuck";
 
@@ -456,5 +479,15 @@ export const api = {
     request<ManualRegistration>("/api/manual-tasks", {
       method: "POST",
       body: JSON.stringify({ magnet, javdb_url: javdbUrl }),
+    }),
+
+  /** 补录扫描：媒体库里的旧目录 ∧ 任务表无此番号（GLOSSARY「补录」）。 */
+  backfillScan: () => request<BackfillScan>("/api/backfill/scan"),
+
+  /** 一键补录：删旧 NFO、现有视频原地入库，重刮由流水线接着做（GLOSSARY「补录」）。 */
+  backfill: (number: string) =>
+    request<BackfillResult>("/api/backfill", {
+      method: "POST",
+      body: JSON.stringify({ number }),
     }),
 };
