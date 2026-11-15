@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/2017fighting/oh-my-mdc/internal/backfill"
 	"github.com/2017fighting/oh-my-mdc/internal/config"
 	"github.com/2017fighting/oh-my-mdc/internal/db"
 	"github.com/2017fighting/oh-my-mdc/internal/dmm"
@@ -87,6 +88,7 @@ func run(logger *slog.Logger) error {
 	var reconcileRunner *reconcile.Runner
 	var retryRunner *retry.Runner
 	var manualRegistrar *manual.Registrar
+	var backfillRunner *backfill.Runner
 	// loopDone 是循环退出的信号：关连接池之前要先等它们，别把在途查询踩掉。
 	var loopDone []chan struct{}
 	// 登记处不依赖数据库：库连不上时循环一个都不跑，但 /metrics 仍该把「没跑过」
@@ -300,23 +302,28 @@ func run(logger *slog.Logger) error {
 	if manualRegistrar != nil {
 		registrar = manualRegistrar
 	}
+	var backfiller server.Backfiller
+	if backfillRunner != nil {
+		backfiller = backfillRunner
+	}
 
 	handler, err := server.New(server.Options{
-		Version:   version,
-		DB:        pinger,
-		Assets:    web.Assets(),
-		Unready:   unready,
-		Settings:  settingsStore,
-		JavDB:     javdbIntegration,
-		Qbt:       qbtIntegration,
-		Tasks:     taskStore,
-		Sidefx:    sidefxOutbox,
-		Loops:     loopsRegistry,
-		Metrics:   metricsRegistry,
-		Hooks:     hooks,
-		Retrier:   retrier,
-		Registrar: registrar,
-		Logger:    logger,
+		Version:    version,
+		DB:         pinger,
+		Assets:     web.Assets(),
+		Unready:    unready,
+		Settings:   settingsStore,
+		JavDB:      javdbIntegration,
+		Qbt:        qbtIntegration,
+		Tasks:      taskStore,
+		Sidefx:     sidefxOutbox,
+		Loops:      loopsRegistry,
+		Metrics:    metricsRegistry,
+		Hooks:      hooks,
+		Retrier:    retrier,
+		Registrar:  registrar,
+		Backfiller: backfiller,
+		Logger:     logger,
 	})
 	if err != nil {
 		return err

@@ -86,9 +86,9 @@ func New(opts Options) *Runner {
 
 // Candidate 是「未补录目录」的一行：番号（=目录名）与目录里的视频概要。
 type Candidate struct {
-	Number string
-	Videos int
-	Bytes  int64
+	Number string `json:"number"`
+	Videos int    `json:"videos"`
+	Bytes  int64  `json:"bytes"`
 }
 
 // Scan 扫出「未补录目录」：media_root 下的一级目录 ∧ 任务表无此番号。
