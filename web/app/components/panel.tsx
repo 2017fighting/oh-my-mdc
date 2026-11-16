@@ -1454,7 +1454,7 @@ function ReceiptList({
             type="button"
             onClick={() => onDismiss(receipt.id)}
             aria-label={`收起回执：${receipt.title}`}
-            className="-m-1 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors before:absolute before:-inset-2 before:content-[''] relative hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:size-6"
+            className="-m-1 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors before:absolute before:-inset-2 before:content-[''] relative hover:bg-popover hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:size-6"
           >
             <X className="size-3" aria-hidden />
           </button>
@@ -2550,7 +2550,7 @@ function TaskDrawer({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-foreground/20"
+      className="fixed inset-0 z-50 flex justify-end bg-scrim"
       role="presentation"
       onClick={confirming ? undefined : onClose}
     >
@@ -2560,7 +2560,7 @@ function TaskDrawer({
         aria-modal="true"
         aria-labelledby="task-drawer-title"
         onClick={(event) => event.stopPropagation()}
-        className="flex h-full w-full max-w-lg flex-col overflow-hidden border-l border-border bg-background shadow-2xl"
+        className="flex h-full w-full max-w-lg flex-col overflow-hidden border-l border-border bg-popover shadow-2xl"
       >
         <header className="flex items-start justify-between gap-3 border-b px-4 py-3">
           <div className="min-w-0">
@@ -2957,7 +2957,7 @@ export function ShortcutsHelp({
   ];
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
       role="presentation"
       onClick={onClose}
     >
@@ -3213,7 +3213,7 @@ function RegisterDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
       role="presentation"
       onClick={() => onCloseRef.current()}
     >
@@ -3223,7 +3223,7 @@ function RegisterDialog({
         aria-modal="true"
         aria-labelledby="register-dialog-title"
         onClick={(event) => event.stopPropagation()}
-        className="w-full max-w-md overflow-hidden rounded-xl border bg-background shadow-2xl"
+        className="w-full max-w-md overflow-hidden rounded-xl border bg-popover shadow-2xl"
       >
         <form onSubmit={(event) => void submit(event)} className="flex flex-col gap-4 p-4">
           <div>

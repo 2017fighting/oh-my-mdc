@@ -20,7 +20,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#ffffff" />
+        {/* 浏览器 chrome 随色：无 JS 时靠 media 跟系统；钉住后由 ThemeToggle 补一颗
+            不带 media 的覆盖（浏览器取最后一颗）。 */}
+        <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#141414" media="(prefers-color-scheme: dark)" />
+        {/* 双主题的当前态（跟随系统 = light dark，钉住 = light/dark），ThemeToggle 负责写。
+            下面这行内联脚本在首绘前把存的偏好写进 meta——位置必须在它后面、body 之前
+            （防闪，见 DESIGN · Dark）；存取失败就跟随系统，不拦页面。 */}
+        <meta name="color-scheme" content="light dark" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{var s=localStorage.getItem("color-scheme");document.querySelector(\'meta[name="color-scheme"]\').content=s||"light dark";}catch(e){}',
+          }}
+        />
         <Meta />
         <Links />
       </head>

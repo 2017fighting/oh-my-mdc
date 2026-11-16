@@ -128,7 +128,7 @@ export function Toggle({
       >
         <span
           className={cn(
-            "size-3.5 rounded-full bg-background transition-transform",
+            "size-3.5 rounded-full border border-border bg-background transition-transform",
             checked ? "translate-x-4.5" : "translate-x-0.5",
           )}
         />

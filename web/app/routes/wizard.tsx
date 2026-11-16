@@ -571,8 +571,8 @@ export function Wizard({
                   "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left dense transition-colors",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                   current
-                    ? "bg-background font-medium ring-1 ring-foreground/10"
-                    : "text-muted-foreground hover:bg-background/60",
+                    ? "bg-card font-medium ring-1 ring-foreground/10"
+                    : "text-muted-foreground hover:bg-secondary/60",
                 )}
               >
                 <StepDot index={index} configured={isStepConfigured(candidate, snapshot)} current={current} />
@@ -811,7 +811,7 @@ function StepChain({ stepIndex, snapshot }: { stepIndex: number; snapshot: Confi
                 "flex h-11 items-center gap-1.5 rounded-lg border px-2.5 dense transition-colors",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                 current
-                  ? "border-border bg-background font-medium"
+                  ? "border-border bg-card font-medium"
                   : "border-transparent text-muted-foreground",
               )}
             >
@@ -1096,7 +1096,7 @@ function CheckLine({ item }: { item: Requirement }) {
       {/* 待办不是警告：未满足的圆点用中性纸白（Gate-Once 的同一理由——琥珀留给
           真正的警告，五颗「!」齐刷刷亮琥珀就把信号磨平了）。 */}
       <span
-        className="grid size-4 shrink-0 place-items-center rounded-full border border-border bg-background text-xs text-muted-foreground"
+        className="grid size-4 shrink-0 place-items-center rounded-full border border-border bg-card text-xs text-muted-foreground"
         aria-hidden
       >
         !

@@ -39,6 +39,8 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  /* 抽屉/对话框的遮罩：浅色压墨、深色压黑，各自独立成 token（见 :root 的 --scrim）。 */
+  --color-scrim: var(--scrim);
   /* 状态语义色：版本四态 + 测试/提示的三档结论。彩色只作信号，不作装修。 */
   --color-status-info-surface: var(--status-info-surface);
   --color-status-info-text: var(--status-info-text);
@@ -61,41 +63,63 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/*
+ * 双主题：每个颜色 token 一行带齐浅深两值（light-dark()），由根上的 color-scheme 选边。
+ * 没有 .dark 类、没有 dark: 变体——覆盖由 <head> 里的 <meta name="color-scheme">
+ * 驱动（跟随系统 = "light dark"，钉住 = "light" / "dark"，ThemeToggle 负责写），
+ * CSS 再用 :has 把 meta 映射回属性：meta 只是表现提示，没有这条映射它会被这行
+ * `color-scheme: light dark` 压住。内联脚本在首绘前写 meta（防闪），无 JS 时纯跟随系统。
+ */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  /* 0.50 而不是 0.556：页面底是 bg-muted/30（#f5f5f5），0.556 只有 4.35:1。 */
-  --muted-foreground: oklch(0.5 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  /* 焦点环要 ≥3:1：0.708 的旧环叠在白底上只有 1.4:1。 */
-  --ring: oklch(0.55 0 0);
+  color-scheme: light dark;
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+  }
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+  }
+
+  --background: light-dark(oklch(1 0 0), oklch(0.19 0 0));
+  --foreground: light-dark(oklch(0.145 0 0), oklch(0.93 0 0));
+  --card: light-dark(oklch(1 0 0), oklch(0.23 0 0));
+  --card-foreground: light-dark(oklch(0.145 0 0), oklch(0.93 0 0));
+  --popover: light-dark(oklch(1 0 0), oklch(0.25 0 0));
+  --popover-foreground: light-dark(oklch(0.145 0 0), oklch(0.93 0 0));
+  /* 墨是唯一强调色；夜里墨是亮的：主按钮浅纸底配近黑字。 */
+  --primary: light-dark(oklch(0.205 0 0), oklch(0.93 0 0));
+  --primary-foreground: light-dark(oklch(0.985 0 0), oklch(0.17 0 0));
+  --secondary: light-dark(oklch(0.97 0 0), oklch(0.28 0 0));
+  --secondary-foreground: light-dark(oklch(0.205 0 0), oklch(0.93 0 0));
+  --muted: light-dark(oklch(0.97 0 0), oklch(0.28 0 0));
+  /* 0.50 而不是 0.556：浅色页底是 bg-muted/30（#f5f5f5），0.556 只有 4.35:1；
+     深色 0.72 在实心灰层（0.28）上 5.9:1，在卡片 0.23 上 6.6:1。 */
+  --muted-foreground: light-dark(oklch(0.5 0 0), oklch(0.72 0 0));
+  --accent: light-dark(oklch(0.97 0 0), oklch(0.28 0 0));
+  --accent-foreground: light-dark(oklch(0.205 0 0), oklch(0.93 0 0));
+  --destructive: light-dark(oklch(0.577 0.245 27.325), oklch(0.665 0.212 27.325));
+  --border: light-dark(oklch(0.922 0 0), oklch(0.32 0 0));
+  --input: light-dark(oklch(0.922 0 0), oklch(0.32 0 0));
+  /* 焦点环要 ≥3:1：浅色 0.708 的旧环叠在白底上只有 1.4:1；深色 0.66 对卡底 5.4:1。 */
+  --ring: light-dark(oklch(0.55 0 0), oklch(0.66 0 0));
   --radius: 0.625rem;
 
-  --status-info-surface: oklch(0.977 0.013 236.62);
-  --status-info-text: oklch(0.443 0.11 240.79);
-  --status-info-border: oklch(0.901 0.058 230.902);
-  --status-progress-surface: oklch(0.987 0.022 95.277);
-  --status-progress-text: oklch(0.414 0.112 45.904);
-  --status-progress-border: oklch(0.924 0.12 95.746);
-  --status-done-surface: oklch(0.979 0.021 166.113);
-  --status-done-text: oklch(0.432 0.095 166.913);
-  --status-done-border: oklch(0.905 0.093 164.15);
-  --status-danger-surface: oklch(0.971 0.013 17.38);
-  --status-danger-text: oklch(0.505 0.213 27.518);
-  --status-danger-border: oklch(0.885 0.062 18.334);
+  /* 抽屉/对话框的遮罩：浅色沿用原 fg/20 的墨，深色换成真黑——白纱在夜里是发光，不是遮。 */
+  --scrim: light-dark(oklch(0.145 0 0 / 20%), oklch(0 0 0 / 55%));
+
+  /* 状态三件套同色相整体压暗：底 L≈0.26 低彩，字提到 L≈0.78–0.80，边 0.33 上下；
+     彩色依旧只出现在状态上（The Signal-Only Color Rule），三件套一起改。 */
+  --status-info-surface: light-dark(oklch(0.977 0.013 236.62), oklch(0.265 0.028 236.62));
+  --status-info-text: light-dark(oklch(0.443 0.11 240.79), oklch(0.795 0.087 240.79));
+  --status-info-border: light-dark(oklch(0.901 0.058 230.902), oklch(0.33 0.045 230.902));
+  --status-progress-surface: light-dark(oklch(0.987 0.022 95.277), oklch(0.26 0.04 95.277));
+  --status-progress-text: light-dark(oklch(0.414 0.112 45.904), oklch(0.783 0.098 45.904));
+  --status-progress-border: light-dark(oklch(0.924 0.12 95.746), oklch(0.33 0.05 95.746));
+  --status-done-surface: light-dark(oklch(0.979 0.021 166.113), oklch(0.26 0.032 166.113));
+  --status-done-text: light-dark(oklch(0.432 0.095 166.913), oklch(0.783 0.089 166.913));
+  --status-done-border: light-dark(oklch(0.905 0.093 164.15), oklch(0.33 0.045 164.15));
+  --status-danger-surface: light-dark(oklch(0.971 0.013 17.38), oklch(0.27 0.045 17.38));
+  --status-danger-text: light-dark(oklch(0.505 0.213 27.518), oklch(0.8 0.115 27.518));
+  --status-danger-border: light-dark(oklch(0.885 0.062 18.334), oklch(0.34 0.06 18.334));
 }
 
 @layer base {
@@ -108,7 +132,8 @@
   html {
     @apply font-sans;
     caret-color: var(--foreground);
-    scrollbar-color: oklch(0.78 0 0) transparent;
+    /* 滚动条拇指随主题换边；不动画（WebKit 换色会闪）。 */
+    scrollbar-color: light-dark(oklch(0.78 0 0), oklch(0.38 0 0)) transparent;
   }
   h1,
   h2,
@@ -119,7 +144,7 @@
     text-wrap: pretty;
   }
   ::selection {
-    background-color: oklch(0.205 0 0 / 14%);
+    background-color: light-dark(oklch(0.205 0 0 / 14%), oklch(0.93 0 0 / 22%));
   }
   /* 兜底焦点环：自定义控件不写 focus-visible 类时也看得见（≥3:1，2px）。 */
   :focus-visible {

@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /**
- * 对比度探针：从 app.css 读 token，用真浏览器采真像素，按 WCAG 算比值。
+ * 对比度探针：从 app.css 读 token，用真浏览器采真像素，按 WCAG 算比值——浅色与深色
+ * 各判一遍，任何一侧不达标都算失败（exit 2）。
  *
  * 为什么不用 node 自己算颜色：oklch→sRGB 的数学写错一次就守不住，而「守」正是它存在的
  * 理由。所以颜色交给浏览器（canvas 的 fillStyle 与 CSS 用的是同一个色彩管线），仓库里
  * 只留两件事：**哪些对要测**、**阈值多少**。
  *
  * 契约（见 DESIGN 的 Contrast 一节）：
- * - 文本对 ≥ 4.5，焦点环 ≥ 3；
+ * - 文本对 ≥ 4.5，焦点环 ≥ 3；两套主题同一张名单，同一个阈值；
+ * - token 在 app.css 里一行带齐两值（`light-dark(浅, 深)`），这里按键拆开分别判；
+ *   只写了单边的 token 以另一侧缺值报错——新颜色必须浅深成对（DESIGN · Dark）；
  * - 状态回按命名自动配对 `--status-<名>-text × --status-<名>-surface`，新增第五个
  *   状态色不会静默逃测；
  * - 边框、发丝线、表面色只打印不判定——它们是装饰性分层，状态靠字（The Signal-Only
@@ -32,6 +35,11 @@ const appCSS = join(here, "..", "app", "app.css");
 const TEXT_THRESHOLD = 4.5;
 const NON_TEXT_THRESHOLD = 3;
 
+const THEMES = /** @type {const} */ ([
+  { key: "light", label: "浅色（默认）" },
+  { key: "dark", label: "深色" },
+]);
+
 /** 找不到浏览器时的候选（本机 macOS / Linux / playwright 缓存都在内）。 */
 function chromeCandidates() {
   const home = process.env.HOME ?? "";
@@ -53,25 +61,42 @@ function chromeCandidates() {
   return list.filter((path) => path && existsSync(path));
 }
 
-/** 从 app.css 里抽出所有 `--token: <颜色>`；只认 oklch()/hex，别的形态不猜。 */
-function readTokens(css) {
-  const tokens = new Map();
-  const pattern = /--([a-z0-9-]+)\s*:\s*(oklch\([^)]*\)|#[0-9a-fA-F]{3,8})\s*;/g;
-  for (const [, name, value] of css.matchAll(pattern)) tokens.set(name, value);
-  return tokens;
+/** 只认这三种形态的颜色；别的写法不猜。 */
+const COLOR = String.raw`oklch\([^)]*\)|#[0-9a-fA-F]{3,8}`;
+const PAIRED = new RegExp(`--([a-z0-9-]+)\\s*:\\s*light-dark\\(\\s*(${COLOR})\\s*,\\s*(${COLOR})\\s*\\)\\s*;`, "g");
+const PLAIN = new RegExp(`--([a-z0-9-]+)\\s*:\\s*(${COLOR})\\s*;`, "g");
+
+/**
+ * 从 app.css 里抽出每个 token 的浅深两值。返回 `{ light: Map, dark: Map }`：
+ * `light-dark(浅, 深)` 拆键；没带 light-dark 的单值 token（如 --radius 不是颜色，不会
+ * 被抓到）两套主题共享同一个值。
+ */
+function readThemes(css) {
+  const light = new Map();
+  const dark = new Map();
+  for (const [, name, lo, hi] of css.matchAll(PAIRED)) {
+    light.set(name, lo);
+    dark.set(name, hi);
+  }
+  for (const [, name, value] of css.matchAll(PLAIN)) {
+    if (light.has(name)) continue; // light-dark() 已拆过，单值正则不碰它
+    light.set(name, value);
+    dark.set(name, value);
+  }
+  return { light, dark };
 }
 
 function need(tokens, name) {
   const value = tokens.get(name);
-  if (!value) throw new Error(`app.css 里找不到 --${name}：探针不猜颜色`);
+  if (!value) throw new Error(`app.css 里找不到 --${name}（这一侧的值）：探针不猜颜色`);
   return value;
 }
 
 /**
- * 构建要量的对。
+ * 构建要量的对（同一张名单跑两套主题）。
  *
  * `bg-muted/40` 这种写法在 CSS 里是「40% 的 muted 叠在下面那层之上」，所以这里也照抄
- * 合成顺序：先卡白、再 40% 灰。alpha 由浏览器合成，跟真实渲染一致。
+ * 合成顺序：先卡底、再 40% 灰。alpha 由浏览器合成，跟真实渲染一致。
  */
 function buildPairs(tokens) {
   const card = need(tokens, "card");
@@ -83,10 +108,10 @@ function buildPairs(tokens) {
   const pairs = [
     { name: "muted-foreground / 表头 bg-muted/40", threshold: TEXT_THRESHOLD, fg: mutedFg, layers: [{ color: card }, { color: muted, alpha: 0.4 }] },
     { name: "muted-foreground / 回执带 bg-muted/50", threshold: TEXT_THRESHOLD, fg: mutedFg, layers: [{ color: card }, { color: muted, alpha: 0.5 }] },
-    { name: "muted-foreground / 卡片白", threshold: TEXT_THRESHOLD, fg: mutedFg, layers: [{ color: card }] },
+    { name: "muted-foreground / 卡底", threshold: TEXT_THRESHOLD, fg: mutedFg, layers: [{ color: card }] },
     { name: "muted-foreground / 页面底 bg-muted/30", threshold: TEXT_THRESHOLD, fg: mutedFg, layers: [{ color: background }, { color: muted, alpha: 0.3 }] },
     { name: "muted-foreground / 实心 bg-muted", threshold: TEXT_THRESHOLD, fg: mutedFg, layers: [{ color: muted }] },
-    { name: "焦点环 / 卡片白", threshold: NON_TEXT_THRESHOLD, fg: ring, layers: [{ color: card }] },
+    { name: "焦点环 / 卡底", threshold: NON_TEXT_THRESHOLD, fg: ring, layers: [{ color: card }] },
   ];
 
   // 状态色按命名配对：新增 --status-foo-text / --status-foo-surface 会自动进入名单。
@@ -118,7 +143,7 @@ function buildPairs(tokens) {
 
   const hairline = tokens.get("border");
   if (hairline) {
-    pairs.push({ name: "发丝线 / 卡片白（装饰）", threshold: null, fg: hairline, layers: [{ color: card }] });
+    pairs.push({ name: "发丝线 / 卡底（装饰）", threshold: null, fg: hairline, layers: [{ color: card }] });
   }
 
   return pairs;
@@ -177,6 +202,25 @@ function unescapeHTML(text) {
     .replaceAll("&amp;", "&");
 }
 
+/** 用无头浏览器跑一页采样，返回该主题的比值清单。 */
+async function measure(chrome, pairs, dir) {
+  const page = join(dir, "probe.html");
+  await writeFile(page, buildPage(pairs), "utf8");
+  const { stdout } = await run(chrome[0], [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--virtual-time-budget=3000",
+    "--dump-dom",
+    `file://${page}`,
+  ], { maxBuffer: 8 * 1024 * 1024 });
+
+  const body = /<body[^>]*>([\s\S]*?)<\/body>/.exec(stdout)?.[1];
+  if (!body) throw new Error("拿不到采样页的 DOM：浏览器没跑起来？");
+  const { results } = JSON.parse(unescapeHTML(body.trim()));
+  return results;
+}
+
 async function main() {
   const chrome = chromeCandidates();
   if (chrome.length === 0) {
@@ -185,44 +229,37 @@ async function main() {
   }
 
   const css = await readFile(appCSS, "utf8");
-  const pairs = buildPairs(readTokens(css));
+  const themes = readThemes(css);
   const dir = await mkdtemp(join(tmpdir(), "mdc-contrast-"));
-  const page = join(dir, "probe.html");
-  await writeFile(page, buildPage(pairs), "utf8");
 
   try {
-    const { stdout } = await run(chrome[0], [
-      "--headless=new",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--virtual-time-budget=3000",
-      "--dump-dom",
-      `file://${page}`,
-    ], { maxBuffer: 8 * 1024 * 1024 });
-
-    const body = /<body[^>]*>([\s\S]*?)<\/body>/.exec(stdout)?.[1];
-    if (!body) throw new Error("拿不到采样页的 DOM：浏览器没跑起来？");
-    const { results } = JSON.parse(unescapeHTML(body.trim()));
-
     let failed = 0;
-    console.log("对比度探针（颜色读自 web/app/app.css，像素来自 canvas）\n");
-    for (const row of results) {
-      const ratio = row.ratio.toFixed(2);
-      if (row.threshold === null) {
-        console.log(`   ${ratio.padStart(6)}:1      ${row.name}`);
-        continue;
+    let judged = 0;
+    console.log("对比度探针（颜色读自 web/app/app.css，像素来自 canvas；浅深两套各判一遍）\n");
+    for (const theme of THEMES) {
+      const tokens = themes[theme.key];
+      if (tokens.size === 0) throw new Error(`app.css 里没读到 --token：${theme.key} 侧一个值都没有`);
+      const results = await measure(chrome, buildPairs(tokens), dir);
+      console.log(`── ${theme.label} ──`);
+      for (const row of results) {
+        const ratio = row.ratio.toFixed(2);
+        if (row.threshold === null) {
+          console.log(`   ${ratio.padStart(6)}:1      ${row.name}`);
+          continue;
+        }
+        judged += 1;
+        const ok = row.ratio >= row.threshold;
+        if (!ok) failed += 1;
+        console.log(`${ok ? " ✓" : " ✗"} ${ratio.padStart(6)}:1 ≥ ${row.threshold}  ${row.name}`);
       }
-      const ok = row.ratio >= row.threshold;
-      if (!ok) failed += 1;
-      console.log(`${ok ? " ✓" : " ✗"} ${ratio.padStart(6)}:1 ≥ ${row.threshold}  ${row.name}`);
+      console.log("");
     }
 
-    console.log("");
     if (failed > 0) {
-      console.error(`${failed} 对不达阈值。改 token，不要在组件上打补丁（DESIGN · Contrast）。`);
+      console.error(`${failed} 对不达阈值（两套主题合计）。改 token，不要在组件上打补丁（DESIGN · Contrast）。`);
       process.exit(2);
     }
-    console.log(`全部达标（${results.filter((row) => row.threshold !== null).length} 对文本/焦点，其余为装饰性打印）。`);
+    console.log(`两套主题全部达标（各 ${judged / THEMES.length} 对文本/焦点，其余为装饰性打印）。`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

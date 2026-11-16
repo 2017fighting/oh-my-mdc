@@ -8,6 +8,7 @@ import { Button } from "~/components/ui/button";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
 import { Panel, isTaskState, loopLines, useNow, ROW_ACTION_SIZE, PANEL_ACTION_SIZE, type PanelQuery } from "~/components/panel";
+import { ThemeToggle } from "~/components/theme";
 import { attentionRowCount } from "~/lib/attention";
 import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
 import { durationSeconds, formatInterval } from "~/lib/time";
@@ -280,18 +281,26 @@ export default function Home() {
               </button>
             ) : null}
           </div>
+
+          {/* 界面配色：侧栏最底、心跳之后——它不参与「要不要再等」，不抢心跳的位置。 */}
+          <Separator />
+          <ThemeToggle className="w-full" />
         </div>
       </aside>
 
       <main id="main" tabIndex={-1} className="flex min-w-0 flex-1 flex-col gap-6 outline-none">
         <div className="flex flex-col gap-3 md:hidden">
-          <Link to="/" className="flex min-h-11 items-center gap-2">
-            <Sparkles className="size-5 text-primary" aria-hidden />
-            <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
-          </Link>
+          <div className="flex min-h-11 items-center gap-2">
+            <Link to="/" className="flex items-center gap-2">
+              <Sparkles className="size-5 text-primary" aria-hidden />
+              <span className="font-heading text-base font-semibold tracking-tight">oh-my-mdc</span>
+            </Link>
+            {/* 界面配色：窄屏入口在顶部行右侧，与桌面侧栏是同一颗控件、同一个语义。 */}
+            <ThemeToggle touch className="ml-auto w-45" />
+          </div>
           <nav
             aria-label="视图切换"
-            className="grid grid-cols-2 gap-1 rounded-lg bg-background p-1 ring-1 ring-foreground/10"
+            className="grid grid-cols-2 gap-1 rounded-lg bg-card p-1 ring-1 ring-foreground/10"
           >
             <MobileNavItem
               to="/"
@@ -539,8 +548,8 @@ function NavItem({
     "flex items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
     current
-      ? "bg-background font-medium ring-1 ring-foreground/10"
-      : "text-muted-foreground hover:bg-background/60",
+      ? "bg-card font-medium ring-1 ring-foreground/10"
+      : "text-muted-foreground hover:bg-secondary/60",
     disabled && "cursor-not-allowed opacity-60",
   );
 

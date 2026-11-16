@@ -23,6 +23,28 @@ colors:
   status-danger-surface: "oklch(0.971 0.013 17.38)"
   status-danger-text: "oklch(0.505 0.213 27.518)"
   status-danger-border: "oklch(0.885 0.062 18.334)"
+colorsDark:
+  ink: "oklch(0.93 0 0)"
+  ink-foreground: "oklch(0.17 0 0)"
+  paper: "oklch(0.19 0 0)"
+  text-ink: "oklch(0.93 0 0)"
+  surface-muted: "oklch(0.28 0 0)"
+  text-muted: "oklch(0.72 0 0)"
+  hairline: "oklch(0.32 0 0)"
+  focus-ring: "oklch(0.66 0 0)"
+  danger: "oklch(0.665 0.212 27.325)"
+  status-info-surface: "oklch(0.265 0.028 236.62)"
+  status-info-text: "oklch(0.795 0.087 240.79)"
+  status-info-border: "oklch(0.33 0.045 230.902)"
+  status-progress-surface: "oklch(0.26 0.04 95.277)"
+  status-progress-text: "oklch(0.783 0.098 45.904)"
+  status-progress-border: "oklch(0.33 0.05 95.746)"
+  status-done-surface: "oklch(0.26 0.032 166.113)"
+  status-done-text: "oklch(0.783 0.089 166.913)"
+  status-done-border: "oklch(0.33 0.045 164.15)"
+  status-danger-surface: "oklch(0.27 0.045 17.38)"
+  status-danger-text: "oklch(0.8 0.115 27.518)"
+  status-danger-border: "oklch(0.34 0.06 18.334)"
 typography:
   title:
     fontFamily: "Geist Variable, PingFang SC, Microsoft YaHei, Noto Sans SC, ui-sans-serif, system-ui, sans-serif"
@@ -160,6 +182,14 @@ components:
 - **信号翠 Done**（`oklch(0.979 0.021 166.113)` / `oklch(0.432 0.095 166.913)` / `oklch(0.905 0.093 164.15)`）：已入库、测试通过、操作成功。
 - **信号红 Danger**（`oklch(0.971 0.013 17.38)` / `oklch(0.505 0.213 27.518)` / `oklch(0.885 0.062 18.334)`）：失败（任务级与版本级）、驻留副作用、测试失败、错误。
 
+### Dark
+
+双主题，同一个 token 名：每个颜色在 `app.css` 里一行带齐两值（`light-dark(浅, 深)`），由根上的 `color-scheme` 选边；没有 `.dark` 类、没有 `dark:` 变体（ADR-0013）。三态「跟随系统 / 浅色 / 深色」由 `<meta name="color-scheme">` 驱动，`ThemeToggle` 写它、`localStorage` 记忆（与系统一致时删条目，钉住只在真的偏离系统时成立）；内联脚本在首绘前写 meta 防闪，无 JS 时纯跟随系统。
+
+深色不是反色，是同一套纸墨的夜班：底 0.19、卡 0.23、灰层 0.28、发丝线 0.32，正文 0.93、次级墨 0.72、焦点环 0.66。**墨仍是唯一强调色，只是夜里墨是亮的**：主按钮浅纸底（0.93）配近黑字。四个状态三件套同色相整体压暗——底 L≈0.26 低彩、字提到 L≈0.78–0.80、边 0.33 上下，Signal-Only 与 Three-Part 两条规则原样生效。
+
+浮起方向的规则（深色里「更亮 = 更浮」）：页面画布上的当前导航、分段控件容器、outline 按钮用 `card`（浅色同为白，零回归）；抽屉与对话框用 `popover`（0.25）；hover 用 `secondary` 或 `muted`（提亮），不用 `background`（在深色里会变成凹陷）。卡内的输入框、代码块、内嵌列表保留 `background`——井就是要凹的。遮罩是独立 token `--scrim`（浅色墨 20%、深色真黑 55%）：白纱在夜里是发光，不是遮。
+
 ### Named Rules
 **The Ink-Only Rule.** 近黑墨色是唯一强调色。想加一个彩色品牌色，先改这套系统，不要在某个页面上先斩后奏。
 
@@ -171,9 +201,9 @@ components:
 
 **阈值**：文本 ≥ 4.5:1；焦点环与其它非文本指示 ≥ 3:1。禁用态按 WCAG 豁免，不为它抬色——禁用态的目标是「看得出不能用」，不是「读得清」。边框、发丝线、表面色是装饰性分层，不设阈值：状态靠字，颜色从不单独说话（The Signal-Only Color Rule）。
 
-**实测**（2026-11，`make contrast`）：muted-foreground 在表头 `bg-muted/40` 上 5.81:1、回执带 `bg-muted/50` 5.76、卡片白 6.01、页面底 `bg-muted/30` 5.86、实心 `bg-muted` 5.51；焦点环 4.88:1；四个状态「字 / 底」5.87–8.73:1。状态「边 / 底」只有 1.20–1.33:1——徽章的底与边几乎不承载对比度，可辨性全在字上，这是有意的，也是 Three-Part State Rule 真正落地的方式。
+**实测**（2026-11，`make contrast`，浅深两套各判一遍、任一侧不达标 exit 2）：浅色——muted-foreground 在表头 `bg-muted/40` 上 5.81:1、回执带 `bg-muted/50` 5.76、卡片白 6.01、页面底 `bg-muted/30` 5.86、实心 `bg-muted` 5.51；焦点环 4.88:1；四个状态「字 / 底」5.87–8.73:1。深色——muted-foreground 同一张名单 5.84–7.05:1；焦点环 5.42:1；四个状态「字 / 底」7.61–8.06:1。状态「边 / 底」两套都只有 1.2–1.3:1——徽章的底与边几乎不承载对比度，可辨性全在字上，这是有意的，也是 Three-Part State Rule 真正落地的方式。
 
-**怎么跑**：`make contrast`（`web/scripts/contrast-probe.mjs`）。颜色从 `web/app/app.css` 读，像素由 Chromium 的 canvas 采，合成顺序照 CSS 的 alpha 规则（`bg-muted/40` 就是 40% 灰叠在卡白上）——仓库里不存第二份色值，也不手写颜色数学。状态色按 `--status-<名>-text × --status-<名>-surface` 自动配对，将来加第五个状态不会静默逃测；装饰性配对只打印。不达标 exit 2。不进 CI：那要为一个数字给它装一个浏览器，`make contrast` 是「改颜色之后手跑一次」的门。
+**怎么跑**：`make contrast`（`web/scripts/contrast-probe.mjs`）。颜色从 `web/app/app.css` 读（`light-dark(浅, 深)` 拆开各判；只写单边的 token 以缺值报错——新颜色必须浅深成对），像素由 Chromium 的 canvas 采，合成顺序照 CSS 的 alpha 规则（`bg-muted/40` 就是 40% 灰叠在卡底上）——仓库里不存第二份色值，也不手写颜色数学。状态色按 `--status-<名>-text × --status-<名>-surface` 自动配对，将来加第五个状态不会静默逃测；装饰性配对只打印。不达标 exit 2。不进 CI：那要为一个数字给它装一个浏览器，`make contrast` 是「改颜色之后手跑一次」的门。
 
 **改哪里**：先改 token，再谈组件。同一个灰被用在不同底色上时，单点修补只会让两边的灰越长越像。
 
@@ -328,7 +358,7 @@ components:
 
 ### Don't:
 - **Don't** 加彩色品牌强调；彩色只作状态信号。
-- **Don't** 复活深色主题：`.dark` 与 `dark:` 变体已删除。要加，先补切换入口并逐状态校对对比度。
+- **Don't** 用 `.dark` 类或 `dark:` 变体做主题（它们已删除且不再回来）：双主题只走 token 一行两值（`light-dark()`）+ `color-scheme`/meta（DESIGN · Dark、ADR-0013）；新增颜色 token 必须浅深成对，改完跑 `make contrast`（两套都判）。
 - **Don't** 给卡片、行、按钮加阴影；阴影只属于抽屉。
 - **Don't** 用 1px 以上的左/右彩色边条做强调。
 - **Don't** 用 `flex-row` 覆盖 `CardHeader` 的网格，或把动作塞进标题 div。
