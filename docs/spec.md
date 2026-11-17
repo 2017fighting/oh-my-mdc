@@ -7,7 +7,7 @@
 把 JavDB 自建清单里的番号，自动变成 Jellyfin 媒体库里的条目：
 
 ```
-JavDB 想看清单（按 id 轮询）
+JavDB 想看清单（按 id 轮询）／女优订阅（按水位线追新）   ← 两个待办来源
   → 磁力/种子定源（M-Team 优先，JavDB 磁力兜底）
   → qBittorrent 下载（tag 标记，autorun 回调 + 对账双通道）
   → 刮削（DMM 图片/日文元数据 + JavDB 演员/其余 + 可选 AI 翻译）
@@ -15,7 +15,7 @@ JavDB 想看清单（按 id 轮询）
   → Jellyfin 刷新 + Telegram 通知（旁路副作用，独立重试）
 ```
 
-Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui），全中文界面，单用户自托管，无应用层鉴权（暴露策略在网关层）。状态全存 Postgres；循环为 poll / reconcile / sidefx 三循环 + webhook 即时通道。
+Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui），全中文界面，单用户自托管，无应用层鉴权（暴露策略在网关层）。状态全存 Postgres；循环为 poll / reconcile / sidefx / subscription 四循环 + webhook 即时通道。
 
 ## 2. 常设决策（平台与栈）
 
@@ -57,7 +57,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 ### 4.1 任务域
 
-- **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id text NULL REFERENCES list_registry`（首次发现来源；清单 id 是字符串，见 §4.3。**可空**：手工登记与补录的首次发现不是任何清单，空串冒充 id 过不了外键，写死想看清单是往「首次发现来源」里塞假话，00012 放宽）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`missing_faces text[] NOT NULL DEFAULT '{}'`（待补齐标注，#42，迁移 00013）、`created_at`、`updated_at`。
+- **`task`**：`movie_id text PK`、`number text NOT NULL`（番号）、`list_id text NULL REFERENCES list_registry`（首次发现来源；清单 id 是字符串，见 §4.3。**可空**：手工登记与补录的首次发现不是任何清单，空串冒充 id 过不了外键，写死想看清单是往「首次发现来源」里塞假话，00012 放宽）、`subscription_id bigint NULL REFERENCES subscription`（首次发现来源的另一半：女优订阅发现的作品，00015；与 `list_id` 并存、同为「首次发现」语义，写入后不覆盖；两列可以同时有值）、刮削强类型列（清单见 §7.1：`title_ja`、`title_zh`、`outline`、`outline_zh`、`release_date date`、`runtime_minutes int`、`studio text`、`publisher text`、`series text`、`director text`、`trailer_url text`、`rating numeric`、`tags text[]`）、`provenance jsonb`、`raw_snapshot jsonb`、`missing_faces text[] NOT NULL DEFAULT '{}'`（待补齐标注，#42，迁移 00013）、`created_at`、`updated_at`。
 - **`task_version`**：`infohash text PK`、`movie_id FK`、`source text CHECK ('javdb_magnet','mteam_torrent','manual','backfill')`（00012 放行 manual、00014 放行 backfill）、`delivery text CHECK ('magnet','torrent','none')`（00014 放行 none：补录零下载不过 qBittorrent，无交付形态；保持 NOT NULL 的诚实，读方按字面量理解）、`label text`（普通/中文/破解，best-effort）、`status text CHECK ('downloading','processing','finished','failed')`、`error_phase text CHECK ('downloading','scrape','organize')`、`error_reason text`、`claimed_at timestamptz`、`claimed_by text`、`attempts int NOT NULL DEFAULT 0`、`next_attempt_at timestamptz`、`add_pending bool`、`list_removal_pending bool`、`force_rescrape bool`（强制重刮：下一次取数不复用元数据，#31）、`payload text`（magnet 串或 .torrent 备份路径；补录版本恒空串，无交付材料）、`created_at`、`updated_at`。
 - **`version_file`**：`id bigint identity PK`、`infohash FK`、`rel_path`、`size_bytes`、`part_index`、`is_primary bool`。（入库幂等与「已落盘」判定的永久记录。）
 - **`task_event`**（append-only）：`id identity PK`、`movie_id`、`infohash NULL`、`kind text CHECK ('state_change','side_effect','alert','manual_retry')`、`from_state`、`to_state`、`phase`、`reason`、`detail jsonb`（结构化附注；强制重刮把旧 `raw_snapshot` 存这里做对比基准，#31）、`at timestamptz`。承担告警「只发一次」判据、面板历史、失败追问。
@@ -79,7 +79,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
   - `mteam`：`api_key`（敏感）、`enabled`、`last_test_*`。
   - `ai_translation`：`base_url`、`api_key`（敏感）、`model`、`enabled`、`last_test_*`。
   - `telegram`：`bot_token`（敏感）、`chat_id`、`enabled`、**`notify_download_started bool DEFAULT true`、`notify_filed bool DEFAULT true`、`notify_processing_failed bool DEFAULT true`、`notify_download_stalled bool DEFAULT true`**、`last_test_*`（#13 列名落定）。
-- **`app_config`**（单行 `id=1`）：`poll_interval DEFAULT 15m`、`reconcile_interval DEFAULT 5m`、`sidefx_interval DEFAULT 1m`、`max_attempts DEFAULT 3`、`paused bool DEFAULT false`、`updated_at`。程序自己写的时间戳不进本表（#8 修订；`last_test_*` 在集成表，不受此限）。
+- **`app_config`**（单行 `id=1`）：`poll_interval DEFAULT 15m`、`reconcile_interval DEFAULT 5m`、`sidefx_interval DEFAULT 1m`、`max_attempts DEFAULT 3`、`subscription_interval DEFAULT 15m`、`subscription_max_adds DEFAULT 10`（00015，GLOSSARY「订阅」的第四个循环与它的每轮限量）、`paused bool DEFAULT false`、`updated_at`。程序自己写的时间戳不进本表（#8 修订；`last_test_*` 在集成表，不受此限）。
 - **env 只有 bootstrap**：`MDC_DATABASE_URL`（默认 `postgres://mdc:mdc@localhost:5432/mdc?sslmode=disable`）、可选 `MDC_DB_PASSWORD`（进程内拼进 DSN，prod 形态见 §10）、`MDC_LISTEN`（默认 `:8080`）。~~`MDC_DATA_DIR` 作废~~（#12：无应用数据目录）。用户设置零 env 覆盖路径。
 
 ### 4.4 索引与语义要点
@@ -90,6 +90,12 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 - **启动顺序**：迁移（goose Up，advisory lock）→ 读设置 → 六判据齐（JavDB token 已保存、清单登记且验读过——javdb.last_test_list_id 记着登记的 id、qBittorrent 可连、Jellyfin 可写＝`url`+`api_key`+`media_root` 齐且目录在本机可见）才算 `initialized`，三循环才启动；**迁移失败不 abort 启动**：页面能看、`/readyz` 回 `503 db_unavailable` 带原因、循环不跑（#8 修订）。
 - 敏感列：代码常量清单（表.列）驱动掩码与日志脱敏，配一条反射单测——新增 string 列未登记即测试失败。DB 明文（信任边界＝CNPG 与其备份）。
 - 历史永久保留，无 retention；UI 单条删除只删记录不碰媒体（判重依赖版本行存在，不做自动清理）。
+
+### 4.5 订阅域（ADR-0015，迁移 00015）
+
+- **`subscription`**：`id bigint identity PK`、`kind text CHECK ('actress') NOT NULL DEFAULT 'actress'`（将来加番号/全站来源就加在这里，不再起第三张表）、`actress_actor_id text NOT NULL REFERENCES actor (javdb_actor_id)`（外键立得起来的前提是建订阅时 upsert 一行 actor：`name` 取上游、`gender`/`avatar_url` 先 NULL 等刮削补）、`watermark_date date NULL`（上一轮见过的最晚发行日；新订阅 = 建订阅当天）、`lookback_days int NOT NULL DEFAULT 30`、`backfill_from date NULL`（回灌设置的取数下界，窗口扫完清 NULL）、`enabled bool NOT NULL DEFAULT true`、`created_at`、`updated_at`，`UNIQUE (kind, actress_actor_id)`（同一位女优不会订两遍）。**行永不删除**：面板只有停用/恢复，`task.subscription_id` 的外键与历史因此永远可解。
+- **`subscription_skip`**（GLOSSARY「跳过」）：`id bigint identity PK`、`subscription_id bigint NOT NULL REFERENCES subscription`、`movie_id text`、`number text`、`title text DEFAULT ''`、`release_date date NULL`、`reason text CHECK ('not_single','compilation')`、`skipped_at timestamptz DEFAULT now()`、`accepted_at timestamptz NULL`；**部分唯一索引** `UNIQUE (subscription_id, movie_id) WHERE accepted_at IS NULL`（回看窗口会让同一部作品每轮再现，落行必须幂等）；超过 30 天的行由订阅循环清掉。
+- **`actor` 词义扩宽**：从「刮削沉淀的演员」扩为「已知的演员」——订阅先建行、刮削再补 `gender`/`avatar_url`；`task_actor` 与 NFO 的「女优排前」不受影响（依赖 `gender`，未知时按中性顺序）。
 
 ## 5. 集成契约
 
@@ -219,11 +225,12 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | 重启 | 进程启动 | downloading 不动（真实进度在 qbt）；processing 阶段级复位重跑（幂等，无步骤游标）；finished/failed 不动 |
 | 互斥 | 全部 | 版本行条件 claim（§4.4）+ 进程内 per-version 锁 |
 
-### 6.2 四个触发通道
+### 6.2 五个触发通道
 
 | 通道 | 默认间隔（设置项） | 职责 |
 |---|---|---|
 | poll | 15m | 清单全量扫（空页即止）→ 磁力 → 定源 → 建版本 → 加种 → 置待删 |
+| subscription | 15m | 女优订阅追新（§6.4）：水位线 + 回看窗口取数 → 筛子 → 节流入队；与 poll 共用同一段 ingest。独立 advisory lock（`4230004`）与独立节拍：一位女优的接口挂掉不拖死清单轮询 |
 | reconcile | 5m | 扫 `mdc:in-progress` 补 webhook 漏；推进 processing；判定下载异常/停滞 |
 | sidefx | 1m | 删清单项 / 刷 Jellyfin / 发 Telegram，各自重试（瞬时退避、永久驻留） |
 | webhook | 即时 | 单版本推进（`GET /api/hooks/qbt?ih=`） |
@@ -239,6 +246,20 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 - **删旧 NFO**：登记成功后当场删目录里 `{番号}*.nfo`（movie.nfo 除外，词表外的 NFO 不碰）。依据：Jellyfin ≥10.9 读 movie.nfo 优先（jellyfin/jellyfin#10339，生产 10.11.11），旧件是死重；用户裁决直接删、不归档。顺序是**登记→删**（登记在先）：先删后登记的崩溃窗口是「旧件已删、任务未建」——目录从「未补录」里消失却没人接管；登记失败时旧件原地不动，崩在登记与删除之间也只是留下无害死重（movie.nfo 优先，旧件不干扰读数），不会造成状态错。
 - **碰撞与幂等**：番号已有任务（轮询/手工/上次补录）→ 幂等放行（outcome=duplicate），零写入零删文件；两目录同番号在「目录名即番号」的口径下不存在。重复点击不重复建任务、不重复建版本、不重复删文件。
 - **门禁**：未初始化/已暂停时扫描与补录都拒（`gate_closed`）——与手工登记同一口径。
+
+### 6.4 女优订阅（ADR-0014，§4.5，迁移 00015）
+
+第二个待办来源。它只负责「产出一批待办作品」，之后与清单轮询走同一段 ingest（定源 → 先落库 → 加种），所以本节只写订阅自己的规则。
+
+- **名单与身份**：订阅身份是 `actor.javdb_actor_id`（不是名字——名字只是快照，改名不该断订阅）。面板订阅区两种添加方式：搜索上游女优；或从 App 收藏的女优列表（`GET /api/v1/users/collected_actors`，需 token）勾选导入。同 id 重复添加幂等放行。
+- **取数**：`GET /api/v1/movies/tags?filter_by=0:a:{id}{:s}:&sort_by=release&order_by=desc&page=N`，匿名可读；掩码按上游段规则构造、只写到合法段（**第 5 段非空且后面还有段 = 上游静默丢年份**那类坑，照 javdb_rss 的实测记录处理）。空页即止。**唯一语义参数是 `main=s`**；`c`/`tags`/`year`/`filter_by` 原样透传一律不搬（ADR-0016）。
+- **筛子**（ADR-0016）：上游 `main=s` → 通过者拉一次 `/api/v4/movies/{id}`，**详情只排类別「精選綜合」**；`actors` 数 > 1 **不排**（多女优共演的单体作品仍要）。标签 id 不硬编码：按名字去 `GET /api/v2/tags?type=0` 的词表里查，进程内缓存，重启重取。`main=s` 的可信度见 §13 的探针。
+- **水位线与回看**（GLOSSARY「水位线 / 回看窗口 / 回灌」）：取数下界 = `LEAST(watermark_date − lookback_days, COALESCE(backfill_from, +∞))`；一轮跑完把 `watermark_date` 推成「这轮见过的最晚 `release_date`」。新订阅首轮 `watermark_date = 建订阅当天`（＝不回灌历史）。回灌 = 设 `backfill_from = watermark_date − N`，扫完清 NULL。**水位线只由「见过」推进，不由「入队成功」推进**：出水即无磁力的作品靠回看窗口下轮重见，与 §6.1「磁力为空不落行、下轮重查」是同一条承诺。
+- **节流与去重**：每轮最多建 `subscription_max_adds`（默认 10）个任务，余量留到下一轮且 `backfill_from` 不被清；已有任务的 `movie_id` 不再查源（§6.1 去重行，跨来源白送）——同一部作品既在清单又在某位女优的新作里，只会有一条任务。
+- **来源记录**：订阅建的任务 `list_id` 为 NULL（没有清单项可删，故 list_removal 天然不触发），`subscription_id` 记这一行（§4.1）。
+- **门禁**：同 poll（三件套齐 + 未暂停）；女优订阅**不进** initialized 判据——一条订阅都没有时循环空转即返回。
+- **生命周期**：只有停用/恢复，没有删除；停用只停追新，已建任务照走完，跳过行按 30 天自然过期。
+- **跳过与收下**（GLOSSARY「跳过 / 收下」）：被排掉的落 `subscription_skip`，面板订阅区可见并一键「收下」转成正常待办——判据可以错，出口必须留。
 
 ## 7. 刮削与整理
 
@@ -300,7 +321,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.2 面板（表格为主体，要动手的事置顶）
 
-区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ **「未补录目录」区**（#43：媒体库里不归本项目的旧目录逐行一键补录，空区不渲染，GLOSSARY「补录」）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
+区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ **「未补录目录」区**（#43：媒体库里不归本项目的旧目录逐行一键补录，空区不渲染，GLOSSARY「补录」）→ **「订阅」区**（女优订阅列表：actor 快照、水位线、带来 N 部、启停、回灌；区内的「最近被排掉的」折叠格带计数徽标与逐行「收下」）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
 
 任务详情 = **右侧抽屉**，保持精简：版本列表（infohash、来源、标签、失败原因）+ 事件时间线 + 重试/强制重刮（force）。**不看刮削字段与 provenance**（v1 不做，不留占位）。
 
@@ -333,7 +354,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 | 端点 | 语义 |
 |---|---|
-| `GET /api/overview` | `{initialized, paused, counts:{downloading,processing,finished,failed}, loops:{poll/reconcile/sidefx:{last_run_at,last_ok}}}`。`counts.failed` 是**全部版本都失败**的任务数（与 `?state=failed` 同一口径）；「有几件事要动手」不在这里，它是 `/api/attention` 的行数——两个口径分开报，不再合成一个 `needs_attention` |
+| `GET /api/overview` | `{initialized, paused, counts:{downloading,processing,finished,failed}, loops:{poll/reconcile/sidefx/subscription:{last_run_at,last_ok}}}`。`counts.failed` 是**全部版本都失败**的任务数（与 `?state=failed` 同一口径）；「有几件事要动手」不在这里，它是 `/api/attention` 的行数——两个口径分开报，不再合成一个 `needs_attention` |
 | `GET /api/tasks?state=&q=&page=` | 任务行（`task_state` 视图 + 版本摘要 chip 数据） |
 | `GET /api/tasks/{movie_id}` | 任务 + 版本列表 + 最近事件（抽屉数据） |
 | `POST /api/tasks/{movie_id}/retry` | `{force: bool=false, infohashes?: [..]}`，语义照 §6.1 人工重试行；`infohashes` 省略＝整个任务（抽屉的强制重刮），给了就**只动这几条版本**（面板的行是版本组，按钮写几条就只动几条）；回执 `{results:[{infohash, action, from_state, to_state, reason, force_rescrape}]}`——逐版结果，版本侧被拒/失败不是 HTTP 错误 |
@@ -346,6 +367,19 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `POST /api/side-effects/{id}/retry` | 人工重发（清驻留、重排 next_attempt_at） |
 | `GET /api/hooks/qbt?ih=<hex>` | qbt autorun 回调；恒 200；未知 ih 静默 no-op（§5.4） |
 
+**订阅**（§6.4，面板订阅区）：
+
+| 端点 | 语义 |
+|---|---|
+| `GET /api/subscriptions` | `{actresses:[{id, actor:{javdb_actor_id,name,avatar_url,gender}, watermark_date, lookback_days, backfill_from, enabled, tasks_count, pending_count}]}`；`tasks_count` 数 `task.subscription_id` |
+| `POST /api/subscriptions` | `{actress_id}` 或 `{javdb_url}`：解析 id → upsert actor → 建订阅；同 id 重复 → `outcome=duplicate`（幂等 200）。错误信封：形状 400 `validation_error`、id 读不到 502 `upstream_error`、门禁未开 409 `gate_closed` |
+| `POST /api/subscriptions/{id}/enable` / `disable` | 启停；停用只停追新，不碰任务与跳过行 |
+| `POST /api/subscriptions/{id}/backfill` | `{days}`：设 `backfill_from = watermark_date − days`；回执 `{backfill_from}` |
+| `GET /api/subscriptions/{id}/skips` | 最近 30 天跳过：`{skips:[{id, movie_id, number, title, release_date, reason, skipped_at}]}` |
+| `POST /api/subscriptions/{id}/skips/{skip_id}/accept` | 收下：建任务并入队（走同一 ingest），回执 `{movie_id, outcome}`；重复收下幂等 |
+| `GET /api/javdb/actress-search?q=` | 女优检索（上游端点待探针确认，§13）；不通时 501 `unsupported`，面板退到「贴 id / 女优页链接」 |
+| `GET /api/javdb/collected-actors` | App 收藏的女优（需 token）：`{actresses:[{id, name, videos_count, gender, subscribed}]}`；`subscribed` 让导入面板把已订的置灰 |
+
 任务事件行的 `detail` 原样回出（人工重试把旧 `raw_snapshot` 留在 `detail.raw_snapshot_before`、结局留在 `detail.action`）：对比基准只经接口可查，面板 v1 不渲染刮削字段（#31）。
 
 错误信封统一 `{ok:false, error:{code, message}}`。SPA 路由：Go handler 把所有未匹配 URL 导向 index.html（#5）。
@@ -357,13 +391,15 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 | 指标 | 类型 | 标签 | 用途 |
 |---|---|---|---|
-| `mdc_loop_last_success_unix_seconds` | gauge | `loop∈{poll,reconcile,sidefx}` | 循环停滞判定 |
+| `mdc_loop_last_success_unix_seconds` | gauge | `loop∈{poll,reconcile,sidefx,subscription}` | 循环停滞判定 |
 | `mdc_loop_iterations_total` | counter | `loop,result∈{ok,error}` | 循环健康 |
 | `mdc_upstream_requests_total` | counter | `upstream∈{javdb,mteam,dmm,qbittorrent,jellyfin,telegram,openai},result∈{ok,transient,permanent}` | 凭据失效判定；permanent = 401/403 类（javdb JWTVerificationError、telegram 400/401/403、mteam 鉴权 code 等） |
 | `mdc_side_effect_stuck` | gauge | `kind` | 驻留副作用数（喂需人工区，不做告警规则） |
 | `mdc_task_incomplete` | gauge | — | 待补齐（#42：四面判据命中且上游重试耗尽）的任务数；与面板待补齐区同源 |
+| `mdc_subscription_skipped_total` | counter | `reason∈{not_single,compilation}` | 筛子命中数：长期全是 `not_single` 而 `reason=compilation` 恒 0，说明 `main=s` 可能在替「精選綜合」干活（§13 探针的复查信号） |
+| `mdc_subscription_pending` | gauge | — | 回看窗口内已发现、被每轮限量留在门外的待入队数（每轮末尾置数；`backfill_from` 未清时为非零是预期） |
 
-- 最小 VMRule 两条（#12）：**LoopStalled**：`time() - mdc_loop_last_success_unix_seconds{loop="poll"} > 2400`（reconcile > 900、sidefx > 600）；**UpstreamCredentialsInvalid**：`increase(mdc_upstream_requests_total{result="permanent"}[15m]) > 0`。Grafana 面板不做。
+- 最小 VMRule 两条（#12）：**LoopStalled**：`time() - mdc_loop_last_success_unix_seconds{loop="poll"} > 2400`（reconcile > 900、sidefx > 600、subscription > 2400）；**UpstreamCredentialsInvalid**：`increase(mdc_upstream_requests_total{result="permanent"}[15m]) > 0`。Grafana 面板不做。
 
 ## 10. 构建与部署
 
@@ -483,6 +519,8 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 - **DMM pl/ps 几何未实测**：算法已兜底（§5.3 取宽>高者为横版）；首次 JP 出口刮削时一次 `curl + file` 核对并记录。
 - **DMM 全主机非日本出口 TLS 被阻**：生产 mihomo 覆盖；开发机不可达 → 开发验证需 JP 出口（CI 不做 DMM 集成测试，用 fixture：mdc-lite 2026-10-29 真实捕获在库）。
 - **M-Team 限速是「建议值」且配额不可读**：只在新磁力 movie 时搜索（§5.2），失败即降级磁力，不做配额推断。
+- **`main=s`（單體影片）未实测**：javdb_rss 对 `p`/`m`/`c`/`i`/`v` 都做过「字母筛出的集合 vs 某字段分出的两半」逐位对照，`s` 是唯一没有对应字段、含义只取自上游名字的那个，而未筛的女优列表里实测混着 `OFJE-*` 总集编。**开工第一件事是探针**（拿到全集与 `?main=s` 的差集，看是否排掉总集编、是否误伤），结论写回本节再实现；筛子失效的信号已埋成指标（`mdc_subscription_skipped_total{reason}`）与跳过表。
+- **女优检索端点未知**：javdb_rss 只做过 `collected_actors`（收藏）与 `/api/v1/actors/{id}`（详情），没有「按名字搜女优」的端点记录。探针一并确认；不通则 `GET /api/javdb/actress-search` 回 501，面板退到「贴 id / 女优页链接」，其余不动。
 - **JavDB `jdsignature` 常量可轮换**：`InvalidSignature` = 修代码不是修凭据；app-API 移植自带。
 - **清单写接口陷阱**：`name` 字段字面量代码常量（未知值默认 remove）；form-encoded；同名拒/4–30 字符（§5.1）。
 - **DMM GraphQL schema 漂移**：raw_snapshot 留底，字段缺失按字段级回退处理，不失败任务。
@@ -490,4 +528,4 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ## 附录：ADR 索引
 
-`docs/adr/`：0001 Postgres-only；0002 设置在 DB、env 只 bootstrap；0003 两级聚合、DB 为真相；0004 先落库再加种；0005 side_effect 出箱表；0006 任务级状态用视图；0007 autorun 以 sh -c 共存；0008 固定目录布局无模板；0009 已初始化看配置就位、不看测试通过。
+`docs/adr/`：0001 Postgres-only；0002 设置在 DB、env 只 bootstrap；0003 两级聚合、DB 为真相；0004 先落库再加种；0005 side_effect 出箱表；0006 任务级状态用视图；0007 autorun 以 sh -c 共存；0008 固定目录布局无模板；0009 已初始化看配置就位、不看测试通过；0010 刮削字段图；0011 材料缺失回上游重取；0012 NFO 只写 `tag`；0013 双主题走 `light-dark()`；0014 女优订阅并进流水线不产 RSS；0015「订阅」上位词但两张表；0016 合集筛子两层且可收下。
