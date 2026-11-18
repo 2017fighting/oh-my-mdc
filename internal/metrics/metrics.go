@@ -91,6 +91,37 @@ func ObserveUpstream(recorder Recorder, upstream string, err error, permanent fu
 	recorder.RecordUpstream(upstream, result)
 }
 
+// 筛子命中的三种 reason（规格 §9 的 reason 标签取值，与迁移 00016 的 CHECK 同一套）。
+//
+// 名字放在指标包而不是订阅包：它们是**标签取值**（§9 定义指标与标签），而且这一族要
+// 恒列满三路——词表在这里，判据在订阅包里读它，免得两处各写一份字符串。
+const (
+	// ReasonNotSingle 是详情里的女优数 > 1（多人一起的）。
+	ReasonNotSingle = "not_single"
+	// ReasonCompilation 是类別带「精選綜合」（她自己的精选合集）。
+	ReasonCompilation = "compilation"
+	// ReasonLongForm 是类別带「4 小時以上作品」/「16 小時以上作品」（她自己的长合集）。
+	ReasonLongForm = "long_form"
+)
+
+// SkipReasons 是三种 reason 的固定顺序：文本输出恒列满，没命中过的也是 0。
+var SkipReasons = []string{ReasonNotSingle, ReasonCompilation, ReasonLongForm}
+
+// SubscriptionSkipRecorder 记一次筛子命中（规格 §9 的 mdc_subscription_skipped_total）。
+//
+// 与 Recorder 同一套写法：*Registry 是正式实现，nil 是合法的 no-op。
+type SubscriptionSkipRecorder interface {
+	RecordSubscriptionSkipped(reason string)
+}
+
+// ObserveSubscriptionSkipped 记一次命中；recorder 为 nil 时什么都不做。
+func ObserveSubscriptionSkipped(recorder SubscriptionSkipRecorder, reason string) {
+	if recorder == nil {
+		return
+	}
+	recorder.RecordSubscriptionSkipped(reason)
+}
+
 // StuckSource 按 kind 数驻留副作用（真实实现是 sidefx.Outbox.StuckByKind）。
 //
 // 指标包不直接依赖 sidefx：sidefx 依赖 telegram，而 telegram 依赖本包的 Recorder，
@@ -141,6 +172,8 @@ type Registry struct {
 
 	mu       sync.RWMutex
 	upstream map[counterKey]uint64
+	// skipped 数筛子命中（reason → 次数）。重启归零——counter 语义本该如此。
+	skipped map[string]uint64
 }
 
 // New 装配登记处。三个数据源都允许为 nil（测试场景）：前者按「还没跑过」渲染，
@@ -156,6 +189,7 @@ func New(loopStatus *loops.Registry, stuck StuckSource, incomplete IncompleteSou
 		startedAt:  time.Now(),
 		logger:     logger,
 		upstream:   make(map[counterKey]uint64),
+		skipped:    make(map[string]uint64),
 	}
 }
 
@@ -166,6 +200,16 @@ func (r *Registry) RecordUpstream(upstream string, result Result) {
 	}
 	r.mu.Lock()
 	r.upstream[counterKey{upstream: upstream, result: result}]++
+	r.mu.Unlock()
+}
+
+// RecordSubscriptionSkipped 实现 SubscriptionSkipRecorder。
+func (r *Registry) RecordSubscriptionSkipped(reason string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.skipped[reason]++
 	r.mu.Unlock()
 }
 
@@ -205,6 +249,7 @@ func (r *Registry) Write(ctx context.Context, w io.Writer) {
 
 	writeLoops(w, r.loopStatus, r.startedAt)
 	writeUpstreams(w, r)
+	writeSubscriptionSkips(w, r)
 	writeStuck(ctx, w, r.stuck, r.logger)
 	writeIncomplete(ctx, w, r.incomplete, r.logger)
 }
@@ -275,6 +320,38 @@ func writeUpstreams(w io.Writer, r *Registry) {
 	}
 }
 
+// writeSubscriptionSkips 写筛子的三路命中计数（规格 §9）。
+//
+// 三路恒列满：这一族是「判据还活着吗」的探针，缺样本的 0 与被计数的 0 在 PromQL 里
+// 不是同一件事（与上游那族同一理由）。
+func writeSubscriptionSkips(w io.Writer, r *Registry) {
+	fmt.Fprintln(w, "# HELP mdc_subscription_skipped_total 订阅筛子命中数，按判据分；长期只有 long_form 说明另外两条判据可能已失效。")
+	fmt.Fprintln(w, "# TYPE mdc_subscription_skipped_total counter")
+
+	r.mu.RLock()
+	counts := make(map[string]uint64, len(r.skipped))
+	for reason, value := range r.skipped {
+		counts[reason] = value
+	}
+	r.mu.RUnlock()
+
+	for _, reason := range SkipReasons {
+		fmt.Fprintf(w, "mdc_subscription_skipped_total{reason=\"%s\"} %d\n", escapeLabel(reason), counts[reason])
+	}
+
+	// 不认识的 reason 也要出数：漏掉一条生产上的命中比多一行难看得多。
+	var extras []string
+	for reason := range counts {
+		if !knownSkipReason(reason) {
+			extras = append(extras, reason)
+		}
+	}
+	sort.Strings(extras)
+	for _, reason := range extras {
+		fmt.Fprintf(w, "mdc_subscription_skipped_total{reason=\"%s\"} %d\n", escapeLabel(reason), counts[reason])
+	}
+}
+
 // writeStuck 写驻留副作用数。读库失败只让这一族缺席：抓取不该因为库抖了就整个失败。
 func writeStuck(ctx context.Context, w io.Writer, stuck StuckSource, logger *slog.Logger) {
 	if stuck == nil {
@@ -328,6 +405,15 @@ func knownUpstream(upstream string) bool {
 func knownResult(result Result) bool {
 	for _, candidate := range Results {
 		if candidate == result {
+			return true
+		}
+	}
+	return false
+}
+
+func knownSkipReason(reason string) bool {
+	for _, candidate := range SkipReasons {
+		if candidate == reason {
 			return true
 		}
 	}

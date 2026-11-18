@@ -5,6 +5,8 @@
  * 把 HTTP 形状翻成 TypeScript 类型，把非 2xx 变成 HttpError，别处不再手工拼 URL。
  */
 
+import type { SubscriptionSkip } from "./skips";
+
 export type SectionName =
   | "javdb"
   | "list_registry"
@@ -144,6 +146,29 @@ export type SubscriptionList = {
   ok: boolean;
   actresses: Subscription[];
 };
+
+/**
+ * 「最近被排掉的」（规格 §8.2/§8.4，GLOSSARY「跳过」）：订阅筛子排掉的、30 天内还没被
+ * 收下的作品。已收下的不进这个列表——它们已经不是被排掉的，而是待办。
+ */
+export type SubscriptionSkips = {
+  ok: boolean;
+  skips: SubscriptionSkip[];
+};
+
+/**
+ * 「最近被排掉的」一行：形状（含三条判据的名字）定义在 `lib/skips.ts`——那块折叠格的
+ * 文案与类型放在同一处，免得两边各写一份判据词表。
+ */
+export type { SubscriptionSkip } from "./skips";
+
+/** 「收下」的回执（§8.4）：outcome ∈ accepted / no_magnet。 */
+export type SubscriptionAccept = {
+  ok: boolean;
+  movie_id: string;
+  outcome: string;
+};
+
 
 /**
  * 回灌的两种请求形状（规格 §8.4）：{days} 或 {all:true}，二选一。
@@ -543,6 +568,16 @@ export const api = {
     request<{ ok: boolean; backfill_from: string | null }>(`/api/subscriptions/${id}/backfill`, {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+
+  /** 「最近被排掉的」：最近 30 天被筛子排掉、还没被收下的作品（GLOSSARY「跳过」）。 */
+  subscriptionSkips: (id: number) =>
+    request<SubscriptionSkips>(`/api/subscriptions/${id}/skips`),
+
+  /** 收下（GLOSSARY「收下」）：把一条跳过转成正常待办，重复收下幂等。 */
+  acceptSubscriptionSkip: (id: number, skipID: number) =>
+    request<SubscriptionAccept>(`/api/subscriptions/${id}/skips/${skipID}/accept`, {
+      method: "POST",
     }),
 
   /** 一键补录：删旧 NFO、现有视频原地入库，重刮由流水线接着做（GLOSSARY「补录」）。 */

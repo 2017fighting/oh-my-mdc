@@ -128,6 +128,8 @@ var credentialFreeTables = map[string]bool{
 	"actor":        true,
 	"task_actor":   true,
 	"subscription": true,
+	// 00016：跳过表（#48）。番号/标题/类別名都是上游公开内容，没有凭据。
+	"subscription_skip": true,
 }
 
 // settingsColumns 只留下落在设置域表里的列（八节各自的表）。

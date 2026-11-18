@@ -23,6 +23,7 @@ import {
   type SectionName,
   type SideEffect,
   type SubscriptionList,
+  type SubscriptionSkip,
   type TaskRow,
 } from "~/lib/api";
 
@@ -56,6 +57,9 @@ export default function Home() {
   const [sideEffects, setSideEffects] = React.useState<SideEffect[]>([]);
   const [backfill, setBackfill] = React.useState<BackfillScan | null>(null);
   const [subscriptions, setSubscriptions] = React.useState<SubscriptionList | null>(null);
+  const [subscriptionSkips, setSubscriptionSkips] = React.useState<
+    Record<number, SubscriptionSkip[] | null>
+  >({});
   const [pageSize, setPageSize] = React.useState(50);
   // 存错误本身而不是一句话：网关类失败（登录页、401/403）要拿它决定给什么动作。
   const [loadError, setLoadError] = React.useState<unknown | null>(null);
@@ -101,6 +105,7 @@ export default function Home() {
     setSideEffects(loaded.sideEffects);
     setBackfill(loaded.backfill);
     setSubscriptions(loaded.subscriptions);
+    setSubscriptionSkips(loaded.subscriptionSkips);
     setPageSize(loaded.pageSize);
     setLoadError(null);
     setLoadedAt(Date.now());
@@ -389,6 +394,7 @@ export default function Home() {
               sideEffects={sideEffects}
               backfill={backfill}
               subscriptions={subscriptions}
+              subscriptionSkips={subscriptionSkips}
               query={query}
               pageSize={pageSize}
               loadedAt={loadedAt}
@@ -624,6 +630,8 @@ type Dashboard = {
   sideEffects: SideEffect[];
   backfill: BackfillScan | null;
   subscriptions: SubscriptionList | null;
+  /** 「最近被排掉的」按订阅 id 分摊（null＝这一条读不到，那块折叠格就不渲染）。 */
+  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
   page: number;
   pageSize: number;
 };
@@ -651,9 +659,35 @@ async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
     sideEffects: sideEffects.side_effects,
     backfill,
     subscriptions,
+    subscriptionSkips: await fetchSubscriptionSkips(subscriptions),
     page: taskList.page,
     pageSize: taskList.page_size,
   };
+}
+
+/**
+ * fetchSubscriptionSkips 读每一条订阅「最近被排掉的」（§8.2 的折叠格，GLOSSARY「跳过」）。
+ *
+ * 一条订阅一个请求，而不是把跳过数塞进订阅行：那个列表形状早就定下来了，而这一块是
+ * 一个带展开面的东西（行里连标题与日期都有）。第一条订阅都没有时零请求。
+ *
+ * 单条读不到只让**那一条**的折叠格不渲染（null）：跳过表是附加面，一个假的「0 条」
+ * 会让人以为判据从没命中过——那正是这块要证明的事。
+ */
+async function fetchSubscriptionSkips(
+  subscriptions: SubscriptionList | null,
+): Promise<Record<number, SubscriptionSkip[] | null>> {
+  const rows = subscriptions?.actresses ?? [];
+  const entries = await Promise.all(
+    rows.map(async (row) => {
+      try {
+        return [row.id, (await api.subscriptionSkips(row.id)).skips] as const;
+      } catch {
+        return [row.id, null] as const;
+      }
+    }),
+  );
+  return Object.fromEntries(entries);
 }
 
 /**
