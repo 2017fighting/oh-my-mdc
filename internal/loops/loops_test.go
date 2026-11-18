@@ -1,9 +1,13 @@
 package loops_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 )
 
@@ -105,4 +109,60 @@ func TestAllListsTheFourLoops(t *testing.T) {
 			t.Errorf("All[%d] = %q, want %q", i, loops.All[i], want[i])
 		}
 	}
+}
+
+// TestGuardDoesNotStarveThePool 钉住 2026-11-18 的生产事故：守锁连接不许从池里取。
+//
+// 事故的形状：pgxpool 默认池容量是 max(4, NumCPU)，4 核节点算出 4；四个循环各拿一条
+// 池内连接抢 advisory lock 并整轮握着，池就此归零 → /readyz 的 Ping 永远等不到连接，
+// pod 卡在启动探针上（`db_unavailable: context deadline exceeded`）。三条循环的时代
+// 只是恰好剩一条能用。池容量钉成 1 是同一件事的最小化：只要守锁还在池里，这里必挂。
+func TestGuardDoesNotStarveThePool(t *testing.T) {
+	_, dsn := dbtest.Open(t)
+
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("解析 DSN: %v", err)
+	}
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("建池: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	const key int64 = 9029001
+	release, locked, err := loops.Guard(context.Background(), pool, key, "test", nil)
+	if err != nil || !locked {
+		t.Fatalf("Guard = (%v, %v), want 抢到且无错", locked, err)
+	}
+
+	// 失败路径上也要把锁/连接还回去：旧实现下池被占满，pgxpool.Close 会一直等
+	// 还没归还的连接，测试会挂死而不是失败——挂死比红更难查，所以这里做一层幂等释放。
+	released := false
+	releaseOnce := func() {
+		if !released {
+			released = true
+			release()
+		}
+	}
+	t.Cleanup(releaseOnce)
+
+	// 守锁期间池仍须可用：这就是事故当时拿不到的那一条连接。
+	acquireCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := pool.Acquire(acquireCtx)
+	if err != nil {
+		t.Fatalf("守锁期间取不到池内连接（池被守锁连接占满了）: %v", err)
+	}
+	conn.Release()
+
+	releaseOnce()
+
+	// 释放之后锁真的还回去了：同一个 key 能再抢到。
+	release2, locked2, err := loops.Guard(context.Background(), pool, key, "test", nil)
+	if err != nil || !locked2 {
+		t.Fatalf("释放后再抢 = (%v, %v), want 抢到且无错", locked2, err)
+	}
+	release2()
 }

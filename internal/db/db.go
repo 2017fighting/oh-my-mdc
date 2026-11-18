@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"runtime"
 	"sort"
 	"time"
 
@@ -51,6 +52,16 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 		return nil, fmt.Errorf("解析 Postgres DSN: %w", err)
 	}
 	cfg.ConnConfig.ConnectTimeout = connectTimeout
+	// 池容量显式定下来，不吃默认值：pgxpool 的默认是 max(4, NumCPU)，而本服务要同时
+	// 服务面板请求、指标采集与四条循环里的取数/落库。2026-11-18 的生产事故就是默认值
+	// 在 4 核节点上算出 4，而四条循环的 advisory-lock 连接又把池占满（那件事已在
+	// loops.Guard 里从根上修掉：守锁改用池外专用连接，这里只是给业务留足余量）。
+	if cfg.MaxConns < 8 {
+		cfg.MaxConns = 8
+	}
+	if n := int32(2 * runtime.NumCPU()); n > cfg.MaxConns {
+		cfg.MaxConns = n
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
