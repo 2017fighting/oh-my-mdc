@@ -1,5 +1,5 @@
-// Package loops 记三条循环（poll / reconcile / sidefx）的健康位：最近一次跑的时间与成败、
-// 最近一次成功的时间、以及 ok/error 的迭代计数。
+// Package loops 记四条循环（poll / reconcile / sidefx / subscription）的健康位：
+// 最近一次跑的时间与成败、最近一次成功的时间、以及 ok/error 的迭代计数。
 //
 // 面板的「循环健康」与规格 §9 的 mdc_loop_* 指标都读它。它是进程内状态而不是数据库
 // 状态：循环活在进程里，进程重启本来就该显示「还没跑过」。
@@ -18,15 +18,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// 三条循环的名字（规格 §6.2）。
+// 四条循环的名字（规格 §6.2）。subscription 是女优订阅的独立循环（#47）：
+// 它有自己的 advisory lock 与节拍，一位女优的接口挂掉不该拖死清单轮询。
 const (
-	Poll      = "poll"
-	Reconcile = "reconcile"
-	Sidefx    = "sidefx"
+	Poll         = "poll"
+	Reconcile    = "reconcile"
+	Sidefx       = "sidefx"
+	Subscription = "subscription"
 )
 
-// All 是三条循环的固定顺序：指标与面板都按它列，免得顺序随机。
-var All = []string{Poll, Reconcile, Sidefx}
+// All 是四条循环的固定顺序：指标与面板都按它列，免得顺序随机。
+var All = []string{Poll, Reconcile, Sidefx, Subscription}
 
 // Iterations 是一条循环的迭代计数（规格 §9 的 result=ok|error）。
 //
@@ -54,7 +56,7 @@ type Status struct {
 	RunningSince *time.Time
 }
 
-// Registry 是三条循环健康位的进程内登记处。
+// Registry 是四条循环健康位的进程内登记处。
 type Registry struct {
 	mu     sync.RWMutex
 	status map[string]Status
@@ -62,7 +64,7 @@ type Registry struct {
 
 // NewRegistry 建一个空的登记处。
 func NewRegistry() *Registry {
-	return &Registry{status: make(map[string]Status, 3)}
+	return &Registry{status: make(map[string]Status, len(All))}
 }
 
 // Start 标记一条循环开始一轮：抢到锁、真的要跑了才调（与 Iterations 同一口径，
@@ -126,7 +128,7 @@ func (r *Registry) Health(name string) Status {
 
 // Guard 抢一条循环的 pg advisory lock，返回释放函数与是否抢到。
 //
-// 单飞是三条循环共有的不变式（规格 §4.4）：防 Flux 滚动更新时新旧 pod 重叠跑同一轮。
+// 单飞是四条循环共有的不变式（规格 §4.4）：防 Flux 滚动更新时新旧 pod 重叠跑同一轮。
 // 它用一条专用连接持有锁，释放时先 unlock 再还连接；释放本身用独立 ctx，
 // 进程被终止时也要把锁还回去，别让下一轮空等。
 //

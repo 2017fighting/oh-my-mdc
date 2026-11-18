@@ -124,6 +124,18 @@ func (i *Integration) Lists(ctx context.Context, token string) ([]appapi.List, e
 	return i.client(token).Lists(ctx)
 }
 
+// CollectedActresses 读用户在 App 里收藏的演员名单（#50「从 App 收藏导入」）。
+//
+// 需要 token：匿名调用实测回 JWTVerificationError，所以没保存时本地就报 business、
+// 不白打一次上游（与 Lists 同一口径——空名单会被读成「我一位都没收藏」，那是另一种事实）。
+// 翻页、去重与截断探针都在传输层（appapi.Client.CollectedActors）：这一层只递 token。
+func (i *Integration) CollectedActresses(ctx context.Context, token string) (appapi.CollectedActors, error) {
+	if strings.TrimSpace(token) == "" {
+		return appapi.CollectedActors{}, &appapi.ValidationError{Message: "还没保存 JavDB token"}
+	}
+	return i.client(token).CollectedActors(ctx)
+}
+
 // CreateList 代建一张清单并返回新 id（向导「一键创建」）。
 //
 // 名字与描述的空值在这里兜一次（默认「想看清单」/「oh-my-mdc 自动创建」）：

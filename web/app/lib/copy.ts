@@ -84,7 +84,7 @@ export const CONFUSABLES: GlossaryEntry[] = [
 export const WIZARD_CONFUSABLES: GlossaryEntry[] = [
   {
     term: "主线三件套",
-    note: "门禁六判据：JavDB token 已保存、清单登记、清单验读（清单步点一次「测试读取」）、qBittorrent 可连、Jellyfin 可写、媒体库目录在这台机器上可见。齐了才算「已初始化」，三条循环才开始跑；可选的 M-Team / AI 翻译 / Telegram 缺席只降级对应能力。",
+    note: "门禁六判据：JavDB token 已保存、清单登记、清单验读（清单步点一次「测试读取」）、qBittorrent 可连、Jellyfin 可写、媒体库目录在这台机器上可见。齐了才算「已初始化」，四条循环才开始跑；可选的 M-Team / AI 翻译 / Telegram 缺席只降级对应能力。",
   },
   {
     term: "清单 id 与名字",

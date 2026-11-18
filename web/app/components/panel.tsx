@@ -5,6 +5,8 @@ import { AlertTriangle, ChevronRight, CircleDashed, Loader2, Plus, RefreshCw, Ro
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
+import { PANEL_ACTION_SIZE, ROW_ACTION_SIZE, RowAction } from "~/components/row-action";
+import { SubscriptionPanel } from "~/components/subscriptions";
 import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
@@ -26,6 +28,8 @@ import {
   remedyForStalled,
   settingsLabel,
 } from "~/lib/remedy";
+import type { SubscriptionSkip } from "~/lib/skips";
+import type { Receipt, ReceiptDraft, RetryNotice } from "~/lib/receipts";
 import {
   api,
   notifyEventLabels,
@@ -39,6 +43,7 @@ import {
   type Overview,
   type SideEffect,
   type SideEffectKind,
+  type SubscriptionList,
   type TaskDetail,
   type TaskEvent,
   type TaskRow,
@@ -56,17 +61,18 @@ import {
 /** 面板的筛选与页号：住在地址栏里（`?q=&state=&page=`），刷新不丢。 */
 export type PanelQuery = { page: number; q: string; state: TaskState | "" };
 
-/**
- * 行内动作的唯一尺寸：md 以下 44px 热区 + 13px 字，md 起 28px + 12px。
- *
- * 以前这串类名在本文件与 routes/home.tsx 里各抄了十几遍，「44px 是拇指热区」这条规则
- * 只活在散文里，于是最先漂掉的是空状态里的两颗「清除筛选」（28px）。
- * 收成常量之后，改规则就是改这一行，漏抄就不可能再发生。
- */
-export const ROW_ACTION_SIZE = "h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs";
+/** 四条循环的名字与它们的展示名（规格 §6.2）：面板与侧栏都按这一份说话。 */
+export type LoopName = "poll" | "reconcile" | "sidefx" | "subscription";
 
-/** 面板与错误块里的主按钮：比行内动作高 4px（md 起 32px），字号同族。 */
-export const PANEL_ACTION_SIZE = "h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm";
+export const LOOP_LABELS: Record<LoopName, string> = {
+  poll: "清单轮询",
+  reconcile: "对账",
+  sidefx: "副作用",
+  subscription: "女优订阅",
+};
+
+/** LOOP_ORDER 是四条循环的固定顺序：与后端 loops.All 一致（指标与面板同源）。 */
+export const LOOP_ORDER: LoopName[] = ["poll", "reconcile", "sidefx", "subscription"];
 
 /**
  * 外壳的 inert 是共享的：抽屉与帮助浮层都可能要求它，谁也不能替另一半撤掉。
@@ -83,6 +89,9 @@ export function Panel({
   attention,
   sideEffects,
   backfill,
+  subscriptions,
+  subscriptionSkips,
+  javdbConfigured,
   query,
   pageSize,
   loadedAt,
@@ -101,12 +110,29 @@ export function Panel({
   sideEffects: SideEffect[];
   /** 未补录目录的实时扫描（GLOSSARY「补录」）；null = 读不到，整块不渲染。 */
   backfill: BackfillScan | null;
+  /** 订阅区（女优订阅，§6.4）；null = 读不到，整块不渲染。 */
+  subscriptions: SubscriptionList | null;
+  /**
+   * 「最近被排掉的」按订阅 id 分摊（GLOSSARY「跳过」）；某一条是 null＝那一条读不到，
+   * 于是那块折叠格不渲染——一个假的 0 会让人以为判据从没命中过。
+   */
+  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
+  /**
+   * JavDB 那一节配好了没有（token 已保存）。「从 App 收藏导入」要凭据才读得到上游
+   * （收藏名单匿名不可用，§13），没配时那入口整颗禁掉并写出原因——不是点了才静默失败。
+   */
+  javdbConfigured: boolean;
   query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
   loadedAt: number | null;
-  /** 三条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
-  intervals: { poll: string | null; reconcile: string | null; sidefx: string | null };
+  /** 四条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
+  intervals: {
+    poll: string | null;
+    reconcile: string | null;
+    sidefx: string | null;
+    subscription: string | null;
+  };
   /** 自动复读的间隔（毫秒）；null = 读不到轮询间隔，宁可不自动读、也不编一个默认值。 */
   autoRefreshMs: number | null;
   /** 帮助浮层开着没有。状态住在 routes/home.tsx：侧栏那颗入口也在那边。 */
@@ -440,6 +466,13 @@ export function Panel({
           onRefresh={onRefresh}
         />
 
+        <SubscriptionPanel
+          subscriptions={subscriptions}
+          subscriptionSkips={subscriptionSkips}
+          javdbConfigured={javdbConfigured}
+          actions={{ onReceipt: receiptsState.push, onRefresh }}
+        />
+
         <Card>
           <CardHeader>
             <CardTitle as="h2">任务</CardTitle>
@@ -622,9 +655,9 @@ export function Panel({
             <CardTitle as="h2">循环健康</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-1.5 dense">
-            {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
+            {(["poll", "reconcile", "sidefx", "subscription"] as const).map((loop) => {
               const health = overview?.loops?.[loop];
-              const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
+              const label = LOOP_LABELS[loop];
               const interval = intervals[loop];
               // 四样数据一个优先级：正在跑 → 上轮 → 上次成功（连败时才可见）→ 迭代计数（title）。
               // 「正在跑」是「机器此刻醒着」的最直接证据；上轮的成败在跑着时退到第二行。
@@ -1349,16 +1382,6 @@ function NeedsAttention({
   );
 }
 
-/** ReceiptDraft 是一条新回执（还没编号）：番号或待办名 + 结局 + 一句后果。 */
-type ReceiptDraft = RetryNotice & {
-  title: string;
-  /** 回执说的那个动作本身：任务侧是「重试」，副作用侧是「重发」。 */
-  verb?: "重试" | "重发";
-};
-
-/** Receipt 是已经发出的一条回执。 */
-type Receipt = ReceiptDraft & { id: number; at: number };
-
 /** 回执留 3 条、活 10 分钟：足够看见刚才那几下，又不至于把卡片变成一块日志。
  *  批量重试时限额临时放宽（见 NeedsAttention.runBatch），但永不超天花板 8。 */
 const RECEIPT_LIMIT = 3;
@@ -1792,10 +1815,6 @@ function versionNames(group: FailureGroup): Record<string, string> {
   );
 }
 
-/** RetryNotice 是一次任务重试的结果提示：成功用 ok，被拒/失败用 warn。
- *  parts 是逐版结论：回执按它换行，text 是同一句话的单行串（播报与抽屉用）。 */
-type RetryNotice = { tone: "ok" | "warn"; text: string; parts?: string[] };
-
 /** RetryPlan 是一次重试的作用域：叫什么名字、只动哪几条、它们各自叫什么。 */
 type RetryPlan = {
   /** 回执上的名字（番号）；不给就用 movie_id。 */
@@ -2185,23 +2204,6 @@ function sideEffectKindLabel(effect: SideEffect): string {
     default:
       return effect.kind;
   }
-}
-
-/**
- * RowAction 是行内动作的唯一尺寸：md 以下 36px 热区 + 13px 字，md 起收回 28px + 12px。
- *
- * 以前这段类名在本文件里抄了十遍，DESIGN 的「md 以下 h-9 / 13px」只以散文存在；
- * 收成一个组件之后，改规则就是改这一行。
- */
-function RowAction({ className, variant = "outline", ...props }: React.ComponentProps<typeof Button>) {
-  return (
-    <Button
-      variant={variant}
-      // 手机上一律 44px 热区：值班时是单手刷屏，36px 的行内动作实测要瞄。
-      className={cn(ROW_ACTION_SIZE, className)}
-      {...props}
-    />
-  );
 }
 
 const STATE_FILTERS: { value: TaskState | ""; label: string }[] = [
@@ -3078,14 +3080,13 @@ type LoopLine = { label: string; text: string; failing: boolean };
  */
 function loopLines(
   overview: Overview | null,
-  intervals: { poll: string | null; reconcile: string | null; sidefx: string | null },
+  intervals: Record<LoopName, string | null>,
   now: number,
 ): LoopLine[] {
-  const rows: { key: "poll" | "reconcile" | "sidefx"; label: string }[] = [
-    { key: "poll", label: "清单轮询" },
-    { key: "reconcile", label: "对账" },
-    { key: "sidefx", label: "副作用" },
-  ];
+  const rows: { key: LoopName; label: string }[] = LOOP_ORDER.map((key) => ({
+    key,
+    label: LOOP_LABELS[key],
+  }));
   return rows.map(({ key, label }) => {
     const health = overview?.loops?.[key];
     // 读不到概览时不说「还没跑过」：那是一个我们并不知道的事实。

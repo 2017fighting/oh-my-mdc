@@ -93,8 +93,8 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 
 ### 4.5 订阅域（ADR-0015，迁移 00015）
 
-- **`subscription`**：`id bigint identity PK`、`kind text CHECK ('actress') NOT NULL DEFAULT 'actress'`（将来加番号/全站来源就加在这里，不再起第三张表）、`actress_actor_id text NOT NULL REFERENCES actor (javdb_actor_id)`（外键立得起来的前提是建订阅时 upsert 一行 actor：`name` 取上游、`gender`/`avatar_url` 先 NULL 等刮削补）、`watermark_date date NULL`（上一轮见过的最晚发行日；新订阅 = 建订阅当天）、`lookback_days int NOT NULL DEFAULT 30`、`backfill_from date NULL`（回灌设置的取数下界，窗口扫完清 NULL）、`enabled bool NOT NULL DEFAULT true`、`created_at`、`updated_at`，`UNIQUE (kind, actress_actor_id)`（同一位女优不会订两遍）。**行永不删除**：面板只有停用/恢复，`task.subscription_id` 的外键与历史因此永远可解。
-- **`subscription_skip`**（GLOSSARY「跳过」）：`id bigint identity PK`、`subscription_id bigint NOT NULL REFERENCES subscription`、`movie_id text`、`number text`、`title text DEFAULT ''`、`release_date date NULL`、`reason text CHECK ('not_single','compilation')`、`skipped_at timestamptz DEFAULT now()`、`accepted_at timestamptz NULL`；**部分唯一索引** `UNIQUE (subscription_id, movie_id) WHERE accepted_at IS NULL`（回看窗口会让同一部作品每轮再现，落行必须幂等）；超过 30 天的行由订阅循环清掉。
+- **`subscription`**：`id bigint identity PK`、`kind text CHECK ('actress') NOT NULL DEFAULT 'actress'`（将来加番号/全站来源就加在这里，不再起第三张表）、`actress_actor_id text NOT NULL REFERENCES actor (javdb_actor_id)`（外键立得起来的前提是建订阅时 upsert 一行 actor：`name` 取上游、`gender`/`avatar_url` 先 NULL 等刮削补）、`watermark_date date NULL`（上一轮见过的最晚发行日；新订阅 = 建订阅当天，且封顶到今天）、`floor_date date NOT NULL DEFAULT CURRENT_DATE`（起追日：这条订阅**永不看她这一天之前**的作品，建订阅当天定下，只有回灌能把它往前挪）、`lookback_days int NOT NULL DEFAULT 30`、`backfill_from date NULL`（回灌设置的取数下界，窗口扫完清 NULL）、`enabled bool NOT NULL DEFAULT true`、`created_at`、`updated_at`，`UNIQUE (kind, actress_actor_id)`（同一位女优不会订两遍）。**行永不删除**：面板只有停用/恢复，`task.subscription_id` 的外键与历史因此永远可解。
+- **`subscription_skip`**（GLOSSARY「跳过」，00016）：`id bigint identity PK`、`subscription_id bigint NOT NULL REFERENCES subscription`、`movie_id text`、`number text`、`title text DEFAULT ''`、`release_date date NULL`、`reason text CHECK ('not_single','compilation','long_form')`（三条判据，与 §9 的 `reason` 标签同一套词）、`skipped_at timestamptz DEFAULT now()`、`accepted_at timestamptz NULL`；**部分唯一索引** `UNIQUE (subscription_id, movie_id) WHERE accepted_at IS NULL`（回看窗口会让同一部作品每轮再现，落行必须幂等）。超过 30 天**没被收下**的行由订阅循环清掉；已收下的行留着——它既是「用户裁决过这一部」的记录，也是同一部作品不再被重新排一遍的依据。
 - **`actor` 词义扩宽**：从「刮削沉淀的演员」扩为「已知的演员」——订阅先建行、刮削再补 `gender`/`avatar_url`；`task_actor` 与 NFO 的「女优排前」不受影响（依赖 `gender`，未知时按中性顺序）。
 
 ## 5. 集成契约
@@ -113,7 +113,7 @@ Go 单二进制内嵌前端（Vite + React Router SPA + Tailwind + shadcn/ui）�
 | 读清单项 | `GET /api/v1/movies/tags?filter_by=0:l:{list_id}`（zone=0） | 每项带 `id`（=movie_id）+ `number`（番号）+ movieSlim；`page`/`limit` 有效，无总页数，**空页即止**；匿名可读（token 在场则携带） |
 | 建清单 | `POST /api/v1/lists` | **form-encoded**（JSON 被拒）；`name` 必填 4–30 字符、**同名拒**（`名稱 您已創建了同名清單`）；`description` 可选；响应 `data.id` 即新清单 id |
 | 增/删清单项 | `POST /api/v1/lists/{list_id}/movie_actions` | form **`name`=`"add"`|`"remove"`** + `movie_id`；⚠️ 动作不在 `action` 字段（被忽略），⚠️ **未知/缺失 `name` 默认执行 remove**——取值必须是代码常量，绝不接用户输入 |
-| 磁力候选 | `GET /api/v1/movies/{movie_id}/magnets` | `hash/cnsub/size(MiB)/hd/created_at`；匿名可读 |
+| 磁力候选 | `GET /api/v1/movies/{movie_id}/magnets` | `hash/cnsub/size(MiB)/hd/created_at`；**匿名已不可读**：2026-11 实测匿名 `JWTVerificationError`（§13），token 在场可用 |
 
 - 顺带实测可用（备用）：`PATCH`/`DELETE /api/v1/lists/{id}`（改名/删清单）。
 - 幂等（#16 实测）：重复 add、重复 remove、remove 不存在的 movie 全部 `success:1`；add 不存在的 movie → `success:0` + Rails 校验泄漏。成功响应 `data` 恒 null。
@@ -251,11 +251,21 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 第二个待办来源。它只负责「产出一批待办作品」，之后与清单轮询走同一段 ingest（定源 → 先落库 → 加种），所以本节只写订阅自己的规则。
 
-- **名单与身份**：订阅身份是 `actor.javdb_actor_id`（不是名字——名字只是快照，改名不该断订阅）。面板订阅区两种添加方式：搜索上游女优；或从 App 收藏的女优列表（`GET /api/v1/users/collected_actors`，需 token）勾选导入。同 id 重复添加幂等放行。
-- **取数**：`GET /api/v1/movies/tags?filter_by=0:a:{id}{:s}:&sort_by=release&order_by=desc&page=N`，匿名可读；掩码按上游段规则构造、只写到合法段（**第 5 段非空且后面还有段 = 上游静默丢年份**那类坑，照 javdb_rss 的实测记录处理）。空页即止。**唯一语义参数是 `main=s`**；`c`/`tags`/`year`/`filter_by` 原样透传一律不搬（ADR-0016）。
-- **筛子**（ADR-0016）：上游 `main=s` → 通过者拉一次 `/api/v4/movies/{id}`，**详情只排类別「精選綜合」**；`actors` 数 > 1 **不排**（多女优共演的单体作品仍要）。标签 id 不硬编码：按名字去 `GET /api/v2/tags?type=0` 的词表里查，进程内缓存，重启重取。`main=s` 的可信度见 §13 的探针。
-- **水位线与回看**（GLOSSARY「水位线 / 回看窗口 / 回灌」）：取数下界 = `LEAST(watermark_date − lookback_days, COALESCE(backfill_from, +∞))`；一轮跑完把 `watermark_date` 推成「这轮见过的最晚 `release_date`」。新订阅首轮 `watermark_date = 建订阅当天`（＝不回灌历史）。回灌 = 设 `backfill_from = watermark_date − N`，扫完清 NULL。**水位线只由「见过」推进，不由「入队成功」推进**：出水即无磁力的作品靠回看窗口下轮重见，与 §6.1「磁力为空不落行、下轮重查」是同一条承诺。
-- **节流与去重**：每轮最多建 `subscription_max_adds`（默认 10）个任务，余量留到下一轮且 `backfill_from` 不被清；已有任务的 `movie_id` 不再查源（§6.1 去重行，跨来源白送）——同一部作品既在清单又在某位女优的新作里，只会有一条任务。
+- **名单与身份**：订阅身份是 `actor.javdb_actor_id`（不是名字——名字只是快照，改名不该断订阅）。面板订阅区两种添加方式：**贴 id / 女优页链接**（上游没有按名字搜女优的端点，§13 实测）；或从 App 收藏的女优列表（`GET /api/v1/users/collected_actors`，需 token）勾选导入。同 id 重复添加幂等放行。
+- **取数**：`GET /api/v1/movies/tags?filter_by=0:a:{id}&sort_by=release&order_by=desc&page=N`，匿名可读；掩码按上游段规则构造、只写到合法段（**第 5 段非空且后面还有段 = 上游静默丢年份**那类坑，照 javdb_rss 的实测记录处理）。空页即止。**不带 `s`**：§13 实测 `s` 是「只留恰好一位女优出演」的准确判据，但它在上游**静默**地排——被排掉的作品进不了跳过表，也就没有「收下」这个出口。筛子因此整体下沉到详情层（ADR-0017），取数只取全集；`c`/`tags`/`year` 原样透传一律不搬。
+- **筛子**（ADR-0017，§13 探针结论）：全集统一拉一次 `/api/v4/movies/{id}`，三条判据各自落 `subscription_skip`——`actors` 数 > 1 → `not_single`（多人一起的）；类別「精選綜合」→ `compilation`；类別「4 小時以上作品」/「16 小時以上作品」→ `long_form`（她自己的多部合集，见 §13 的漏网实测）。标签 id 不硬编码：按名字去 `GET /api/v2/tags?type=0` 的词表里查，进程内缓存，重启重取（该端点 2026-11 起要 token，§13）。
+- **水位线、起追日与回看**（GLOSSARY「水位线 / 起追日 / 回看窗口 / 回灌」）：取数下界 = `GREATEST(floor_date, LEAST(watermark_date − lookback_days, COALESCE(backfill_from, +∞)))`。一轮跑完把 `watermark_date` 推成「这轮见过的最晚 `release_date`」并**封顶到今天**（`LEAST(GREATEST(COALESCE(watermark_date, today), newest), today)`，理由见 §13 的预告片）。
+  - **起追日**（`floor_date`）是最外层那一层，也是「新订阅不追历史」的机制本身：建订阅当天定下，此后永不自动回看更早的作品；只有**回灌**能把它往前挪，且挪了就不退回去。代价要说清：**一部比她订阅更早发行、后来才出水（拿到磁力）的作品永远不会被捡起**，除非点一次回灌——「出水晚」不再等于「总会被捡到」。
+  - **回看窗口**（`lookback_days`，默认 30）只在起追日之**后**那一段里回看：它让「出水时还没磁力」的作品下一轮仍被看见（磁力为空不落行那条规则的配套），不是补历史的手段。
+  - **回灌** = 把 `floor_date` 与 `backfill_from` 一并往回拨 N 天（`floor_date = LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) − N)`，`backfill_from` 设为同一天），`all` 则是 `1970-01-01`（＝没有下界）。回灌窗口扫完只清 `backfill_from`，起追日留在原处。N 的合法与否看**落点比不比起追日更早**，不看它比 `lookback_days` 大多少：起追日是建订阅当天，所以对一条新订阅来说「回灌 30 天」是它唯一能把窗口挪回三十天前的动作（§8.4）。
+  - **水位线只由「见过」推进，不由「入队成功」推进**：出水即无磁力的作品靠回看窗口下轮重见，与 §6.1「磁力为空不落行、下轮重查」是同一条承诺。
+- **节流与去重**：每轮最多建 `subscription_max_adds`（默认 10）个任务，余量留到下一轮且 `backfill_from` 不被清；已有任务的 `movie_id` 不再查源（§6.1 去重行，跨来源白送）——同一部作品既在清单又在某位女优的新作里，只会有一条任务。限量只管「订阅再往下产、入队」，不挡清单轮询与已建任务的推进。
+  - **范围**：这个预算是**一轮所有订阅共享**的，不是每条订阅各一份（按条给预算，场上一有 N 位女优就变成 N 倍，限量就白设了）。
+  - **顺序**：按发行日**从旧到新**（同一天按 `movie_id`），跨订阅统一排队。下界（水位线 − 回看窗口 / 回灌下界）只会往前挪，离它最近的先做，才不会被余量轮挤到窗口外。
+  - **余量不落状态**：留在门外的作品什么都不写，下一轮的窗口原样再取一遍；`backfill_from` 只在「窗口扫完 **且** 这条订阅没有余量」时才清——提前清会把下界跳回水位线 − 回看窗口，被留下的老作品当场掉出窗口。
+  - **预算数的是建出来的任务**，不是递进 ingest 的作品：窗口里本来就看得到上一轮建过的作品（它们零写入），「磁力为空不落行、下轮重查」的那些也不该占预算——否则每轮都被没有磁力的老作品吃光，窗口就永远排不空。
+  - **先筛后排队**：筛子（ADR-0017）在入队之**前**——被排掉的作品根本不进这一轮的队列，既不建任务也不占预算。详情读不到的那些也不算「留在门外」（它们没被看过，只是被重新递一遍），下一轮原样重取。
+  - **收下不排在预算后面**：`收下` 是人的显式裁决（与 `POST /api/subscriptions/{id}/skips/{skip_id}/accept` 同一条 ingest），所以循环里万一撞见一条已被收下的跳过，也照常入队，不因为余量走完而留到下一轮，也不占别人的名额。
 - **来源记录**：订阅建的任务 `list_id` 为 NULL（没有清单项可删，故 list_removal 天然不触发），`subscription_id` 记这一行（§4.1）。
 - **门禁**：同 poll（三件套齐 + 未暂停）；女优订阅**不进** initialized 判据——一条订阅都没有时循环空转即返回。
 - **生命周期**：只有停用/恢复，没有删除；停用只停追新，已建任务照走完，跳过行按 30 天自然过期。
@@ -321,7 +331,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ### 8.2 面板（表格为主体，要动手的事置顶）
 
-区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ **「未补录目录」区**（#43：媒体库里不归本项目的旧目录逐行一键补录，空区不渲染，GLOSSARY「补录」）→ **「订阅」区**（女优订阅列表：actor 快照、水位线、带来 N 部、启停、回灌；区内的「最近被排掉的」折叠格带计数徽标与逐行「收下」）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
+区块顺序：统计行（下载中/加工中；已入库降级到右端与新鲜度同处）→ **「需要人工」告警区置顶**（`failed(phase,reason)` + 停滞 + 驻留副作用，行内重试/重发按钮）→ **「待补齐」区**（#42：已入库但四面判据有缺口的任务聚合成区，逐部一键强制重刮，四面补齐自动摘标；不是状态、不算需人工）→ **「未补录目录」区**（#43：媒体库里不归本项目的旧目录逐行一键补录，空区不渲染，GLOSSARY「补录」）→ **「订阅」区**（只列已订阅的女优——上游没有搜名字的端点，所以没有搜索框，添加入口是「贴 id / 女优页链接」与「从 App 收藏导入」；每行 actor 快照、水位线、带来 N 部、启停、回灌；区内的「最近被排掉的」折叠格带计数徽标与逐行「收下」）→ 稠密任务表（一行一任务按 movie_id 聚合，版本以小 chip 展示）→ 底部副作用队列 + 循环健康 + 最近事件。停滞行按最近一条停滞告警认；人工重试重新加种之后那条旧告警退场（#31）。
 
 任务详情 = **右侧抽屉**，保持精简：版本列表（infohash、来源、标签、失败原因）+ 事件时间线 + 重试/强制重刮（force）。**不看刮削字段与 provenance**（v1 不做，不留占位）。
 
@@ -371,14 +381,13 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 | 端点 | 语义 |
 |---|---|
-| `GET /api/subscriptions` | `{actresses:[{id, actor:{javdb_actor_id,name,avatar_url,gender}, watermark_date, lookback_days, backfill_from, enabled, tasks_count, pending_count}]}`；`tasks_count` 数 `task.subscription_id` |
+| `GET /api/subscriptions` | `{actresses:[{id, actor:{javdb_actor_id,name,avatar_url,gender}, watermark_date, lookback_days, backfill_from, enabled, tasks_count, pending_count, deferred_count}]}`；`tasks_count` 数 `task.subscription_id`；`pending_count` 数这批里还在等加种的版本，`deferred_count` 是「还有 N 部待入队」（§6.4 的每轮限量，循环每轮末尾现算，不落库） |
 | `POST /api/subscriptions` | `{actress_id}` 或 `{javdb_url}`：解析 id → upsert actor → 建订阅；同 id 重复 → `outcome=duplicate`（幂等 200）。错误信封：形状 400 `validation_error`、id 读不到 502 `upstream_error`、门禁未开 409 `gate_closed` |
 | `POST /api/subscriptions/{id}/enable` / `disable` | 启停；停用只停追新，不碰任务与跳过行 |
-| `POST /api/subscriptions/{id}/backfill` | `{days}`：设 `backfill_from = watermark_date − days`；回执 `{backfill_from}` |
+| `POST /api/subscriptions/{id}/backfill` | `{days}` 或 `{all: true}`（二选一）：把起追日与回灌下界一并往回拨 `days` 天（落点 = `LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) − days)`），`all` 则拨到 `1970-01-01`（＝没有下界）；回执 `{backfill_from}`。`days` 必须是 **≥ 1 的整数**（上限 3650）。**只拒真的空操作**：落点不比起追日更早（`COALESCE(watermark_date, CURRENT_DATE) − days >= floor_date`）时 `400 validation_error`，message 说清「这一段已经覆盖了」。`days` 与 `lookback_days` 的大小**不再是判据**——回看窗口只在起追日之后游走，盖不住回灌那一段；新订阅的起追日是建订阅当天，所以「回灌 30 天」正是把窗口拨回三十天前的那一下（#47/#49 的验收就按 30 天写） |
 | `GET /api/subscriptions/{id}/skips` | 最近 30 天跳过：`{skips:[{id, movie_id, number, title, release_date, reason, skipped_at}]}` |
 | `POST /api/subscriptions/{id}/skips/{skip_id}/accept` | 收下：建任务并入队（走同一 ingest），回执 `{movie_id, outcome}`；重复收下幂等 |
-| `GET /api/javdb/actress-search?q=` | 女优检索（上游端点待探针确认，§13）；不通时 501 `unsupported`，面板退到「贴 id / 女优页链接」 |
-| `GET /api/javdb/collected-actors` | App 收藏的女优（需 token）：`{actresses:[{id, name, videos_count, gender, subscribed}]}`；`subscribed` 让导入面板把已订的置灰 |
+| `GET /api/javdb/collected-actors` | App 收藏的女优（需 token）：`{actresses:[{id, name, videos_count, gender, subscribed}], truncated}`；`subscribed` 让导入面板把已订的置灰，`truncated` 是「这份名单已知不完整」——翻到 20 页（×10 位）上限后**再探第 21 页**，探到东西才置 `true`，面板据此说「只列到前 200 位」而不是把 200 说成总数。**没有搜索端点**——上游不提供（§13），面板不开搜索框 |
 
 任务事件行的 `detail` 原样回出（人工重试把旧 `raw_snapshot` 留在 `detail.raw_snapshot_before`、结局留在 `detail.action`）：对比基准只经接口可查，面板 v1 不渲染刮削字段（#31）。
 
@@ -396,7 +405,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 | `mdc_upstream_requests_total` | counter | `upstream∈{javdb,mteam,dmm,qbittorrent,jellyfin,telegram,openai},result∈{ok,transient,permanent}` | 凭据失效判定；permanent = 401/403 类（javdb JWTVerificationError、telegram 400/401/403、mteam 鉴权 code 等） |
 | `mdc_side_effect_stuck` | gauge | `kind` | 驻留副作用数（喂需人工区，不做告警规则） |
 | `mdc_task_incomplete` | gauge | — | 待补齐（#42：四面判据命中且上游重试耗尽）的任务数；与面板待补齐区同源 |
-| `mdc_subscription_skipped_total` | counter | `reason∈{not_single,compilation}` | 筛子命中数：长期全是 `not_single` 而 `reason=compilation` 恒 0，说明 `main=s` 可能在替「精選綜合」干活（§13 探针的复查信号） |
+| `mdc_subscription_skipped_total` | counter | `reason∈{not_single,compilation,long_form}` | 筛子命中数：三条判据各一路。长期全场只有 `long_form`，说明共演与精選綜合的判据可能已失效 |
 | `mdc_subscription_pending` | gauge | — | 回看窗口内已发现、被每轮限量留在门外的待入队数（每轮末尾置数；`backfill_from` 未清时为非零是预期） |
 
 - 最小 VMRule 两条（#12）：**LoopStalled**：`time() - mdc_loop_last_success_unix_seconds{loop="poll"} > 2400`（reconcile > 900、sidefx > 600、subscription > 2400）；**UpstreamCredentialsInvalid**：`increase(mdc_upstream_requests_total{result="permanent"}[15m]) > 0`。Grafana 面板不做。
@@ -519,8 +528,12 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 - **DMM pl/ps 几何未实测**：算法已兜底（§5.3 取宽>高者为横版）；首次 JP 出口刮削时一次 `curl + file` 核对并记录。
 - **DMM 全主机非日本出口 TLS 被阻**：生产 mihomo 覆盖；开发机不可达 → 开发验证需 JP 出口（CI 不做 DMM 集成测试，用 fixture：mdc-lite 2026-10-29 真实捕获在库）。
 - **M-Team 限速是「建议值」且配额不可读**：只在新磁力 movie 时搜索（§5.2），失败即降级磁力，不做配额推断。
-- **`main=s`（單體影片）未实测**：javdb_rss 对 `p`/`m`/`c`/`i`/`v` 都做过「字母筛出的集合 vs 某字段分出的两半」逐位对照，`s` 是唯一没有对应字段、含义只取自上游名字的那个，而未筛的女优列表里实测混着 `OFJE-*` 总集编。**开工第一件事是探针**（拿到全集与 `?main=s` 的差集，看是否排掉总集编、是否误伤），结论写回本节再实现；筛子失效的信号已埋成指标（`mdc_subscription_skipped_total{reason}`）与跳过表。
-- **女优检索端点未知**：javdb_rss 只做过 `collected_actors`（收藏）与 `/api/v1/actors/{id}`（详情），没有「按名字搜女优」的端点记录。探针一并确认；不通则 `GET /api/javdb/actress-search` 回 501，面板退到「贴 id / 女优页链接」，其余不动。
+- **`main=s`（單體影片）已实测——它筛的是「只有她一个人」，不是「没有合集」**（#45，2026-11，12 位女优、全程匿名）：`s` 只认 `filter_by` 掩码的第 4 段（`0:a:{id}:s`；写成独立查询参数 `main=s` 被**静默忽略**，EvkJ 仍 232 部）。全集→`s` 的收缩很陡：EvkJ 232→104、Av2e 322→132、kzx6 234→108、1KBW 1260→485。差集以合集号段为主（`OFJE-*` 最多），但**凡有两位以上女优出演的作品，`s` 一律排掉**：12 位女优 42 对两两交集共 394 部「≥2 女优」的作品，通过 `s` 的 **0 部**——含真正的单体共演（`REBD-725`/`REBDB-711` REbecca STARS10，京香×桃园怜奈，192 分钟）。反过来，**她自己的 BEST/总集编留在 `s` 里**：带「精選綜合」（tag 8）却通过 `s` 的每女优 3–46 部（EvkJ 21 部：`OFJE-186` 初ベスト 6 タイトル 8 時間、`OFJE-380` 1st BEST 12title 12hour、`OFJE-416` 全 50SEX 16 時間；KxPb 14 部：`PPR-*`/`PPT-*`/`PPX-*` 8 時間 BEST；kzx6 26 部：`IDBD-887` COMPLETE BEST 48 時間 BOX）。即 `s` ＝「单女优出演」，与類別标签「單體作品」（tag 28）近似但**不逐位相同**（每女优 1–11 部双向出入：`s∖tag28` 见 `FC2-*`/`SIVR-302`，`tag28∖s` 见 `WICP-004`/`SSIS-241`）。**裁决（ADR-0016 已废弃，由 ADR-0017 取代）**：取数取全集、**不用 `s`**——`s` 排得准，但它在上游静默地排，被排掉的共演进不了跳过表，也就没有「收下」这个出口；筛子整体下沉到详情层，三条判据（`actors`>1 / 精選綜合 / 4 小时以上）各自落行。多翻几页的代价被水位线吃掉（列表按 release 倒序，见过下界即停）。仍然留着的坑：**「精選綜合」不是合集的全集**——`OFJE-665`（「…5年分…120本番12時間」）既通过 `s`、也不带 tag 8，`MKCK-223`/`ONSD-854` 这类混编合集同样不带；`long_form`（类別 4/16 小时以上）就是为收住这类自带长合集而加的；仍会漏掉的只剩「既无第二人、也不带长片标签」的少数件，而反方向的误伤（真正的四小时单体作品被当合集）可以用面板「收下」救回来。另：`tags[].videos_count` 仍不可信（1KBW 的 tag 28 声明 188 部，按 tag 筛实得 418 部）。
+- **女优检索端点：不存在**（#45 实测）。`/api/v1/actors` 必须带 `type`（＝片库号 0–3，缺了报 `ParameterInvalid: 参数不能为空: type`），它是**分页名单**不是搜索：`q`/`name`/`keyword`/`search`/`term`/`query`/`actor_name` 与 `letter`/`sort_by`/`filter_by` 全被静默忽略（首页逐字节相同）；`limit` 有效（默认 10，最大 50），zone 0 的真数据到第 200 页、**第 202 页起重复返回第 200 页**（「空页即止」在这条端点上不成立），约一万位女优——本地按名字匹配要整库翻完，不能当搜索用。`/api/v1/actors/search`、`/search_by_name`、`/autocomplete` → 信封级 `ResourceNotFound`（路由不存在）；`/api/v1/search*`、`/api/v2/search/actors`、`/api/v3/search` → 404 HTML。唯一像搜索的是 `/api/v2/search`：**路由存在但匿名 `JWTVerificationError`**，无 token 无法确认参数与语义。面板加女优因此仍按「贴 id / 女优页链接」（第二种加法是「从 App 收藏导入」，#50）；`GET /api/javdb/actress-search` 那个 501 占位端点已随 #50 **整个删掉**——没有路由、没有 handler，不是「回 501」。将来拿到 token 先验 `/api/v2/search` 这条再决定是否开搜索。
+- **匿名面 2026-11 收窄**（#45 顺带实测）：`/api/v4/movies/{id}` 详情、`/api/v1/movies/{id}/magnets`、`/api/v2/tags?type=0` 词表现在**匿名一律 `JWTVerificationError`**（javdb_rss 2026-10 记的是匿名可读），仍匿名的只剩列表类（`/api/v1/movies/tags`）与 `/api/v1/actors/{id}`。生产带 token 不受影响（§5.1），但离线探针与复跑只能用列表类端点。
+- **`{all:true}` 的筛子成本**：一次「全部」回灌会把窗口拨到她最早的作品，于是这一轮/后续几轮里，窗口内**每一部还没进任务表的作品都要拉一次详情**过三条判据（`GET /api/v4/movies/{id}`，每部一次）。取数是按页翻、页数有上限（200 页），但它仍然是一整段历史——面板的「全部」预设因此把这句话写在按钮的悬浮说明里，别让人以为是免费的。
+- **`/api/v2/tags` 的 id 空间本仓从未探过**（#47/#48）：筛子拿词表里的 `id` 去比对详情里的 `tags[].id`，而这两个 id 是否同一套空间没有实测（§13 的探针只覆盖了列表、详情与词表各自的形状）。若上游那边不是同一套 id，`compilation` / `long_form` 两条判据会**静默永不命中**——判据不会报错，只是每一次都比不上。可看的信号是 `mdc_subscription_skipped_total{reason="compilation"}` 长期停在 0 而 `not_single` 照常动；出现这个形状就先用真 token 打一次详情与词表对 id，再改代码。
+- **上游会把预告作品先登在列表里**（#47）：`release_date` 可以是未来某天（还没发行），而列表按 `release` 倒序正是把它们排在最前。所以「这轮见过的最晚发行日」可能落在未来——水位线一跳进未来，取数下界（水位线 − 回看窗口）就落到她全部现存作品之后，订阅会静默停追到那个日子为止。水位线因此封顶到今天。
 - **JavDB `jdsignature` 常量可轮换**：`InvalidSignature` = 修代码不是修凭据；app-API 移植自带。
 - **清单写接口陷阱**：`name` 字段字面量代码常量（未知值默认 remove）；form-encoded；同名拒/4–30 字符（§5.1）。
 - **DMM GraphQL schema 漂移**：raw_snapshot 留底，字段缺失按字段级回退处理，不失败任务。
@@ -528,4 +541,4 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 ## 附录：ADR 索引
 
-`docs/adr/`：0001 Postgres-only；0002 设置在 DB、env 只 bootstrap；0003 两级聚合、DB 为真相；0004 先落库再加种；0005 side_effect 出箱表；0006 任务级状态用视图；0007 autorun 以 sh -c 共存；0008 固定目录布局无模板；0009 已初始化看配置就位、不看测试通过；0010 刮削字段图；0011 材料缺失回上游重取；0012 NFO 只写 `tag`；0013 双主题走 `light-dark()`；0014 女优订阅并进流水线不产 RSS；0015「订阅」上位词但两张表；0016 合集筛子两层且可收下。
+`docs/adr/`：0001 Postgres-only；0002 设置在 DB、env 只 bootstrap；0003 两级聚合、DB 为真相；0004 先落库再加种；0005 side_effect 出箱表；0006 任务级状态用视图；0007 autorun 以 sh -c 共存；0008 固定目录布局无模板；0009 已初始化看配置就位、不看测试通过；0010 刮削字段图；0011 材料缺失回上游重取；0012 NFO 只写 `tag`；0013 双主题走 `light-dark()`；0014 女优订阅并进流水线不产 RSS；0015「订阅」上位词但两张表；0016 合集筛子两层且可收下（**已废弃**，由 0017 取代）；0017 合集筛子下沉到详情层，三条判据。

@@ -47,14 +47,16 @@ func (s *Store) SaveCandidate(ctx context.Context, candidate Candidate) (bool, e
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
-	// 清单 id 是「首次发现来源」：任务已存在时不改它（规格 §4.1）。手工任务的来源
-	// 不是任何清单——空串落成 NULL（00012），而不是拿某张清单冒充。
+	// 清单 id / 订阅 id 是「首次发现来源」：任务已存在时不改它们（规格 §4.1）。手工任务
+	// 的来源不是任何清单——空串落成 NULL（00012），而不是拿某张清单冒充；订阅发现的
+	// 作品同理（list_id NULL、subscription_id 是那一条订阅，00015）。
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO task (movie_id, number, list_id) VALUES ($1, $2, NULLIF($3, ''))
+		`INSERT INTO task (movie_id, number, list_id, subscription_id)
+		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, 0))
 		 ON CONFLICT (movie_id) DO UPDATE
 		 SET number = EXCLUDED.number, updated_at = now()
 		 WHERE task.number IS DISTINCT FROM EXCLUDED.number`,
-		candidate.MovieID, candidate.Number, candidate.ListID,
+		candidate.MovieID, candidate.Number, candidate.ListID, candidate.SubscriptionID,
 	); err != nil {
 		return false, fmt.Errorf("task: 落任务 %s: %w", candidate.MovieID, err)
 	}
@@ -236,7 +238,8 @@ func (s *Store) Release(ctx context.Context, infohash, owner string) error {
 // 租约已被别人接手时返回 ErrClaimLost（说明这次的结果不能代表当前占用者）。
 //
 // listRemoval 间或置起「清单项待删」：清单轮询加的版本传 true（规格 §6.1 置待删行）；
-// 手工登记传 false——它的任务不在任何清单上，置起只会让删清单待办永远失败驻留。
+// 手工登记与女优订阅传 false——它们的任务不在任何清单上（list_id NULL），置起只会让
+// 删清单待办拿一个空 list_id 永远失败驻留。
 func (s *Store) MarkAdded(ctx context.Context, infohash, owner string, listRemoval bool) error {
 	set := "add_pending = false, claimed_at = NULL, claimed_by = '', updated_at = now()"
 	if listRemoval {
@@ -478,7 +481,7 @@ func (s *Store) attachVersions(ctx context.Context, tasks []TaskRow) ([]TaskRow,
 }
 
 // versionColumns 是 claim/version 读取共用的列序（与 scanVersion 一一对应）。
-const versionColumns = `v.infohash, v.movie_id, t.number, v.source, v.delivery, v.label, v.status,
+const versionColumns = `v.infohash, v.movie_id, t.number, COALESCE(t.list_id, ''), v.source, v.delivery, v.label, v.status,
 	COALESCE(v.error_phase, ''), v.error_reason, v.add_pending, v.list_removal_pending,
 	v.attempts, v.force_rescrape, v.payload, v.created_at, v.updated_at`
 
@@ -491,7 +494,7 @@ type scanner interface {
 func scanVersion(row scanner) (Version, error) {
 	var version Version
 	err := row.Scan(
-		&version.Infohash, &version.MovieID, &version.Number, &version.Source,
+		&version.Infohash, &version.MovieID, &version.Number, &version.ListID, &version.Source,
 		&version.Delivery, &version.Label, &version.Status, &version.ErrorPhase,
 		&version.ErrorReason, &version.AddPending, &version.ListRemovalPending,
 		&version.Attempts, &version.ForceRescrape, &version.Payload, &version.CreatedAt, &version.UpdatedAt,
@@ -521,8 +524,10 @@ func validateCandidate(candidate Candidate) error {
 		return errors.New("task: 候选缺番号")
 	case strings.TrimSpace(candidate.Infohash) == "":
 		return errors.New("task: 候选缺 infohash")
-	case strings.TrimSpace(candidate.ListID) == "" && candidate.Source != SourceManual:
-		return errors.New("task: 候选缺清单 id（手工登记除外，它的首次发现不是清单）")
+	case strings.TrimSpace(candidate.ListID) == "" && candidate.SubscriptionID <= 0 && candidate.Source != SourceManual:
+		// 首次发现来源必须说得清：一条清单、一条女优订阅，或「人贴进来的」（手工登记）。
+		// 三样都没有的候选落不了库——它连「从哪来」这一列都填不上（规格 §4.1）。
+		return errors.New("task: 候选缺首次发现来源（清单 id / 订阅 id 都没有，且不是手工登记）")
 	case candidate.Source != SourceJavDBMagnet && candidate.Source != SourceMTeamTorrent && candidate.Source != SourceManual:
 		return fmt.Errorf("task: 未知来源 %q", candidate.Source)
 	case candidate.Delivery != DeliveryMagnet && candidate.Delivery != DeliveryTorrent:

@@ -461,7 +461,7 @@ func TestRenderReconcileLeavesUnchangedFacesUnwritten(t *testing.T) {
 }
 
 // TestRenderReconcileGatesLikeTheLoops 钉住门禁：未初始化/已暂停时对账零动作，
-// 与三条循环同一句判词（它跑在对账循环里，门禁不该另起一套）。
+// 与四条循环同一句判词（它跑在对账循环里，门禁不该另起一套）。
 func TestRenderReconcileGatesLikeTheLoops(t *testing.T) {
 	f := newFixture(t)
 	f.settings.snapshot = settings.Snapshot{Paused: true, Sections: map[string]settings.SectionState{}}

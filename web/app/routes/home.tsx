@@ -7,7 +7,8 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Separator } from "~/components/ui/separator";
 import { Notice } from "~/components/form";
-import { Panel, isTaskState, loopLines, useNow, ROW_ACTION_SIZE, PANEL_ACTION_SIZE, type PanelQuery } from "~/components/panel";
+import { Panel, isTaskState, loopLines, useNow, type PanelQuery } from "~/components/panel";
+import { ROW_ACTION_SIZE, PANEL_ACTION_SIZE } from "~/components/row-action";
 import { ThemeToggle } from "~/components/theme";
 import { attentionRowCount } from "~/lib/attention";
 import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
@@ -22,6 +23,8 @@ import {
   type Overview,
   type SectionName,
   type SideEffect,
+  type SubscriptionList,
+  type SubscriptionSkip,
   type TaskRow,
 } from "~/lib/api";
 
@@ -54,6 +57,10 @@ export default function Home() {
   const [attention, setAttention] = React.useState<Attention | null>(null);
   const [sideEffects, setSideEffects] = React.useState<SideEffect[]>([]);
   const [backfill, setBackfill] = React.useState<BackfillScan | null>(null);
+  const [subscriptions, setSubscriptions] = React.useState<SubscriptionList | null>(null);
+  const [subscriptionSkips, setSubscriptionSkips] = React.useState<
+    Record<number, SubscriptionSkip[] | null>
+  >({});
   const [pageSize, setPageSize] = React.useState(50);
   // 存错误本身而不是一句话：网关类失败（登录页、401/403）要拿它决定给什么动作。
   const [loadError, setLoadError] = React.useState<unknown | null>(null);
@@ -98,6 +105,8 @@ export default function Home() {
     setAttention(loaded.attention);
     setSideEffects(loaded.sideEffects);
     setBackfill(loaded.backfill);
+    setSubscriptions(loaded.subscriptions);
+    setSubscriptionSkips(loaded.subscriptionSkips);
     setPageSize(loaded.pageSize);
     setLoadError(null);
     setLoadedAt(Date.now());
@@ -179,12 +188,13 @@ export default function Home() {
   const gatewayExpired = isGatewayAuthError(loadError);
   const gatewayBad = !gatewayExpired && isGatewayBadError(loadError);
 
-  // 三条循环的间隔读自 app_config；读不到就是 null，不编默认值。
+  // 四条循环的间隔读自 app_config；读不到就是 null，不编默认值。
   const appConfig = (snapshot?.sections?.app?.data ?? {}) as Record<string, unknown>;
   const intervals = {
     poll: formatInterval(appConfig.poll_interval),
     reconcile: formatInterval(appConfig.reconcile_interval),
     sidefx: formatInterval(appConfig.sidefx_interval),
+    subscription: formatInterval(appConfig.subscription_interval),
   };
   // 自动复读的节奏跟清单轮询同拍：那是上游真正会变的频率，比它快只会读到同一份数据。
   // 读不到间隔就不自动读（宁可让人按 Shift+R）；下限 15s，免得一个写错的 app_config
@@ -384,6 +394,11 @@ export default function Home() {
               attention={attention}
               sideEffects={sideEffects}
               backfill={backfill}
+              subscriptions={subscriptions}
+              subscriptionSkips={subscriptionSkips}
+              // 「从 App 收藏导入」要 JavDB 凭据（收藏名单匿名不可用，§13）：没保存就把那入口
+              // 整颗禁掉并写出原因，而不是让人点了才发现失败。
+              javdbConfigured={snapshot?.sections?.javdb?.configured ?? false}
               query={query}
               pageSize={pageSize}
               loadedAt={loadedAt}
@@ -609,7 +624,7 @@ function MobileNavItem({
   );
 }
 
-/** Dashboard 是一次面板读取的全部输入（设置、概览、任务、「需要人工」区、副作用队列、分页）。 */
+/** Dashboard 是一次面板读取的全部输入（设置、概览、任务、「需要人工」区、副作用队列、订阅、分页）。 */
 type Dashboard = {
   config: ConfigSnapshot;
   overview: Overview;
@@ -618,21 +633,27 @@ type Dashboard = {
   attention: Attention;
   sideEffects: SideEffect[];
   backfill: BackfillScan | null;
+  subscriptions: SubscriptionList | null;
+  /** 「最近被排掉的」按订阅 id 分摊（null＝这一条读不到，那块折叠格就不渲染）。 */
+  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
   page: number;
   pageSize: number;
 };
 
 async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
-  const [config, overview, taskList, attention, sideEffects, backfill] = await Promise.all([
-    api.config(),
-    api.overview(),
-    api.tasks({ page: query.page, q: query.q || undefined, state: query.state || undefined }),
-    api.attention(),
-    api.sideEffects(),
-    // 补录扫描是面板的一节，但它挂了不该拖死整页：读不到就当没有未补录目录，
-    // 卡片整体不渲染（门禁未开也会走到这里：未初始化的面板根本不渲染 Panel）。
-    api.backfillScan().catch(() => null),
-  ]);
+  const [config, overview, taskList, attention, sideEffects, backfill, subscriptions] =
+    await Promise.all([
+      api.config(),
+      api.overview(),
+      api.tasks({ page: query.page, q: query.q || undefined, state: query.state || undefined }),
+      api.attention(),
+      api.sideEffects(),
+      // 补录扫描是面板的一节，但它挂了不该拖死整页：读不到就当没有未补录目录，
+      // 卡片整体不渲染（门禁未开也会走到这里：未初始化的面板根本不渲染 Panel）。
+      api.backfillScan().catch(() => null),
+      // 订阅区同理：读不到就不渲染，而不是画一张「一位女优都没订阅」的空卡。
+      api.subscriptions().catch(() => null),
+    ]);
   return {
     config,
     overview,
@@ -641,9 +662,36 @@ async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
     attention,
     sideEffects: sideEffects.side_effects,
     backfill,
+    subscriptions,
+    subscriptionSkips: await fetchSubscriptionSkips(subscriptions),
     page: taskList.page,
     pageSize: taskList.page_size,
   };
+}
+
+/**
+ * fetchSubscriptionSkips 读每一条订阅「最近被排掉的」（§8.2 的折叠格，GLOSSARY「跳过」）。
+ *
+ * 一条订阅一个请求，而不是把跳过数塞进订阅行：那个列表形状早就定下来了，而这一块是
+ * 一个带展开面的东西（行里连标题与日期都有）。第一条订阅都没有时零请求。
+ *
+ * 单条读不到只让**那一条**的折叠格不渲染（null）：跳过表是附加面，一个假的「0 条」
+ * 会让人以为判据从没命中过——那正是这块要证明的事。
+ */
+async function fetchSubscriptionSkips(
+  subscriptions: SubscriptionList | null,
+): Promise<Record<number, SubscriptionSkip[] | null>> {
+  const rows = subscriptions?.actresses ?? [];
+  const entries = await Promise.all(
+    rows.map(async (row) => {
+      try {
+        return [row.id, (await api.subscriptionSkips(row.id)).skips] as const;
+      } catch {
+        return [row.id, null] as const;
+      }
+    }),
+  );
+  return Object.fromEntries(entries);
 }
 
 /**
@@ -661,6 +709,8 @@ function loopState(
   if (!snapshot) return { text: "还没读到过", failing: false };
   if (!snapshot.initialized) return { text: "未启动", failing: false };
   if (overview?.paused) return { text: "已暂停", failing: false };
+  // 四条循环一个不少地参与这句话：subscription 也在里面，所以「运行中 · N 条失败」
+  // 不会因为第四条挂了而少报一条。
   const loops = overview ? Object.values(overview.loops) : [];
   if (!loops.some((item) => item?.last_run_at)) return { text: "未启动", failing: false };
   const failed = loops.filter((item) => item?.last_run_at && item.last_ok === false).length;

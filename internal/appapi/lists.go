@@ -70,6 +70,9 @@ type movieListEnvelope struct {
 type movieSlim struct {
 	ID     string `json:"id"`
 	Number string `json:"number"`
+	// ReleaseDate 是发行日（`YYYY-MM-DD`）。清单读不用它，女优订阅的取数窗口靠它
+	// （规格 §6.4 水位线）；同一个 envelope 形状，读两次各取所需。
+	ReleaseDate string `json:"release_date"`
 }
 
 // Lists 读用户自己建的清单列表（/api/v1/lists/simple）。

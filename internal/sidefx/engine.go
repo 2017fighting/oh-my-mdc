@@ -23,7 +23,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 )
 
-// LockIDSidefx 是 sidefx 的 advisory lock key。三条循环各持一把（规格 §4.4）。
+// LockIDSidefx 是 sidefx 的 advisory lock key。四条循环各持一把（规格 §4.4）。
 const LockIDSidefx int64 = 4230003
 
 // DefaultInterval 是 app_config 读不到 sidefx_interval 时的兜底（与表默认值一致）。

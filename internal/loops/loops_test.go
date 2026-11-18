@@ -91,9 +91,12 @@ func TestRecordOnNilRegistryIsInert(t *testing.T) {
 	}
 }
 
-// TestAllListsTheThreeLoops 钉住指标与面板共用的固定顺序。
-func TestAllListsTheThreeLoops(t *testing.T) {
-	want := []string{loops.Poll, loops.Reconcile, loops.Sidefx}
+// TestAllListsTheFourLoops 钉住指标与面板共用的固定顺序。
+//
+// subscription（女优订阅，#47）排在最后：它是第四个循环，独立 advisory lock 与节拍，
+// 但面板与 /metrics 的 loop 标签必须一条不缺。
+func TestAllListsTheFourLoops(t *testing.T) {
+	want := []string{loops.Poll, loops.Reconcile, loops.Sidefx, loops.Subscription}
 	if len(loops.All) != len(want) {
 		t.Fatalf("All = %v, want %v", loops.All, want)
 	}

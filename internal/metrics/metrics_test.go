@@ -117,6 +117,7 @@ func TestWriteRendersAllFiveFamilies(t *testing.T) {
 		"mdc_upstream_requests_total":        dto.MetricType_COUNTER,
 		"mdc_side_effect_stuck":              dto.MetricType_GAUGE,
 		"mdc_task_incomplete":                dto.MetricType_GAUGE,
+		"mdc_subscription_pending":           dto.MetricType_GAUGE,
 	} {
 		family, ok := families[name]
 		if !ok {
@@ -130,12 +131,12 @@ func TestWriteRendersAllFiveFamilies(t *testing.T) {
 		}
 	}
 
-	// 三循环 × 一条时间 + 两条迭代计数。
-	if got := len(families["mdc_loop_last_success_unix_seconds"].Metric); got != 3 {
-		t.Errorf("last_success 样本数 = %d, want 3（poll/reconcile/sidefx）", got)
+	// 四循环 × 一条时间 + 两条迭代计数（第四条是 subscription，#47）。
+	if got := len(families["mdc_loop_last_success_unix_seconds"].Metric); got != 4 {
+		t.Errorf("last_success 样本数 = %d, want 4（poll/reconcile/sidefx/subscription）", got)
 	}
-	if got := len(families["mdc_loop_iterations_total"].Metric); got != 6 {
-		t.Errorf("iterations 样本数 = %d, want 6（三循环 × ok/error）", got)
+	if got := len(families["mdc_loop_iterations_total"].Metric); got != 8 {
+		t.Errorf("iterations 样本数 = %d, want 8（四循环 × ok/error）", got)
 	}
 	if got := len(families["mdc_upstream_requests_total"].Metric); got != 21 {
 		t.Errorf("upstream 样本数 = %d, want 21（七上游 × 三结局）", got)
@@ -172,6 +173,41 @@ func TestWriteRendersAllFiveFamilies(t *testing.T) {
 
 // TestLoopStalledThresholdsAreDerivable 钉住 LoopStalled 的三种阈值在本地可复现：
 // poll 40 分钟、reconcile 15 分钟、sidefx 10 分钟（规格 §9 的 VMRule）。
+// TestSubscriptionPendingGaugeIsSetPerRound 钌住 §9 的 mdc_subscription_pending：
+// 无标签 gauge，订阅循环**每轮末尾置数**；0 是合法读数（窗口排空了），不是缺样本。
+//
+// 与 mdc_task_incomplete 一样是「抓取时现读一个数」，不是计数器：面板「还有 N 部待入队」
+// 与它同一个值（同一份待入队数）。
+func TestSubscriptionPendingGaugeIsSetPerRound(t *testing.T) {
+	m := metrics.New(loops.NewRegistry(), nil, nil, nil)
+
+	// 还没跑过任何一轮：0（刚启动，不是「不知道」）。
+	if got := sampleValue(t, render(t, m), "mdc_subscription_pending", map[string]string{}); got != 0 {
+		t.Errorf("pending = %v, want 0（还没跑过轮次）", got)
+	}
+
+	m.SetSubscriptionPending(7)
+	if got := sampleValue(t, render(t, m), "mdc_subscription_pending", map[string]string{}); got != 7 {
+		t.Errorf("pending = %v, want 7", got)
+	}
+
+	// 余量走完：置数回 0，而不是把 7 留在那里（每轮覆盖，不是累加）。
+	m.SetSubscriptionPending(0)
+	if got := sampleValue(t, render(t, m), "mdc_subscription_pending", map[string]string{}); got != 0 {
+		t.Errorf("pending = %v, want 0（每轮末尾覆盖）", got)
+	}
+}
+
+// TestSubscriptionPendingIgnoresNegative 守住置数的形状：负数没有含义（余量不会是负的），
+// 一律当 0——宁可少报一行，也不往时间线上写一个不存在的负数。
+func TestSubscriptionPendingIgnoresNegative(t *testing.T) {
+	m := metrics.New(loops.NewRegistry(), nil, nil, nil)
+	m.SetSubscriptionPending(-3)
+	if got := sampleValue(t, render(t, m), "mdc_subscription_pending", map[string]string{}); got != 0 {
+		t.Errorf("pending = %v, want 0", got)
+	}
+}
+
 func TestLoopStalledThresholdsAreDerivable(t *testing.T) {
 	now := time.Now()
 	registry := loops.NewRegistry()

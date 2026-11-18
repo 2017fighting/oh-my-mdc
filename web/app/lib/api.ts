@@ -5,6 +5,8 @@
  * 把 HTTP 形状翻成 TypeScript 类型，把非 2xx 变成 HttpError，别处不再手工拼 URL。
  */
 
+import type { SubscriptionSkip } from "./skips";
+
 export type SectionName =
   | "javdb"
   | "list_registry"
@@ -96,6 +98,25 @@ export type JavDBList = {
   movies_count: number;
 };
 
+/** App 收藏里的一位演员（规格 §8.4 的「从 App 收藏导入」，#50）。 */
+export type CollectedActress = {
+  /** 上游的演员 id：订阅身份就是这个（不是名字，名字只是快照）。 */
+  id: string;
+  name: string;
+  videos_count: number;
+  /** 上游的性别码：0 = 女优，1 = 男优（实测，原样透出；详情端点没有这个字段）。 */
+  gender: number;
+  /** 订阅表里有没有她——服务端算的，导入面板据此把已订的置灰。 */
+  subscribed: boolean;
+};
+
+export type CollectedActresses = {
+  ok: boolean;
+  actresses: CollectedActress[];
+  /** 收藏超过页数上限（20 页 × 10 位）时为 true：面板据此说「只列到前 200 位」。 */
+  truncated: boolean;
+};
+
 export type Overview = {
   ok: boolean;
   initialized: boolean;
@@ -108,7 +129,7 @@ export type Overview = {
     failed: number;
   };
   loops: Record<
-    "poll" | "reconcile" | "sidefx",
+    "poll" | "reconcile" | "sidefx" | "subscription",
     {
       last_run_at: string | null;
       last_ok: boolean | null;
@@ -120,6 +141,86 @@ export type Overview = {
       iterations: { ok: number; error: number };
     }
   >;
+};
+
+/** 订阅区的一行（规格 §6.4/§8.4，GLOSSARY「女优订阅」）。 */
+export type Subscription = {
+  id: number;
+  /** 演员快照：名字来自上游，gender/avatar_url 等刮削补（建订阅时是空的）。 */
+  actor: { javdb_actor_id: string; name: string; avatar_url: string; gender: string };
+  /** 上一轮见过的最晚发行日（`YYYY-MM-DD`）；空串＝不知道，不编今天。 */
+  watermark_date: string;
+  /** 回看窗口天数（默认 30）：让「出水时还没磁力」的作品下一轮仍被看见。 */
+  lookback_days: number;
+  /** 回灌设置的取数下界；null＝没在回灌。 */
+  backfill_from: string | null;
+  enabled: boolean;
+  /** 「带来 N 部」：任务表里由这条订阅发现的任务数。 */
+  tasks_count: number;
+  /** 这批里还有版本在等加种（add_pending）的条数。 */
+  pending_count: number;
+  /**
+   * 「还有 N 部待入队」：回看窗口里已发现、被每轮限量留在门外的作品数（§6.4）。
+   *
+   * 与 `pending_count` 不是一回事：那个数已入队的版本，这个数还没入队的作品。
+   * 它由订阅循环每轮末尾置数（不落库），所以重启后第一个轮次之前读到的 0 是
+   * 「还没跑过」——两种情况面板都不显示这一句。
+   */
+  deferred_count: number;
+};
+
+export type SubscriptionList = {
+  ok: boolean;
+  actresses: Subscription[];
+};
+
+/**
+ * 「最近被排掉的」（规格 §8.2/§8.4，GLOSSARY「跳过」）：订阅筛子排掉的、30 天内还没被
+ * 收下的作品。已收下的不进这个列表——它们已经不是被排掉的，而是待办。
+ */
+export type SubscriptionSkips = {
+  ok: boolean;
+  skips: SubscriptionSkip[];
+};
+
+/**
+ * 「最近被排掉的」一行：形状（含三条判据的名字）定义在 `lib/skips.ts`——那块折叠格的
+ * 文案与类型放在同一处，免得两边各写一份判据词表。
+ */
+export type { SubscriptionSkip } from "./skips";
+
+/** 「收下」的回执（§8.4）：outcome ∈ accepted / no_magnet。 */
+export type SubscriptionAccept = {
+  ok: boolean;
+  movie_id: string;
+  outcome: string;
+};
+
+
+/**
+ * 回灌的两种请求形状（规格 §8.4）：{days} 或 {all:true}，二选一。
+ *
+ * `days` 要大于回看窗口（否则是空操作，服务端 400）；`all` 是「翻到她最早的作品」。
+ */
+export type SubscriptionBackfillBody = { days: number } | { all: true };
+
+/** 添加订阅的回执：outcome=duplicate 是幂等放行（同一位女优第二次添加）。 */
+export type SubscriptionWrite = {
+  ok: boolean;
+  outcome: string;
+  actress: Subscription;
+};
+
+/**
+ * 启停的回执：outcome 说的是「它现在是什么状态」，不是「这条订阅是怎么来的」。
+ *
+ * 与 `SubscriptionWrite` 分开是刻意的：那边的 outcome 是 created / duplicate，
+ * 这边是 enabled / disabled——同一个字段装两套词，读的人迟早会问「enabled 是什么意思」。
+ */
+export type SubscriptionToggle = {
+  ok: boolean;
+  outcome: "enabled" | "disabled";
+  actress: Subscription;
 };
 
 /** 版本状态：四个值是规格 §3 的完整集合（任务级状态由视图聚合，名字相同）。 */
@@ -484,6 +585,45 @@ export const api = {
 
   /** 补录扫描：媒体库里的旧目录 ∧ 任务表无此番号（GLOSSARY「补录」）。 */
   backfillScan: () => request<BackfillScan>("/api/backfill/scan"),
+
+  /** 订阅区列表：只列已订阅的女优（上游没有搜名字的端点，所以没有搜索框）。 */
+  subscriptions: () => request<SubscriptionList>("/api/subscriptions"),
+
+  /**
+   * App 收藏的演员名单（#50）：**需 token**，没保存就 400 并写明原因。
+   * 已订阅的那几位带 subscribed=true；没有搜索端点（上游不提供，§13）。
+   */
+  collectedActresses: () => request<CollectedActresses>("/api/javdb/collected-actors"),
+
+  /** 添加订阅：贴女优 id 或女优页链接，二选一（服务端解析 id 并 upsert actor）。 */
+  addSubscription: (input: { actress_id: string } | { javdb_url: string }) =>
+    request<SubscriptionWrite>("/api/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  /** 启停：停用只停追新，已建任务照走完。 */
+  setSubscriptionEnabled: (id: number, enabled: boolean) =>
+    request<SubscriptionToggle>(`/api/subscriptions/${id}/${enabled ? "enable" : "disable"}`, {
+      method: "POST",
+    }),
+
+  /** 回灌 N 天：把取数下界往回拨，回执给 backfill_from。 */
+  backfillSubscription: (id: number, body: SubscriptionBackfillBody) =>
+    request<{ ok: boolean; backfill_from: string | null }>(`/api/subscriptions/${id}/backfill`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** 「最近被排掉的」：最近 30 天被筛子排掉、还没被收下的作品（GLOSSARY「跳过」）。 */
+  subscriptionSkips: (id: number) =>
+    request<SubscriptionSkips>(`/api/subscriptions/${id}/skips`),
+
+  /** 收下（GLOSSARY「收下」）：把一条跳过转成正常待办，重复收下幂等。 */
+  acceptSubscriptionSkip: (id: number, skipID: number) =>
+    request<SubscriptionAccept>(`/api/subscriptions/${id}/skips/${skipID}/accept`, {
+      method: "POST",
+    }),
 
   /** 一键补录：删旧 NFO、现有视频原地入库，重刮由流水线接着做（GLOSSARY「补录」）。 */
   backfill: (number: string) =>

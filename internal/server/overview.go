@@ -42,9 +42,10 @@ type iterationsBody struct {
 }
 
 type loopsBody struct {
-	Poll      loopHealth `json:"poll"`
-	Reconcile loopHealth `json:"reconcile"`
-	Sidefx    loopHealth `json:"sidefx"`
+	Poll         loopHealth `json:"poll"`
+	Reconcile    loopHealth `json:"reconcile"`
+	Sidefx       loopHealth `json:"sidefx"`
+	Subscription loopHealth `json:"subscription"`
 }
 
 // overview 汇总门禁与面板顶部要用的计数。
@@ -94,9 +95,10 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Loops = loopsBody{
-		Poll:      s.healthOf(loops.Poll),
-		Reconcile: s.healthOf(loops.Reconcile),
-		Sidefx:    s.healthOf(loops.Sidefx),
+		Poll:         s.healthOf(loops.Poll),
+		Reconcile:    s.healthOf(loops.Reconcile),
+		Sidefx:       s.healthOf(loops.Sidefx),
+		Subscription: s.healthOf(loops.Subscription),
 	}
 
 	writeJSON(w, http.StatusOK, body)
