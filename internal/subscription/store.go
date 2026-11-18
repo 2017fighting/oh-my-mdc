@@ -34,6 +34,43 @@ const (
 // KindActress 是当下唯一的订阅种类（§4.5 的扩展位：将来到番号/全站订阅加在这里）。
 const KindActress = "actress"
 
+// SkipRetentionDays 是一条跳过行活多久（规格 §6.4/GLOSSARY「跳过」：保留 30 天）。
+//
+// 它同时是两件事的窗口：面板上「最近被排掉的」看多远，以及循环每轮清掉多老的行。
+const SkipRetentionDays = 30
+
+// SkipOutcome 是「落一行跳过」的三种结局。
+type SkipOutcome int
+
+const (
+	// SkipRecorded 是这一次真的新落了一行（第一次被排掉）。
+	SkipRecorded SkipOutcome = iota
+	// SkipPresent 是这一部已经在表里且没被收下（回看窗口让同一部作品每轮再现）。
+	SkipPresent
+	// SkipAccepted 是这一部之前被「收下」过：判据让路，调用方照常把它走 ingest。
+	SkipAccepted
+)
+
+// Skip 是一条「跳过」（GLOSSARY「跳过」）：被筛子排掉的作品的一条记录，保留 30 天、
+// 面板可见、可「收下」。
+//
+// 它只有「首次发现」那么大：没有 subscription 行以外的身份、没有详情快照——面板要认人
+// 的字段就这几个（番号、标题、发行日、为什么被排掉）。
+type Skip struct {
+	ID             int64
+	SubscriptionID int64
+	MovieID        string
+	Number         string
+	Title          string
+	// ReleaseDate 是指列表给的发行日；上游没给时是 nil（不猜一个今天）。
+	ReleaseDate *time.Time
+	// Reason 是三条判据之一：not_single / compilation / long_form（§9 的标签同词）。
+	Reason    string
+	SkippedAt time.Time
+	// AcceptedAt 非空＝这一部已经被「收下」（转成正常待办）。
+	AcceptedAt *time.Time
+}
+
 // ErrNotFound 说明请求里的订阅 id 不存在（HTTP 404）。
 var ErrNotFound = errors.New("subscription: 订阅不存在")
 

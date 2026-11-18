@@ -14,6 +14,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/ingest"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/material"
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
@@ -56,10 +57,16 @@ type RunnerOptions struct {
 	Outbox   *sidefx.Outbox
 	Settings Settings
 	Source   WorksSource
+	// Details 读作品详情（筛子的三条判据都从它来，ADR-0017）；nil 时筛子整条跳过。
+	Details DetailSource
+	// Tags 读标签词表（按名字查 id；进程内缓存、重启重取）；nil 时标签判据跳过。
+	Tags     VocabularySource
 	Magnets  ingest.Magnets
 	Adder    ingest.Adder
 	Torrents ingest.Torrents
 	Material *material.Store
+	// Metrics 记 mdc_subscription_skipped_total{reason}；nil 时什么都不记。
+	Metrics metrics.SubscriptionSkipRecorder
 	// Pool 只用于 advisory lock 的专用连接；nil 时不做单飞（测试或单进程场景）。
 	Pool *pgxpool.Pool
 	// Loops 记循环健康位；nil 时只跑不记。
@@ -74,10 +81,17 @@ type RunnerOptions struct {
 
 // Runner 是女优订阅循环（规格 §6.2 的 subscription 通道）。
 type Runner struct {
-	store    *Store
-	ingest   *ingest.Ingester
+	store  *Store
+	ingest *ingest.Ingester
+	// tasks 只用来问一句「这一部已经有任务了吗」：已有任务的既不再筛也不再取源
+	// （§6.1 去重行）——同一部作品可能既在清单上又被订阅看见。
+	tasks    *task.Store
 	settings Settings
 	source   WorksSource
+	details  DetailSource
+	tags     VocabularySource
+	metrics  metrics.SubscriptionSkipRecorder
+	vocab    tagCache
 	pool     *pgxpool.Pool
 	loops    *loops.Registry
 	logger   *slog.Logger
@@ -110,6 +124,10 @@ func NewRunner(opts RunnerOptions) *Runner {
 		}),
 		settings: opts.Settings,
 		source:   opts.Source,
+		tasks:    opts.Tasks,
+		details:  opts.Details,
+		tags:     opts.Tags,
+		metrics:  opts.Metrics,
 		pool:     opts.Pool,
 		loops:    opts.Loops,
 		logger:   logger,
@@ -138,6 +156,10 @@ type Result struct {
 	Fallbacks int
 	// Added 是这一轮回看窗口 + 待加种通道加种成功（含收编/已存在）的版本数。
 	Added int
+	// Skipped 是这一轮新落的跳过行数（回看窗口里再见到的旧行不算）。
+	Skipped int
+	// Unexamined 是详情没读到、留到下一轮的作品数（与「磁力为空不落行」同一处置）。
+	Unexamined int
 }
 
 // Run 跑循环直到 ctx 结束。第一轮立即跑，之后按 app_config 的 subscription_interval 等。
@@ -186,6 +208,7 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 		}
 		r.logger.Debug("订阅循环结束",
 			"subscriptions", result.Subscriptions, "seen", result.Seen,
+			"skipped", result.Skipped, "unexamined", result.Unexamined,
 			"candidates", result.Candidates, "added", result.Added, "err", err)
 	} else if r.loops != nil {
 		// 门禁拦下的轮次不算迭代，也不能一直挂着「正在跑」。
@@ -225,6 +248,16 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	var errs []error
 	now := r.now()
 
+	// 跳过行的 30 天清理跟着循环跑（§6.4 生命周期）：一轮一次，不按订阅数线性增长。
+	if purged, err := r.store.PurgeSkips(ctx, now.AddDate(0, 0, -SkipRetentionDays)); err != nil {
+		errs = append(errs, err)
+	} else if purged > 0 {
+		r.logger.Info("订阅筛子：清掉过期的跳过行", "count", purged)
+	}
+
+	// 词表一轮取一次（进程内缓存，重启重取）：标签 id 按名字查，不硬编码（ADR-0017）。
+	ids := r.screenTags(ctx, javdbInput.Text("token"))
+
 	for _, sub := range rows {
 		if !sub.Enabled {
 			// 停用只停追新：任务照走完，水位线与回灌下界一概不动（§6.4 生命周期）。
@@ -240,6 +273,61 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 
 		for _, work := range works {
 			result.Seen++
+
+			// 任务已有版本就不再筛、不再取源（§6.1 去重行）：同一部作品可能既在清单上又被
+			// 订阅看见——那时它已经在下载了，给它落一条「跳过」只会把已经在跑的东西摆到
+			// 「最近被排掉的」里，而那里面每一条都是等人按「收下」的。
+			tracked, err := r.tasks.TaskHasVersion(ctx, work.MovieID)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if tracked {
+				continue
+			}
+
+			// 筛子（ADR-0017）：一次详情，三条判据各自落跳过表。
+			screened, err := r.screen(ctx, work.MovieID, javdbInput.Text("token"), ids)
+			if err != nil {
+				// 详情读不到：这一件留到下一轮（不落任务、不落跳过行），与「磁力为空
+				// 不落行」同一处置——上游抖一下不该换来一张永久记录。整轮照常往下走。
+				result.Unexamined++
+				r.logger.Warn("订阅筛子：读详情失败，这件留到下一轮",
+					"movie_id", work.MovieID, "code", appapi.Classify(err), "err", err)
+				continue
+			}
+			if screened.Reason != "" {
+				outcome, err := r.store.RecordSkip(ctx, Skip{
+					SubscriptionID: sub.ID,
+					MovieID:        work.MovieID,
+					Number:         work.Number,
+					Title:          screened.Title,
+					ReleaseDate:    releaseDateOfWork(work),
+					Reason:         screened.Reason,
+					SkippedAt:      now,
+				})
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				if outcome == SkipAccepted {
+					// 已经「收下」过：判据给用户的裁决让路，照常走 ingest（任务已在时是空转）。
+					// 正常路径上收下当场就建了任务，这一件会在上面的去重检查处被跳过；这里
+					// 是兜底——「用户说这一部可以」比判据优先级高，与那张卡片是谁建的无关。
+					r.logger.Debug("订阅筛子：这一部已收下，判据让路",
+						"movie_id", work.MovieID, "subscription", sub.ID)
+				} else {
+					if outcome == SkipRecorded {
+						// 指标数「新落的跳过」而不是「每轮的命中」：回看窗口让同一部作品每轮
+						// 再现，而 §9 拿这条指标判断「判据还活着吗」——一个数一条记录才对应
+						// 面板上那张卡片。
+						result.Skipped++
+						metrics.ObserveSubscriptionSkipped(r.metrics, screened.Reason)
+					}
+					continue
+				}
+			}
+
 			ingested, err := round.Ingest(ctx, ingest.Work{
 				MovieID:        work.MovieID,
 				Number:         work.Number,
@@ -277,6 +365,15 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	errs = append(errs, addErrs...)
 
 	return result, errors.Join(errs...)
+}
+
+// releaseDateOfWork 把列表给的发行日摊成可空日期：零值不猜一个今天，落 SQL NULL。
+func releaseDateOfWork(work appapi.ActressWork) *time.Time {
+	if work.ReleaseDate.IsZero() {
+		return nil
+	}
+	date := work.ReleaseDate
+	return &date
 }
 
 // window 取一条订阅在回看窗口里的作品。

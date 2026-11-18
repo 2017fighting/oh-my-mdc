@@ -31,13 +31,15 @@ const maxSubscriptionBody = 4 << 10
 
 // Subscriber 是订阅域的接缝（真实实现是 subscription.Service）。
 //
-// 四个方法就是面板上能做的四件事；循环（Runner）不在这条接缝上——它跑在进程里，
-// 面板不该有能力替它跑一轮。
+// 六个方法就是面板上能做的六件事（列表、添加、启停、回灌、看被排掉的、收下）；
+// 循环（Runner）不在这条接缝上——它跑在进程里，面板不该有能力替它跑一轮。
 type Subscriber interface {
 	List(ctx context.Context) ([]subscription.Row, error)
 	Add(ctx context.Context, request subscription.Request) (subscription.Row, string, error)
 	SetEnabled(ctx context.Context, id int64, enabled bool) (subscription.Row, error)
 	Backfill(ctx context.Context, id int64, request subscription.BackfillRequest) (subscription.Row, error)
+	Skips(ctx context.Context, id int64) ([]subscription.Skip, error)
+	AcceptSkip(ctx context.Context, id, skipID int64) (subscription.AcceptResult, error)
 }
 
 // subscriptionActorBody 是面板要的演员快照（名字来自上游，性别/头像等刮削补）。
@@ -91,6 +93,31 @@ type subscriptionBackfillRequest struct {
 type subscriptionBackfillBody struct {
 	OK           bool    `json:"ok"`
 	BackfillFrom *string `json:"backfill_from"`
+}
+
+// subscriptionSkipBody 是「被排掉的」一行（规格 §8.4）。
+type subscriptionSkipBody struct {
+	ID      int64  `json:"id"`
+	MovieID string `json:"movie_id"`
+	Number  string `json:"number"`
+	Title   string `json:"title"`
+	// ReleaseDate 是日期串；上游没给发行日时是 null（不编一个今天）。
+	ReleaseDate *string `json:"release_date"`
+	Reason      string  `json:"reason"`
+	// SkippedAt 是时刻（RFC3339）：面板要的是「多久之前」，不是哪一天。
+	SkippedAt string `json:"skipped_at"`
+}
+
+type subscriptionSkipsBody struct {
+	OK    bool                   `json:"ok"`
+	Skips []subscriptionSkipBody `json:"skips"`
+}
+
+// subscriptionAcceptBody 是「收下」的回执（§8.4：`{movie_id, outcome}`）。
+type subscriptionAcceptBody struct {
+	OK      bool   `json:"ok"`
+	MovieID string `json:"movie_id"`
+	Outcome string `json:"outcome"`
 }
 
 func (s *server) subscriptionsList(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +229,70 @@ func (s *server) subscriptionBackfill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, subscriptionBackfillBody{OK: true, BackfillFrom: dateOf(row.BackfillFrom)})
 }
 
+// subscriptionSkips 是「最近被排掉的」（GET /api/subscriptions/{id}/skips）。
+//
+// 窗口与口径全在服务层（最近 30 天、没被收下的那些）：HTTP 只把它排成 §8.4 的形状。
+func (s *server) subscriptionSkips(w http.ResponseWriter, r *http.Request) {
+	if s.subscriptions == nil {
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+		return
+	}
+	id, ok := subscriptionIDOf(w, r)
+	if !ok {
+		return
+	}
+	skips, err := s.subscriptions.Skips(r.Context(), id)
+	if err != nil {
+		s.writeSubscriptionError(w, err)
+		return
+	}
+
+	body := subscriptionSkipsBody{OK: true, Skips: make([]subscriptionSkipBody, 0, len(skips))}
+	for _, skip := range skips {
+		body.Skips = append(body.Skips, subscriptionSkipBody{
+			ID:          skip.ID,
+			MovieID:     skip.MovieID,
+			Number:      skip.Number,
+			Title:       skip.Title,
+			ReleaseDate: dateOf(skip.ReleaseDate),
+			Reason:      skip.Reason,
+			SkippedAt:   skip.SkippedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// subscriptionAcceptSkip 是「收下」（POST /api/subscriptions/{id}/skips/{skip_id}/accept）。
+//
+// 重复收下幂等：回同一个 outcome，不重复加种（幂等靠服务层下游的 ingest 与 qbt
+// 的 Ensure，不靠一张已收下的表）。
+func (s *server) subscriptionAcceptSkip(w http.ResponseWriter, r *http.Request) {
+	if s.subscriptions == nil {
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+		return
+	}
+	id, ok := subscriptionIDOf(w, r)
+	if !ok {
+		return
+	}
+	skipID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("skip_id")), 10, 64)
+	if err != nil || skipID <= 0 {
+		writeError(w, http.StatusBadRequest, "validation_error", "跳过 id 要是正整数")
+		return
+	}
+
+	result, err := s.subscriptions.AcceptSkip(r.Context(), id, skipID)
+	if err != nil {
+		s.writeSubscriptionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subscriptionAcceptBody{
+		OK:      true,
+		MovieID: result.MovieID,
+		Outcome: result.Outcome,
+	})
+}
+
 // decodeSubscriptionCreate 解析「贴 id 或贴链接」的请求体。
 func decodeSubscriptionCreate(w http.ResponseWriter, r *http.Request) (subscription.Request, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxSubscriptionBody))
@@ -243,6 +334,8 @@ func (s *server) writeSubscriptionError(w http.ResponseWriter, err error) {
 		// （与向导辅助端点的 protocol/network 同档）。
 		writeError(w, http.StatusBadGateway, "upstream_error", err.Error())
 	case errors.Is(err, subscription.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, subscription.ErrSkipNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	default:
 		writeError(w, http.StatusServiceUnavailable, "db_unavailable", err.Error())

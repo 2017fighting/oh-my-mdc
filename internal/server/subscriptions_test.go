@@ -31,6 +31,20 @@ type fakeSubscriber struct {
 
 	backfillRequests []subscription.BackfillRequest
 	backfillErr      error
+
+	// 跳过面（#48）：GET skips 与「收下」。
+	skips          []subscription.Skip
+	skipsErr       error
+	subscriptionID int64
+	acceptCalls    []acceptCall
+	acceptErr      error
+	acceptBody     subscription.AcceptResult
+}
+
+// acceptCall 是「收下」接缝收到的一对 id（订阅 id 与跳过 id 是两件事）。
+type acceptCall struct {
+	subscriptionID int64
+	skipID         int64
 }
 
 func (f *fakeSubscriber) List(context.Context) ([]subscription.Row, error) {
@@ -67,6 +81,19 @@ func (f *fakeSubscriber) Backfill(_ context.Context, id int64, request subscript
 		from = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
 	return subscription.Row{ID: id, BackfillFrom: &from}, nil
+}
+
+func (f *fakeSubscriber) Skips(_ context.Context, id int64) ([]subscription.Skip, error) {
+	f.subscriptionID = id
+	return f.skips, f.skipsErr
+}
+
+func (f *fakeSubscriber) AcceptSkip(_ context.Context, id, skipID int64) (subscription.AcceptResult, error) {
+	f.acceptCalls = append(f.acceptCalls, acceptCall{subscriptionID: id, skipID: skipID})
+	if f.acceptErr != nil {
+		return subscription.AcceptResult{}, f.acceptErr
+	}
+	return f.acceptBody, nil
 }
 
 func newSubscriptionFixture(t *testing.T, subscriber server.Subscriber) http.Handler {

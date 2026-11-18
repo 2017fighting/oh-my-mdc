@@ -3,7 +3,6 @@ package subscription_test
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -46,11 +45,16 @@ func (f *worksSource) ActressWorks(_ context.Context, _ string, _ string, page i
 
 type fakeMagnets struct {
 	byMovie map[string][]appapi.Magnet
-	calls   []string
+	// err 让磁力读取失败（上游抖了的那条路）。
+	err   error
+	calls []string
 }
 
 func (f *fakeMagnets) Magnets(_ context.Context, _ string, movieID string) ([]appapi.Magnet, error) {
 	f.calls = append(f.calls, movieID)
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.byMovie[movieID], nil
 }
 
@@ -76,7 +80,14 @@ type runFixture struct {
 	adder    *fakeAdder
 	settings *fakeSettings
 	loops    *loops.Registry
-	sub      subscription.Row
+	// details/vocabulary/metrics 是筛子（#48）那一段的替身：默认详情里只有一位女优、
+	// 没有类別，于是每一件作品都能收下——没碰筛子的用例不必自己摆它。
+	details    *fakeDetails
+	vocabulary *fakeVocabulary
+	skips      *fakeSkips
+	// logs 收这一轮打的日志：筛子「同一条日志只记一次」全靠它断言。
+	logs *captureLogs
+	sub  subscription.Row
 }
 
 func newRunFixture(t *testing.T) *runFixture {
@@ -101,7 +112,12 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 	settingsFake := runnerSettings()
 	tweak(settingsFake)
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logs := &captureLogs{}
+	logger := slog.New(logs)
+	// 筛子那一段的替身：默认词表就是 ADR-0017 里那三个类別名。
+	details := &fakeDetails{byMovie: map[string]appapi.MovieDetail{}, errs: map[string]error{}}
+	vocabulary := &fakeVocabulary{tags: filterVocabulary()}
+	skips := &fakeSkips{}
 	tasks := task.NewStore(database.Pool())
 	registry := loops.NewRegistry()
 	runner := subscription.NewRunner(subscription.RunnerOptions{
@@ -110,6 +126,9 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 		Outbox:   sidefx.New(database.Pool()),
 		Settings: settingsFake,
 		Source:   works,
+		Details:  details,
+		Tags:     vocabulary,
+		Metrics:  skips,
 		Magnets:  magnets,
 		Adder:    adder,
 		Torrents: torrents,
@@ -125,15 +144,19 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 		Logger: logger,
 	})
 	return &runFixture{
-		database: database,
-		store:    store,
-		runner:   runner,
-		works:    works,
-		magnets:  magnets,
-		adder:    adder,
-		settings: settingsFake,
-		loops:    registry,
-		sub:      sub,
+		database:   database,
+		store:      store,
+		runner:     runner,
+		works:      works,
+		magnets:    magnets,
+		adder:      adder,
+		settings:   settingsFake,
+		loops:      registry,
+		details:    details,
+		vocabulary: vocabulary,
+		skips:      skips,
+		logs:       logs,
+		sub:        sub,
 	}
 }
 

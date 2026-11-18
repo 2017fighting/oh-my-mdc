@@ -205,10 +205,18 @@ func run(logger *slog.Logger) error {
 				// 女优订阅（#47，GLOSSARY「女优订阅」）：第二个待办来源。面板的四个动作走
 				// Service，「产出一批待办作品」走第四个循环——两条订阅共用同一段 ingest。
 				subscriptionStore := subscription.NewStore(database.Pool())
+				// 「收下」把一条跳过转成正常待办，走的是与循环同一条 ingest（ADR-0014），
+				// 所以门面也要那一套依赖：Tasks/Outbox/Magnets/Adder/Torrents/Material。
 				subscriptionService = subscription.NewService(subscription.ServiceOptions{
 					Store:    subscriptionStore,
 					Settings: settingsStore,
 					Source:   javdbIntegration,
+					Tasks:    taskStore,
+					Outbox:   sidefxOutbox,
+					Magnets:  javdbIntegration,
+					Adder:    qbtIntegration,
+					Torrents: mteamIntegration,
+					Material: materials,
 					Logger:   logger,
 				})
 
@@ -274,6 +282,10 @@ func run(logger *slog.Logger) error {
 					Outbox:   sidefxOutbox,
 					Settings: settingsStore,
 					Source:   javdbIntegration,
+					// 筛子（#48，ADR-0017）：详情给三条判据，词表把类別名换成 id。
+					Details:  javdbIntegration,
+					Tags:     javdbIntegration,
+					Metrics:  metricsRegistry,
 					Magnets:  javdbIntegration,
 					Adder:    qbtIntegration,
 					Torrents: mteamIntegration,

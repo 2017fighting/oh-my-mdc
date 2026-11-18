@@ -10,7 +10,11 @@ import (
 	"unicode"
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
+	"github.com/2017fighting/oh-my-mdc/internal/ingest"
+	"github.com/2017fighting/oh-my-mdc/internal/material"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
+	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
+	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
 // 三个哨兵错误：HTTP 面按它们分状态码（400 / 409 / 502），面板按 message 直译。
@@ -58,19 +62,34 @@ type Source interface {
 }
 
 // ServiceOptions 装配订阅门面。
+//
+// 除「名单与身份」那几项外，它还要一份 ingest 的依赖：「收下」把一条跳过转成正常待办，
+// 走的是与循环**同一条**段（ADR-0014）。那些字段为空时只有 AcceptSkip 不能用，
+// 其余四个动作（列表、添加、启停、回灌）不受影响。
 type ServiceOptions struct {
 	Store    *Store
 	Settings Settings
 	Source   Source
+	// Tasks/Outbox/Magnets/Adder/Torrents/Material 是 ingest 的依赖（收下用）。
+	Tasks    *task.Store
+	Outbox   *sidefx.Outbox
+	Magnets  ingest.Magnets
+	Adder    ingest.Adder
+	Torrents ingest.Torrents
+	Material *material.Store
+	// Owner 是 claim 的持有者标识；空则用 hostname-pid。
+	Owner string
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 }
 
-// Service 是面板订阅区的门面：添加、启停、回灌、列表。
+// Service 是面板订阅区的门面：添加、启停、回灌、列表，加跳过表的读与「收下」。
 type Service struct {
 	store    *Store
 	settings Settings
 	source   Source
+	ingest   *ingest.Ingester
+	tasks    *task.Store
 	logger   *slog.Logger
 }
 
@@ -80,7 +99,25 @@ func NewService(opts ServiceOptions) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{store: opts.Store, settings: opts.Settings, source: opts.Source, logger: logger}
+	return &Service{
+		store:    opts.Store,
+		settings: opts.Settings,
+		source:   opts.Source,
+		tasks:    opts.Tasks,
+		// 这一段 ingest 只在「收下」时用：与循环同一套依赖、同一个构造函数（ADR-0014）。
+		ingest: ingest.New(ingest.Options{
+			Store:    opts.Tasks,
+			Outbox:   opts.Outbox,
+			Settings: opts.Settings,
+			Magnets:  opts.Magnets,
+			Adder:    opts.Adder,
+			Torrents: opts.Torrents,
+			Material: opts.Material,
+			Logger:   logger,
+			Owner:    opts.Owner,
+		}),
+		logger: logger,
+	}
 }
 
 // List 读全部订阅（GET /api/subscriptions）。

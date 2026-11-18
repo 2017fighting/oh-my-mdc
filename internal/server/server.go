@@ -169,6 +169,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/subscriptions/{id}/enable", s.subscriptionEnable)
 	mux.HandleFunc("POST /api/subscriptions/{id}/disable", s.subscriptionDisable)
 	mux.HandleFunc("POST /api/subscriptions/{id}/backfill", s.subscriptionBackfill)
+	mux.HandleFunc("GET /api/subscriptions/{id}/skips", s.subscriptionSkips)
+	mux.HandleFunc("POST /api/subscriptions/{id}/skips/{skip_id}/accept", s.subscriptionAcceptSkip)
 	mux.HandleFunc("GET /api/attention", s.attention)
 	mux.HandleFunc("GET /api/side-effects", s.sideEffectsList)
 	mux.HandleFunc("POST /api/side-effects/{id}/retry", s.sideEffectRetry)

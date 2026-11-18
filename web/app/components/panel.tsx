@@ -31,6 +31,7 @@ import {
   subscriptionBackfillDays,
   subscriptionSubtitle,
 } from "~/lib/subscription";
+import { skipAcceptText, skipReasonLabel, skipRowLine, skipsBadge, type SubscriptionSkip } from "~/lib/skips";
 import {
   api,
   notifyEventLabels,
@@ -105,6 +106,7 @@ export function Panel({
   sideEffects,
   backfill,
   subscriptions,
+  subscriptionSkips,
   query,
   pageSize,
   loadedAt,
@@ -125,6 +127,11 @@ export function Panel({
   backfill: BackfillScan | null;
   /** 订阅区（女优订阅，§6.4）；null = 读不到，整块不渲染。 */
   subscriptions: SubscriptionList | null;
+  /**
+   * 「最近被排掉的」按订阅 id 分摊（GLOSSARY「跳过」）；某一条是 null＝那一条读不到，
+   * 于是那块折叠格不渲染——一个假的 0 会让人以为判据从没命中过。
+   */
+  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
   query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
@@ -471,6 +478,7 @@ export function Panel({
 
         <SubscriptionPanel
           subscriptions={subscriptions}
+          subscriptionSkips={subscriptionSkips}
           onReceipt={receiptsState.push}
           onRefresh={onRefresh}
         />
@@ -1005,10 +1013,12 @@ function BackfillDirs({
  */
 function SubscriptionPanel({
   subscriptions,
+  subscriptionSkips,
   onReceipt,
   onRefresh,
 }: {
   subscriptions: SubscriptionList | null;
+  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
   onReceipt: (draft: ReceiptDraft) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -1045,6 +1055,7 @@ function SubscriptionPanel({
               <SubscriptionRow
                 key={row.id}
                 row={row}
+                skips={subscriptionSkips[row.id] ?? null}
                 onReceipt={onReceipt}
                 onRefresh={onRefresh}
               />
@@ -1059,10 +1070,13 @@ function SubscriptionPanel({
 /** SubscriptionRow 是订阅区的一行：身份、水位线与「带来 N 部」，加回灌与启停两组动作。 */
 function SubscriptionRow({
   row,
+  skips,
   onReceipt,
   onRefresh,
 }: {
   row: Subscription;
+  /** 最近被排掉的（null＝那一条读不到，这块不渲染）。 */
+  skips: SubscriptionSkip[] | null;
   onReceipt: (draft: ReceiptDraft) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -1144,6 +1158,7 @@ function SubscriptionRow({
           {row.enabled ? null : <Badge variant="outline">已停用</Badge>}
         </div>
         <p className="dense tabular-nums text-muted-foreground">{subscriptionSubtitle(row)}</p>
+        <SkippedBlock row={row} skips={skips} onReceipt={onReceipt} onRefresh={onRefresh} />
         {error ? (
           <Notice tone="bad" onClose={() => setError(null)}>
             {error}
@@ -1197,6 +1212,114 @@ function SubscriptionRow({
           {row.enabled ? "停用" : "恢复"}
         </RowAction>
       </div>
+    </div>
+  );
+}
+
+/**
+ * SkippedBlock 是订阅区内那个「最近被排掉的」折叠格（规格 §8.2，GLOSSARY「跳过 / 收下」）。
+ *
+ * 收起时就是一行：一句标题 + 计数徽标。徽标要在收起时就能读——它回答的是「要不要展开」。
+ * 展开后逐行：番号/标题/发行日、为什么被排掉、何时，加一颗「收下」。
+ *
+ * 判据可以错（ADR-0017），所以这块不是日志，而是出口：误伤的真四小时单体作品就在这里
+ * 被救回来。收下后重新读一次跳过表与面板（任务表里多了一部，那才是收下的证据）。
+ */
+function SkippedBlock({
+  row,
+  skips,
+  onReceipt,
+  onRefresh,
+}: {
+  row: Subscription;
+  skips: SubscriptionSkip[] | null;
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState<number | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const bodyID = React.useId();
+  const name = row.actor.name || row.actor.javdb_actor_id;
+
+  // 还没读到（或这一行没有数据）时这一块不渲染：一个“0”会被误读成“没排掉任何作品”。
+  if (skips === null) return null;
+
+  const accept = async (skip: SubscriptionSkip) => {
+    if (busy !== null) return;
+    setBusy(skip.id);
+    setError(null);
+    try {
+      const result = await api.acceptSubscriptionSkip(row.id, skip.id);
+      onReceipt({ title: skip.number, tone: "ok", verb: "收下", text: skipAcceptText(result.outcome) });
+      // 整页重读：任务表里多了一部、跳过格里少了一行，两件事都在同一份快照里。
+      await onRefresh();
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={bodyID}
+        onClick={() => setOpen((current) => !current)}
+        className="dense inline-flex min-h-11 items-center gap-1.5 rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:min-h-0"
+      >
+        最近被排掉的
+        <Badge variant="outline" className="tabular-nums">
+          {skipsBadge(skips.length)}
+        </Badge>
+        <span aria-hidden>·</span>
+        {open ? "收起" : "展开"}
+      </button>
+      {open ? (
+        <div id={bodyID} className="mt-2 flex flex-col gap-2 border-l pl-3">
+          {skips.length === 0 ? (
+            <p className="dense text-muted-foreground">
+              最近 30 天没有被排掉的作品（多人一起的 / 精选合集 / 长合集）。
+            </p>
+          ) : (
+            skips.map((skip) => (
+              <div
+                key={skip.id}
+                data-skip={skip.movie_id}
+                className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-x-4"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="dense break-words">{skipRowLine(skip)}</p>
+                  <p className="dense tabular-nums text-muted-foreground">
+                    {skipReasonLabel(skip.reason)} · {formatWhen(skip.skipped_at)}被排掉
+                  </p>
+                </div>
+                <RowAction
+                  onClick={() => void accept(skip)}
+                  disabled={busy !== null}
+                  aria-label={`收下 ${skip.number}`}
+                  title="判据可以错，出口必须留：收下就当它从没被排过——建任务并入队"
+                >
+                  {busy === skip.id ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
+                  收下
+                </RowAction>
+              </div>
+            ))
+          )}
+          {error ? (
+            <Notice tone="bad" onClose={() => setError(null)}>
+              {error}
+            </Notice>
+          ) : null}
+          {skips.length > 0 ? (
+            <p className="dense text-muted-foreground">
+              {name} 的这些作品按三条判据不该收下；收下会把它们转成正常待办。
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1693,9 +1816,9 @@ type ReceiptDraft = RetryNotice & {
   title: string;
   /**
    * 回执说的那个动作本身：任务侧是「重试」，副作用侧是「重发」，订阅区是
-   * 「订阅 / 回灌 / 停用 / 恢复」。播报位念的是「已<verb> <title> · <text>」。
+   * 「订阅 / 回灌 / 停用 / 恢复」，跳过表格里是「收下」。播报位念的是「已<verb> <title> · <text>」。
    */
-  verb?: "重试" | "重发" | "订阅" | "回灌" | "停用" | "恢复";
+  verb?: "重试" | "重发" | "订阅" | "回灌" | "停用" | "恢复" | "收下";
 };
 
 /** Receipt 是已经发出的一条回执。 */
