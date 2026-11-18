@@ -211,6 +211,18 @@ export type SubscriptionWrite = {
   actress: Subscription;
 };
 
+/**
+ * 启停的回执：outcome 说的是「它现在是什么状态」，不是「这条订阅是怎么来的」。
+ *
+ * 与 `SubscriptionWrite` 分开是刻意的：那边的 outcome 是 created / duplicate，
+ * 这边是 enabled / disabled——同一个字段装两套词，读的人迟早会问「enabled 是什么意思」。
+ */
+export type SubscriptionToggle = {
+  ok: boolean;
+  outcome: "enabled" | "disabled";
+  actress: Subscription;
+};
+
 /** 版本状态：四个值是规格 §3 的完整集合（任务级状态由视图聚合，名字相同）。 */
 export type TaskState = "downloading" | "processing" | "finished" | "failed";
 
@@ -592,7 +604,7 @@ export const api = {
 
   /** 启停：停用只停追新，已建任务照走完。 */
   setSubscriptionEnabled: (id: number, enabled: boolean) =>
-    request<SubscriptionWrite>(`/api/subscriptions/${id}/${enabled ? "enable" : "disable"}`, {
+    request<SubscriptionToggle>(`/api/subscriptions/${id}/${enabled ? "enable" : "disable"}`, {
       method: "POST",
     }),
 

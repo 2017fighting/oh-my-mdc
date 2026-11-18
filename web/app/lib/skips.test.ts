@@ -17,7 +17,9 @@ import {
 
 test("三条判据各有一句人话", () => {
   assert.equal(skipReasonLabel("not_single"), "多人一起的");
-  assert.equal(skipReasonLabel("compilation"), "精选合集");
+  // 「合集」那一族的词以 GLOSSARY 为准：判据读的就是类別「精選綜合」，人话用标签名，
+  // 不用被 `_Avoid_` 点名的「精选」。
+  assert.equal(skipReasonLabel("compilation"), "精選綜合");
   assert.equal(skipReasonLabel("long_form"), "长合集");
 });
 

@@ -24,16 +24,18 @@ export function subscriptionAddBody(raw: string): SubscriptionAddBody | null {
 /**
  * subscriptionBackfillDays 把「自由天数」那一格翻成能发的天数，不合法回 null。
  *
- * 两条判据：正整数，且**越过回看窗口**。后者不是洁癖——水位线 − days 落在回看窗口里
- * 就是空操作（下一轮本来就会看那么远），服务端会 400；面板先自己守住，那颗按钮因此
- * 只在真有作用时亮着（规格 §8.4）。
+ * 只判一件面板能判的事：正整数。**不**再拿它和回看窗口比——回看窗口只在起追日之后
+ * 游走，盖不住回灌那一段（新订阅的起追日就是今天，回灌 30 天正是把窗口拨回去的
+ * 那一下，§8.4）。「这一次回灌是不是空操作」要比起追日，面板手里没有那一列
+ * （`Subscription` 只有水位线）：服务端会算出落点，被起追日盖住时回 400，那句话
+ * 原样落在这一行的错误条上。
  */
-export function subscriptionBackfillDays(raw: string, lookbackDays: number): number | null {
+export function subscriptionBackfillDays(raw: string): number | null {
   const trimmed = raw.trim();
   // 只认十进制数字：`1e3`、`1.5`、`-30` 都不是「天数」的写法。
   if (!/^[0-9]+$/.test(trimmed)) return null;
   const days = Number(trimmed);
-  if (!Number.isSafeInteger(days) || days <= lookbackDays) return null;
+  if (!Number.isSafeInteger(days) || days < 1) return null;
   return days;
 }
 

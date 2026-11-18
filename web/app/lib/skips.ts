@@ -1,10 +1,19 @@
 /**
  * 「最近被排掉的」那块折叠格（规格 §8.2/§8.4，GLOSSARY「跳过 / 收下」）。
  *
- * 订阅的筛子会在详情层排掉三类作品（多人一起的 / 精选合集 / 长合集），被排掉的一律
+ * 订阅的筛子会在详情层排掉三类作品（多人一起的 / 精選綜合 / 长合集），被排掉的一律
  * 落跳过表、留在面板上 30 天——“判据可以错，出口必须留”这句话的落点就是这块折叠格。
  * 这里只放纯逻辑：判据名说成什么、一行怎么写、收下的回执怎么念。
  */
+
+/**
+ * SkipReason 是三条判据（§6.4 筛子，GLOSSARY「合集」）。
+ *
+ * 与服务端同一套词：`subscription_skip.reason` 有 CHECK 约束，Go 侧是
+ * `metrics.ReasonNotSingle / ReasonCompilation / ReasonLongForm`。名字就是字符串本身
+ * ——跳过的 identity 是 `(subscription_id, movie_id)`，reason 只是「为什么被排掉」的解释。
+ */
+export type SkipReason = "not_single" | "compilation" | "long_form";
 
 /** SubscriptionSkip 是 GET /api/subscriptions/{id}/skips 的一行（§8.4）。 */
 export type SubscriptionSkip = {
@@ -14,8 +23,8 @@ export type SubscriptionSkip = {
   title: string;
   /** 发行日（`YYYY-MM-DD`）；上游没给时是 null（面板不说那一天，不编今天）。 */
   release_date: string | null;
-  /** 三条判据之一：not_single / compilation / long_form（与服务端同一套词）。 */
-  reason: string;
+  /** 三条判据之一（与服务端同一套词）。 */
+  reason: SkipReason;
   /** 落行时刻（RFC3339）：面板要的是「多久之前」。 */
   skipped_at: string;
 };
@@ -23,15 +32,20 @@ export type SubscriptionSkip = {
 /**
  * skipReasonLabel 把判据说成一句人话。
  *
+ * 三个词都取 GLOSSARY 允许的写法：「合集」那一族只许说「合集 / 精選綜合 / 长合集」，
+ * 不许说「精选」（`_Avoid_` 那一行点名的正是它）。`compilation` 的判据就是类別标签
+ * 「精選綜合」，所以那句人话直接用标签名——用户在上游页面看到的是同一个词。
+ *
  * 认不出来就原样回那个词：面板多显示一个陌生词，好过把一条新判据说成某个已知的旧词
- * （那会让人对着“长合集”去救一部共演）。
+ * （那会让人对着“长合集”去救一部共演）。参数的宽类型是刻意的：值域由库里那几条 CHECK
+ * 约束守着，面板对未知值只能原样透出。
  */
-export function skipReasonLabel(reason: string): string {
+export function skipReasonLabel(reason: SkipReason | string): string {
   switch (reason) {
     case "not_single":
       return "多人一起的";
     case "compilation":
-      return "精选合集";
+      return "精選綜合";
     case "long_form":
       return "长合集";
     default:

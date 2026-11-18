@@ -32,19 +32,17 @@ test("空输入不编一个请求体：那颗按钮该是禁用的", () => {
   assert.equal(subscriptionAddBody("   "), null);
 });
 
-test("自由天数要越过回看窗口，否则那颗按钮不该亮", () => {
-  // 回灌 90 / 365 天：越过默认回看窗口（30），真能把下界往回拨。
-  assert.equal(subscriptionBackfillDays("90", 30), 90);
-  assert.equal(subscriptionBackfillDays(" 365 ", 30), 365);
-  assert.equal(subscriptionBackfillDays("31", 30), 31);
-
-  // days ≤ 回看窗口是空操作（服务端会 400）：面板先不给点亮，别发一个什么都不做的请求。
-  assert.equal(subscriptionBackfillDays("30", 30), null);
-  assert.equal(subscriptionBackfillDays("7", 30), null);
+test("自由天数只要是正整数就能发：回灌 30 天正是把窗口拨回去的那一下", () => {
+  // 新订阅的起追日就是建订阅当天，所以 30 天不是空操作（§8.4）——它是把窗口
+  // 拨回三十天前的唯一手段（#47/#49 的验收就按 30 天回灌写）。
+  assert.equal(subscriptionBackfillDays("30"), 30);
+  assert.equal(subscriptionBackfillDays(" 90 "), 90);
+  assert.equal(subscriptionBackfillDays("365"), 365);
+  assert.equal(subscriptionBackfillDays("1"), 1);
 
   // 不是正整数的一律不猜。
   for (const bad of ["", "   ", "abc", "0", "-30", "1.5", "1e3", "三月"]) {
-    assert.equal(subscriptionBackfillDays(bad, 30), null, bad);
+    assert.equal(subscriptionBackfillDays(bad), null, bad);
   }
 });
 
