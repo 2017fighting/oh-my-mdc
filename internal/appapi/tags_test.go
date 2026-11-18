@@ -121,3 +121,47 @@ func TestTagsTakesAnEmptyVocabularyAsAnAnswer(t *testing.T) {
 		t.Errorf("tags = %+v, want 空", tags)
 	}
 }
+
+// groupedTagsBody 是 `/api/v2/tags?type=0` 的**真实**形态（javdb_rss 2026-10-04 捕获，
+// tags_type0.json）：顶层是 11 个类別分组，标签嵌在每个分组的 `tags` 里。
+//
+// 这份夹具存在的理由很具体：原先只用扁平形态测，于是「把一个分组当成缺 id 的条目丢掉」
+// 这个 bug 一路绿到生产——2026-11-18 拿真 token 实测才发现词表拿到 n=0 且不报错，
+// compilation/long_form 两条判据静默失效。
+const groupedTagsBody = `{"tags":[
+	{"category":"基本","category_id":"main","tags":[
+		{"id":"p","name":"可播放"},{"id":"m","name":"可下載"},{"id":"c","name":"含字幕"},
+		{"id":"s","name":"單體影片"},{"id":"i","name":"含預覽圖"},{"id":"v","name":"含預覽視頻"}]},
+	{"category":"年份","category_id":"year","tags":[{"id":"2026","name":"2026"}]},
+	{"category":"類別","category_id":"category","tags":[
+		{"id":"8","name":"精選綜合"},{"id":"10","name":"4小時以上作品"},
+		{"id":"161","name":"16小時以上作品"},{"id":"28","name":"單體作品"}]}
+]}`
+
+// TestTagVocabularyFlattensCategoryGroups 钉住分组形态能被摊平：筛子按名字查 id
+// 必须在这份真形态上成立，而不是只在扁平夹具上成立。
+func TestTagVocabularyFlattensCategoryGroups(t *testing.T) {
+	c, _ := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(envBody(groupedTagsBody)))
+	})
+	c.Token = "tk"
+
+	tags, err := c.TagVocabulary(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	byName := map[string]string{}
+	for _, tag := range tags {
+		byName[tag.Name] = tag.ID
+	}
+	for name, want := range map[string]string{
+		"精選綜合": "8", "4小時以上作品": "10", "16小時以上作品": "161", "單體作品": "28",
+	} {
+		if got := byName[name]; got != want {
+			t.Errorf("%q 的 id = %q, want %q（分组形态没摊平？）", name, got, want)
+		}
+	}
+	if len(tags) == 0 {
+		t.Fatal("词表为空：分组形态被当成缺 id 的条目全丢了")
+	}
+}

@@ -47,9 +47,31 @@ func (c *Client) TagVocabulary(ctx context.Context, tagType int) ([]Tag, error) 
 }
 
 // tagWire 是词表里一条的线格式（id/name 之外的字段一概不读）。
+//
+// **两个形态的关键在这里**：真上游（javdb_rss 的 2026-10-04 捕获，`tags_type0.json`）
+// 顶层是「分组」而不是标签——`{"tags":[{"category":"基本","category_id":"main",
+// "tags":[{"id":"p","name":"可播放"},…]}]}`。按扁平形态去解只会把每个分组当成
+// 缺 id 的条目丢掉，得到一张**空词表且不报错**的假象（2026-11-18 真 token 实测：n=0, err=nil），
+// 于是 `compilation`/`long_form` 两条判据静默失效。因此 `Tags` 字段是必须的。
 type tagWire struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Tags 是分组形态里嵌的那一层；扁平形态没有它。
+	Tags []tagWire `json:"tags"`
+}
+
+// flatten 把两种形态摊平：分组先展开子项，扁平条目自己留着。
+//
+// 分组自身若带 id/name（上游将来两种混写）也算一条，不浪费。
+func (w tagWire) flatten() []tagWire {
+	if len(w.Tags) == 0 {
+		return []tagWire{w}
+	}
+	out := make([]tagWire, 0, len(w.Tags)+1)
+	if w.ID != "" && w.Name != "" {
+		out = append(out, tagWire{ID: w.ID, Name: w.Name})
+	}
+	return append(out, w.Tags...)
 }
 
 // decodeTags 解两种形态里的任意一种，摊成 Tag 并丢掉认不出的条目。
@@ -70,15 +92,17 @@ func decodeTags(raw json.RawMessage) ([]Tag, error) {
 	}
 
 	out := make([]Tag, 0, len(items))
-	for _, item := range items {
-		id := strings.TrimSpace(item.ID)
-		name := strings.TrimSpace(item.Name)
-		// 缺 id 或空名字的条目一概不认：拿空 id 去比对详情会把整批作品判成合集，
-		// 拿空名字去查则永远查不到——两者都只会静默做错事。
-		if id == "" || name == "" {
-			continue
+	for _, group := range items {
+		for _, item := range group.flatten() {
+			id := strings.TrimSpace(item.ID)
+			name := strings.TrimSpace(item.Name)
+			// 缺 id 或空名字的条目一概不认：拿空 id 去比对详情会把整批作品判成合集，
+			// 拿空名字去查则永远查不到——两者都只会静默做错事。
+			if id == "" || name == "" {
+				continue
+			}
+			out = append(out, Tag{ID: id, Name: name})
 		}
-		out = append(out, Tag{ID: id, Name: name})
 	}
 	return out, nil
 }
