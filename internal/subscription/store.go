@@ -247,37 +247,33 @@ func (s *Store) SetEnabled(ctx context.Context, id int64, enabled bool) (Row, er
 	return s.Get(ctx, id)
 }
 
-// SetBackfill 把取数下界往回拨 days 天（§6.4 回灌），同时把起追日往前挪。
+// BackfillAllFloor 是「全部」那一档的落点：1970-01-01。
 //
-// 两件事都动：backfill_from 是这次回灌的游标（扫完由循环清 NULL），floor_date 是
-// 「这条订阅永不看她之前」的永久下界——回灌是它唯一能往前挪的手段，所以不清。
-// 起追日只会越来越早（LEAST）：再点一次短的回灌不会把上次挪开的窗口关小。
-func (s *Store) SetBackfill(ctx context.Context, id int64, days int) (Row, error) {
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE subscription
-		 SET backfill_from = LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) - $2::int),
-		     floor_date = LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) - $2::int),
-		     updated_at = now()
-		 WHERE id = $1`, id, days,
-	); err != nil {
-		return Row{}, fmt.Errorf("subscription: 设订阅 %d 的回灌窗口: %w", id, err)
-	}
-	return s.Get(ctx, id)
+// 它不是「很早的一个日期」而是「没有下界」的那个数：JavDB 上没有比它更早的作品，写死它
+// 比再引入一层 NULL 语义（回灌下界已经用过那个坑位）更直白。
+func BackfillAllFloor() time.Time {
+	return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 }
 
-// SetBackfillAll 是「全部」那颗按钮：起追日与游标一并挪到 1970-01-01。
+// SetBackfill 把回灌下界与起追日一并往回拨到 at（§6.4 回灌），由调用方算好目标日。
 //
-// 1970-01-01 不是「很早的一个日期」而是「没有下界」的那个数：JavDB 上没有比它更早的
-// 作品，写死它比再引入一层 NULL 语义（回灌下界已经用过那个坑位）更直白。
-func (s *Store) SetBackfillAll(ctx context.Context, id int64) (Row, error) {
+// 两个列写同一个日子：backfill_from 是这次回灌的扫数下界（扫完由循环清 NULL），
+// floor_date 是「这条订阅永不看她之前」的永久下界——回灌是它唯一能往前挪的手段，
+// 所以不清。目标日由调用方给（天数 → 日期只有一种算法，见 service 的 backfillTarget），
+// 于是「回灌 N 天」与「全部」走**同一条语句**，LEAST 也只写一处：起追日只会越来越早，
+// 再点一次短的回灌不会把上次挪开的窗口关小。
+func (s *Store) SetBackfill(ctx context.Context, id int64, at time.Time) (Row, error) {
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE subscription
-		 SET backfill_from = LEAST(floor_date, DATE '1970-01-01'),
-		     floor_date = LEAST(floor_date, DATE '1970-01-01'),
-		     updated_at = now()
-		 WHERE id = $1`, id,
+		`WITH resolved AS (
+		     SELECT id, LEAST(floor_date, $2::date) AS at
+		     FROM subscription WHERE id = $1
+		 )
+		 UPDATE subscription s
+		    SET backfill_from = r.at, floor_date = r.at, updated_at = now()
+		   FROM resolved r
+		  WHERE s.id = r.id`, id, at.Format(dateLayout),
 	); err != nil {
-		return Row{}, fmt.Errorf("subscription: 设订阅 %d 的全量回灌: %w", id, err)
+		return Row{}, fmt.Errorf("subscription: 设订阅 %d 的回灌窗口: %w", id, err)
 	}
 	return s.Get(ctx, id)
 }
@@ -306,7 +302,7 @@ func (s *Store) Seen(ctx context.Context, id int64, seen time.Time, clearBackfil
 		     backfill_from = CASE WHEN $3 THEN NULL ELSE backfill_from END,
 		     updated_at = now()
 		 WHERE id = $1`,
-		id, seen.Format("2006-01-02"), clearBackfill,
+		id, seen.Format(dateLayout), clearBackfill,
 	); err != nil {
 		return fmt.Errorf("subscription: 推进订阅 %d 的水位线: %w", id, err)
 	}

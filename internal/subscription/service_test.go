@@ -380,10 +380,10 @@ func TestBackfillMovesTheLowerBoundBackwards(t *testing.T) {
 	}
 }
 
-// TestBackfillRejectsDaysWithinTheLookback 是 §8.4 那条 400：days ≤ 回看窗口是**空操作**
-// ——水位线 − days 落在回看窗口里面，下一轮本来就会看那么远。与其发一个什么都不做的
-// 按钮，不如当场说清「回看窗口已经覆盖」。
-func TestBackfillRejectsDaysWithinTheLookback(t *testing.T) {
+// TestBackfillAcceptsThirtyDaysOnAFreshSubscription 是 §8.4 更正后的那条规则的正例：
+// 新订阅的起追日就是今天，于是「回灌 30 天」正是把窗口挪回三十天前的那**一下**
+// （#47/#49 的验收都按 30 天回灌写）。回看窗口覆盖不到那里——它只在起追日之后游走。
+func TestBackfillAcceptsThirtyDaysOnAFreshSubscription(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	created, _, err := f.service.Add(ctx, subscription.Request{ActressID: "EvkJ"})
@@ -391,33 +391,99 @@ func TestBackfillRejectsDaysWithinTheLookback(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	for _, days := range []int{1, created.LookbackDays} {
-		_, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: days})
-		if !errors.Is(err, subscription.ErrBadInput) {
-			t.Fatalf("days=%d 的 err = %v, want ErrBadInput", days, err)
-		}
-		// 这句话要能告诉用户「为什么不行」：回看窗口已经覆盖到那里了。
-		if !strings.Contains(err.Error(), "回看窗口") {
-			t.Errorf("days=%d 的 message = %q, want 说到回看窗口", days, err)
-		}
-	}
-
-	// 被拒就是零写入：起追日与游标都原样。
-	row, err := f.service.List(ctx)
+	row, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: 30})
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("新订阅回灌 30 天的 err = %v, want nil（起追日在今天，30 天前更早）", err)
 	}
-	if len(row) != 1 || row[0].BackfillFrom != nil || dateOf(row[0].FloorDate) != f.dbDate(t, 0) {
-		t.Fatalf("被拒的回灌写了东西: %+v", row)
+	if row.BackfillFrom == nil {
+		t.Fatal("backfill_from = NULL, want 水位线 − 30 天")
 	}
-
-	// 越过回看窗口一天就成立。
-	if _, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: created.LookbackDays + 1}); err != nil {
-		t.Errorf("days=lookback+1 的 err = %v, want nil（这才是能推进的那一档）", err)
+	if got, want := dateOf(*row.BackfillFrom), f.dbDate(t, 30); got != want {
+		t.Errorf("backfill_from = %s, want %s", got, want)
+	}
+	// 窗口真的回到了三十天前：起追日是「这条订阅从此敢看多早」的那一列。
+	if got, want := dateOf(row.FloorDate), f.dbDate(t, 30); got != want {
+		t.Errorf("floor_date = %s, want %s（回灌把起追日往前挪）", got, want)
+	}
+	// 水位线不动：回灌放宽窗口，不假装「又从今天往后算」。
+	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 0) {
+		t.Errorf("回灌动了水位线: %v", row.WatermarkDate)
 	}
 }
 
-// TestBackfillAllReaches1970 是「全部」那颗按钮：起追日与游标一并挪到 1970-01-01，
+// TestBackfillRejectsNoOpReplays 是 §8.4 那条 400 更正后的口径：只拒**真的什么都不做**
+// 的回灌——落点（水位线 − days）不比起追日更早，LEAST 之后什么都不会变。
+// 「days ≤ 回看窗口」不是空操作：回看窗口只在起追日之后游走。
+func TestBackfillRejectsNoOpReplays(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, _, err := f.service.Add(ctx, subscription.Request{ActressID: "EvkJ"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// 先回灌 90 天：起追日落到九十天前。
+	first, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: 90})
+	if err != nil {
+		t.Fatalf("Backfill(90): %v", err)
+	}
+
+	// 再点 30 天 / 1 天：落点还在起追日之后，LEAST 之后什么都没变——这才是空操作。
+	for _, days := range []int{1, 30, 90} {
+		_, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: days})
+		if !errors.Is(err, subscription.ErrBadInput) {
+			t.Fatalf("days=%d 的 err = %v, want ErrBadInput（落点不比起追日更早）", days, err)
+		}
+		// 这句话要能告诉用户「为什么不行」：这一段已经被覆盖了。
+		if !strings.Contains(err.Error(), "覆盖") {
+			t.Errorf("days=%d 的 message = %q, want 说到这一段已被覆盖", days, err)
+		}
+	}
+
+	// 被拒就是零写入：起追日与回灌下界都还是上一次 90 天那一下的结果。
+	rows, err := f.service.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("订阅行数 = %d, want 1", len(rows))
+	}
+	got := rows[0]
+	if got.BackfillFrom == nil || dateOf(*got.BackfillFrom) != dateOf(*first.BackfillFrom) {
+		t.Errorf("被拒的回灌改了 backfill_from：%v → %v", dateOf(*first.BackfillFrom), got.BackfillFrom)
+	}
+	if dateOf(got.FloorDate) != dateOf(first.FloorDate) {
+		t.Errorf("被拒的回灌改了起追日：%s → %s", dateOf(first.FloorDate), dateOf(got.FloorDate))
+	}
+
+	// 再往前拨一天仍然成立：更早的落点没被起追日盖住。
+	if _, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: 91}); err != nil {
+		t.Errorf("days=91 的 err = %v, want nil（比已有的下界更早）", err)
+	}
+}
+
+// TestBackfillRejectsAtTheFloorItself 钉住「不更早即空操作」的边界：落点**正好等于**
+// 起追日时也不写（LEAST 之后什么都没变），400 说的是这一段已经被覆盖。
+func TestBackfillRejectsAtTheFloorItself(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, _, err := f.service.Add(ctx, subscription.Request{ActressID: "EvkJ"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// 「全部」把起追日拨到 1970-01-01：此后任何天数都落在它之后（＝已被覆盖）。
+	if _, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{All: true}); err != nil {
+		t.Fatalf("Backfill(all): %v", err)
+	}
+
+	_, err = f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: 3650})
+	if !errors.Is(err, subscription.ErrBadInput) {
+		t.Fatalf("全部之后回灌 3650 天的 err = %v, want ErrBadInput", err)
+	}
+}
+
+// TestBackfillAllReaches1970 是「全部」那颗按钮：起追日与回灌下界一并挪到 1970-01-01，
 // 也就是「没有下界」。
 func TestBackfillAllReaches1970(t *testing.T) {
 	f := newFixture(t)

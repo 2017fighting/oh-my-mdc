@@ -84,6 +84,17 @@ type subscriptionCreateBody struct {
 	Actress subscriptionBody `json:"actress"`
 }
 
+// subscriptionToggleBody 是启停的回执：outcome ∈ enabled / disabled。
+//
+// 它是自己的一种回执，不借创建那一种：那边的 outcome 说「这条订阅是怎么来的」
+// （created / duplicate），这边说「它现在是什么状态」——同一个字段装两套词，
+// 读的人迟早会对着 "enabled" 问「那 duplicate 是什么意思」。
+type subscriptionToggleBody struct {
+	OK      bool             `json:"ok"`
+	Outcome string           `json:"outcome"`
+	Actress subscriptionBody `json:"actress"`
+}
+
 // subscriptionBackfillRequest 是回灌的两种请求体（§8.4）：{days} 或 {all: true}。
 //
 // Days 是 *int：缺了（nil）与给了 0 是两件事——前者是「既没给 days 也没给 all」，
@@ -123,9 +134,18 @@ type subscriptionAcceptBody struct {
 	Outcome string `json:"outcome"`
 }
 
+// subscriptionsReady 是六个订阅 handler 共用的装配门（与补录端点同一口径：没装配
+// 就 503，而不是一个空 200）。
+func (s *server) subscriptionsReady(w http.ResponseWriter) bool {
+	if s.subscriptions != nil {
+		return true
+	}
+	writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	return false
+}
+
 func (s *server) subscriptionsList(w http.ResponseWriter, r *http.Request) {
-	if s.subscriptions == nil {
-		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	if !s.subscriptionsReady(w) {
 		return
 	}
 	rows, err := s.subscriptions.List(r.Context())
@@ -141,8 +161,7 @@ func (s *server) subscriptionsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) subscriptionCreate(w http.ResponseWriter, r *http.Request) {
-	if s.subscriptions == nil {
-		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	if !s.subscriptionsReady(w) {
 		return
 	}
 
@@ -175,8 +194,7 @@ func (s *server) subscriptionDisable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) subscriptionSetEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
-	if s.subscriptions == nil {
-		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	if !s.subscriptionsReady(w) {
 		return
 	}
 	id, ok := subscriptionIDOf(w, r)
@@ -188,7 +206,7 @@ func (s *server) subscriptionSetEnabled(w http.ResponseWriter, r *http.Request, 
 		s.writeSubscriptionError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, subscriptionCreateBody{
+	writeJSON(w, http.StatusOK, subscriptionToggleBody{
 		OK:      true,
 		Outcome: outcomeFor(enabled),
 		Actress: subscriptionBodyOf(row),
@@ -196,8 +214,7 @@ func (s *server) subscriptionSetEnabled(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *server) subscriptionBackfill(w http.ResponseWriter, r *http.Request) {
-	if s.subscriptions == nil {
-		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	if !s.subscriptionsReady(w) {
 		return
 	}
 	id, ok := subscriptionIDOf(w, r)
@@ -236,8 +253,7 @@ func (s *server) subscriptionBackfill(w http.ResponseWriter, r *http.Request) {
 //
 // 窗口与口径全在服务层（最近 30 天、没被收下的那些）：HTTP 只把它排成 §8.4 的形状。
 func (s *server) subscriptionSkips(w http.ResponseWriter, r *http.Request) {
-	if s.subscriptions == nil {
-		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	if !s.subscriptionsReady(w) {
 		return
 	}
 	id, ok := subscriptionIDOf(w, r)
@@ -270,8 +286,7 @@ func (s *server) subscriptionSkips(w http.ResponseWriter, r *http.Request) {
 // 重复收下幂等：回同一个 outcome，不重复加种（幂等靠服务层下游的 ingest 与 qbt
 // 的 Ensure，不靠一张已收下的表）。
 func (s *server) subscriptionAcceptSkip(w http.ResponseWriter, r *http.Request) {
-	if s.subscriptions == nil {
-		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+	if !s.subscriptionsReady(w) {
 		return
 	}
 	id, ok := subscriptionIDOf(w, r)
@@ -336,9 +351,8 @@ func (s *server) writeSubscriptionError(w http.ResponseWriter, err error) {
 		// 「这个 id 在上游读不到」：要用户改输入，也可能是上游抖了——502 是这条的既有口径
 		// （与向导辅助端点的 protocol/network 同档）。
 		writeError(w, http.StatusBadGateway, "upstream_error", err.Error())
-	case errors.Is(err, subscription.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found", err.Error())
-	case errors.Is(err, subscription.ErrSkipNotFound):
+	case errors.Is(err, subscription.ErrNotFound), errors.Is(err, subscription.ErrSkipNotFound):
+		// 两种「这一行不存在」（订阅 id / 跳过 id）在 HTTP 面上是同一件事：404 not_found。
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	default:
 		writeError(w, http.StatusServiceUnavailable, "db_unavailable", err.Error())

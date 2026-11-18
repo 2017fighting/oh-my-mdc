@@ -16,7 +16,7 @@ import (
 // 三条判据（ADR-0017 的表，顺序就是这里判的顺序）：
 //
 //	len(actors) > 1                      → not_single（多人一起的）
-//	类別带「精選綜合」                    → compilation（她自己的精选合集）
+//	类別带「精選綜合」                    → compilation（她自己的合集，类別名就是「精選綜合」）
 //	类別带「4 小時以上作品」/「16 小時以上作品」 → long_form（她自己的长合集）
 //
 // 标签 id **不硬编码**：按名字去 `GET /api/v2/tags?type=0` 的词表里查（ADR-0017），
@@ -30,9 +30,11 @@ type DetailSource interface {
 	Detail(ctx context.Context, token, movieID string) (appapi.DetailResult, error)
 }
 
-// VocabularySource 是标签词表的接缝（真实实现是 javdb.Integration.Tags）。
+// VocabularySource 是标签词表的接缝（真实实现是 javdb.Integration.TagVocabulary）。
+//
+// 签名与那一层逐位相同（ctx + token）：片库号是实现的细节（钉死 0），这一层不该知道。
 type VocabularySource interface {
-	Tags(ctx context.Context, token string) ([]appapi.Tag, error)
+	TagVocabulary(ctx context.Context, token string) ([]appapi.Tag, error)
 }
 
 // 两条标签判据要找的类別名（ADR-0017）。名字是**翻译文本**，不是 id：
@@ -80,7 +82,7 @@ func (r *Runner) screenTags(ctx context.Context, token string) tagIDs {
 	if r.tags == nil {
 		return tagIDs{}
 	}
-	vocabulary, err := r.tags.Tags(ctx, token)
+	vocabulary, err := r.tags.TagVocabulary(ctx, token)
 	if err != nil {
 		if !r.vocab.failed {
 			r.vocab.failed = true
@@ -147,7 +149,18 @@ func normalizeTagName(name string) string {
 //
 // 详情读不到时返回错误：调用方据此把这件作品**留到下一轮**（不落任务、不落跳过行），
 // 与「磁力为空不落行」同一处置——上游抖一下不该变成一张永久记录。
+//
+// 详情源根本没装配（nil）时整条筛子跳过：三条判据的输入全在详情里（演员数与类別），
+// 没有详情就没有能判的东西，于是这一部照常收下——宁可多收几部，也不要因为少装一个
+// 依赖就把一个循环打挂。日志只记一次（与「词表读不到」那条同一口径：这是部署的事，
+// 不该每轮刷一行）。
 func (r *Runner) screen(ctx context.Context, movieID, token string, ids tagIDs) (screenResult, error) {
+	if r.details == nil {
+		r.noDetails.Do(func() {
+			r.logger.Warn("订阅筛子：详情源没装配，三条判据整条跳过——这一轮看见的作品全部收下")
+		})
+		return screenResult{}, nil
+	}
 	result, err := r.details.Detail(ctx, token, movieID)
 	if err != nil {
 		return screenResult{}, err
@@ -157,7 +170,7 @@ func (r *Runner) screen(ctx context.Context, movieID, token string, ids tagIDs) 
 
 // judgeDetail 是三条判据（ADR-0017），纯函数：详情 + 词表 id → 命中的判据。
 //
-// 同时命中时取表里靠前的那一条（演员数 → 精选合集 → 长合集）：都是「跳过」，
+// 同时命中时取表里靠前的那一条（演员数 → 精選綜合 → 长合集）：都是「跳过」，
 // reason 只是面板上「为什么被排掉」的解释，不必为多重命中另立一种。
 func judgeDetail(movie appapi.MovieDetail, ids tagIDs) screenResult {
 	out := screenResult{Title: movie.Title}

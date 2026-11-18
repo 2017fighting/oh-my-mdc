@@ -14,6 +14,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/dbtest"
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
 	"github.com/2017fighting/oh-my-mdc/internal/material"
+	"github.com/2017fighting/oh-my-mdc/internal/metrics"
 	"github.com/2017fighting/oh-my-mdc/internal/mteam"
 	"github.com/2017fighting/oh-my-mdc/internal/qbittorrent"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
@@ -127,7 +128,13 @@ func newRunFixture(t *testing.T) *runFixture {
 	return newRunFixtureWith(t, func(*fakeSettings) {})
 }
 
-func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
+// newRunFixtureWith 装配一轮循环的全部依赖；mutate 用来改装配本身（如把详情源摘掉），
+// tweak 改设置快照（如每轮限量）。
+func newRunFixtureWith(
+	t *testing.T,
+	tweak func(*fakeSettings),
+	mutate ...func(*subscription.RunnerOptions),
+) *runFixture {
 	t.Helper()
 
 	database := dbtest.Migrated(t)
@@ -154,7 +161,7 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 	registry := loops.NewRegistry()
 	pending := subscription.NewPending()
 	gauge := &fakeGauge{}
-	runner := subscription.NewRunner(subscription.RunnerOptions{
+	opts := subscription.RunnerOptions{
 		Store:    store,
 		Tasks:    tasks,
 		Outbox:   sidefx.New(database.Pool()),
@@ -178,7 +185,11 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 		Gauge:   gauge,
 		Owner:   "test-owner",
 		Logger:  logger,
-	})
+	}
+	for _, m := range mutate {
+		m(&opts)
+	}
+	runner := subscription.NewRunner(opts)
 	return &runFixture{
 		database:   database,
 		store:      store,
@@ -246,6 +257,28 @@ func (f *runFixture) daysAgo(t *testing.T, days int) time.Time {
 func (f *runFixture) dbDate(t *testing.T, daysAgo int) string {
 	t.Helper()
 	return dateOf(f.daysAgo(t, daysAgo))
+}
+
+// backfill 点一次「回灌 days 天」：走与 Service 同一条 store 语句，落点 = 水位线 − days。
+//
+// 这些用例的订阅都是新建的（水位线 = 今天），所以落点就是 CURRENT_DATE − days。
+func (f *runFixture) backfill(t *testing.T, days int) {
+	t.Helper()
+	f.backfillTo(t, f.daysAgo(t, days))
+}
+
+// backfillAll 是「全部」那一档：落点是没有下界的那一天（1970-01-01）。
+func (f *runFixture) backfillAll(t *testing.T) {
+	t.Helper()
+	f.backfillTo(t, subscription.BackfillAllFloor())
+}
+
+// backfillTo 把回灌下界与起追日一并揄到 at（= Service 用的那一条 store 语句）。
+func (f *runFixture) backfillTo(t *testing.T, at time.Time) {
+	t.Helper()
+	if _, err := f.store.SetBackfill(context.Background(), f.sub.ID, at); err != nil {
+		t.Fatalf("回灌到 %s: %v", dateOf(at), err)
+	}
 }
 
 // backdated 把这条订阅的起追日与水位线一并挪到 N 天前，模拟「已经在追的一位女优」。
@@ -529,9 +562,7 @@ func TestRunStopsAtTheLookbackWindow(t *testing.T) {
 // 起追日一并往前挪，窗口扫完只清 backfill_from。
 func TestBackfillWindowReachesHistoricWorksThenClears(t *testing.T) {
 	f := newRunFixture(t)
-	if _, err := f.store.SetBackfill(context.Background(), f.sub.ID, 90); err != nil {
-		t.Fatalf("回灌: %v", err)
-	}
+	f.backfill(t, 90)
 	f.works.pages[1] = []appapi.ActressWork{
 		f.work(t, "fresh", "ABP-001", 1),
 		f.work(t, "old", "ABP-002", 60),
@@ -644,9 +675,7 @@ func TestWindowDedupesOverlappingPages(t *testing.T) {
 // 十几年前的作品也进得来——90 天那种按天数往回拨够不到的地方。
 func TestBackfillAllReachesAncientWorks(t *testing.T) {
 	f := newRunFixture(t)
-	if _, err := f.store.SetBackfillAll(context.Background(), f.sub.ID); err != nil {
-		t.Fatalf("全部回灌: %v", err)
-	}
+	f.backfillAll(t)
 	f.works.pages[1] = []appapi.ActressWork{f.work(t, "ancient", "ABP-001", 4000)}
 
 	result, err := f.runner.RunOnce(context.Background())
@@ -662,9 +691,7 @@ func TestBackfillAllReachesAncientWorks(t *testing.T) {
 // 中途读上游失败时留着下界，下一轮从同一个地方接着扫。
 func TestUnfinishedWindowKeepsTheBackfillBound(t *testing.T) {
 	f := newRunFixture(t)
-	if _, err := f.store.SetBackfill(context.Background(), f.sub.ID, 90); err != nil {
-		t.Fatalf("回灌: %v", err)
-	}
+	f.backfill(t, 90)
 	f.works.pages[1] = []appapi.ActressWork{f.work(t, "m1", "ABP-001", 1)}
 	f.works.errAt[2] = errors.New("上游断了")
 
@@ -697,6 +724,51 @@ func TestDisabledSubscriptionIsNotChased(t *testing.T) {
 	}
 	if len(f.works.calls) != 0 {
 		t.Errorf("停用的订阅也打了上游: %v", f.works.calls)
+	}
+}
+
+// TestNoEnabledSubscriptionSkipsTheVocabulary 钉住 §6.4 那条「一条订阅都没有时循环空转
+// 即返回」：没有窗口就不去读词表（`/api/v2/tags` 是一次要 token 的上游调用）、也不跑
+// AddPending。本地那次 30 天跳过清理照跑——它是 DB-only 的，而订阅全停用后那些行
+// 仍然会过期。
+func TestNoEnabledSubscriptionSkipsTheVocabulary(t *testing.T) {
+	f := newRunFixture(t)
+	if _, err := f.store.SetEnabled(context.Background(), f.sub.ID, false); err != nil {
+		t.Fatalf("停用: %v", err)
+	}
+	// 一条早该过期的跳过行（31 天前落、没被收下）：早退不能把它留在库里。
+	if _, err := f.store.RecordSkip(context.Background(), subscription.Skip{
+		SubscriptionID: f.sub.ID,
+		MovieID:        "stale",
+		Number:         "ABP-999",
+		Reason:         metrics.ReasonCompilation,
+		SkippedAt:      f.daysAgo(t, 31),
+	}); err != nil {
+		t.Fatalf("造过期跳过行: %v", err)
+	}
+	f.works.pages[1] = []appapi.ActressWork{f.work(t, "m1", "ABP-001", 1)}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Subscriptions != 0 || result.Seen != 0 {
+		t.Errorf("result = %+v, want 一条订阅都没扫", result)
+	}
+	if f.vocabulary.calls != 0 {
+		t.Errorf("标签词表读了 %d 次, want 0（没有窗口就不必读词表）", f.vocabulary.calls)
+	}
+	if f.magnets.calls != nil {
+		t.Errorf("磁力取数 = %v, want 一次都不发", f.magnets.calls)
+	}
+	if got := f.allTaskMovies(t); len(got) != 0 {
+		t.Errorf("任务表 = %v, want 空", got)
+	}
+	if got := f.skipRows(t); len(got) != 0 {
+		t.Errorf("跳过行 = %+v, want 0（30 天清理照样跑了）", got)
+	}
+	if got := f.gauge.Value(); got != 0 {
+		t.Errorf("mdc_subscription_pending = %d, want 0", got)
 	}
 }
 
@@ -847,9 +919,7 @@ func TestRoundCapIsOneBudgetForTheWholeRound(t *testing.T) {
 // 当场掉出窗口、永远进不来。
 func TestCapKeepsTheBackfillBoundUntilTheRemainderIsQueued(t *testing.T) {
 	f := newRunFixtureWith(t, capSettings(2))
-	if _, err := f.store.SetBackfill(context.Background(), f.sub.ID, 90); err != nil {
-		t.Fatalf("回灌: %v", err)
-	}
+	f.backfill(t, 90)
 	f.works.pages[1] = []appapi.ActressWork{
 		f.work(t, "d40", "ABP-040", 40),
 		f.work(t, "d50", "ABP-050", 50),

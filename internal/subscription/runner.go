@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,7 +57,7 @@ const DefaultMaxAdds = 10
 //   - **收下不排在预算后面**：人按下的「收下」是显式裁决，与 API 上那颗按钮走同一条
 //     ingest，所以限量的 spent 不数它、也不挡它（它仍算进 Candidates 的实账）。
 //   - **余量不落状态**：被留在门外的作品什么都不写，下一轮的窗口原样把它们再取一遍 ——
-//     这就是「余量留到下一轮」的实现（窗口每轮重算，没必要多一张游标表）。配套的硬约束：
+//     这就是「余量留到下一轮」的实现（窗口每轮重算，没必要多一张下界表）。配套的硬约束：
 //     一条订阅的窗口里还有余量时**不许清 backfill_from**（见 run 里的 record 调用），
 //     否则下界会跳回水位线 − 回看窗口，被留在门外的老作品当场掉出窗口、永远进不来。
 
@@ -89,7 +90,8 @@ type RunnerOptions struct {
 	Outbox   *sidefx.Outbox
 	Settings Settings
 	Source   WorksSource
-	// Details 读作品详情（筛子的三条判据都从它来，ADR-0017）；nil 时筛子整条跳过。
+	// Details 读作品详情（筛子的三条判据都从它来，ADR-0017）。nil 时筛子**整条**跳过：
+	// 连演员数那条也不判（它同样住在详情里），这一轮看见的作品全部收下，日志记一次。
 	Details DetailSource
 	// Tags 读标签词表（按名字查 id；进程内缓存、重启重取）；nil 时标签判据跳过。
 	Tags     VocabularySource
@@ -128,12 +130,14 @@ type Runner struct {
 	tags     VocabularySource
 	metrics  metrics.SubscriptionSkipRecorder
 	vocab    tagCache
-	pool     *pgxpool.Pool
-	loops    *loops.Registry
-	pending  *Pending
-	gauge    PendingGauge
-	logger   *slog.Logger
-	now      func() time.Time
+	// noDetails 让「详情源没装配」这条 warn 只记一次（与词表读不到那条同一口径）。
+	noDetails sync.Once
+	pool      *pgxpool.Pool
+	loops     *loops.Registry
+	pending   *Pending
+	gauge     PendingGauge
+	logger    *slog.Logger
+	now       func() time.Time
 }
 
 // NewRunner 构造订阅循环。
@@ -279,6 +283,37 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 
+	var result Result
+	var errs []error
+	now := r.now()
+
+	// 跳过行的 30 天清理跟着循环跑（§6.4 生命周期）：一轮一次，不按订阅数线性增长。
+	// 它只清没被收下的旧行，与回灌下界（backfill_from）无关——后者只由「窗口走完」
+	// 决定（见本轮末尾的 record）。
+	//
+	// 它排在下面那条早退**之前**：这是纯本地的活（一次 DELETE，不读上游、不看名单），
+	// 于是订阅全停用/全删掉之后，历史跳过行照旧按 30 天过期——不然那些行会永远留在库里，
+	// 而它们只对面板有意义。
+	if purged, err := r.store.PurgeSkips(ctx, now.AddDate(0, 0, -SkipRetentionDays)); err != nil {
+		errs = append(errs, err)
+	} else if purged > 0 {
+		r.logger.Info("订阅筛子：清掉过期的跳过行", "count", purged)
+	}
+
+	// 一条**启用的**订阅都没有：循环空转即返回（§6.4 门禁行：订阅不进 initialized 判据）。
+	//
+	// 早退在「读设置凭据 → 建一轮共用上下文 → 读词表 → AddPending」之前，因为那四件事
+	// 都要花东西：`GET /api/v2/tags` 是一次要 token 的上游调用，AddPending 是一次库查询，
+	// 而这时既没有候选项、也没有窗口，它们只能是白花。上面那次本地清理照跑（见那里的注释）。
+	// 现数一并清零：订阅全停用之后，上一轮留下的「还有 N 部待入队」不该停在面板上。
+	if !anyEnabled(rows) {
+		r.pending.Set(nil)
+		if r.gauge != nil {
+			r.gauge.SetSubscriptionPending(0)
+		}
+		return result, errors.Join(errs...)
+	}
+
 	javdbInput, err := r.settings.Input(ctx, "javdb")
 	if err != nil {
 		return Result{}, fmt.Errorf("subscription: 读 JavDB 设置: %w", err)
@@ -293,21 +328,13 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	// 每轮限量（§6.4）：这个数是**一轮所有订阅共享**的预算，口径与顺序见 DefaultMaxAdds 上方的注释。
 	budget := snapshot.AppInt("subscription_max_adds", DefaultMaxAdds)
 
-	var result Result
-	var errs []error
-	now := r.now()
-
-	// 跳过行的 30 天清理跟着循环跑（§6.4 生命周期）：一轮一次，不按订阅数线性增长。
-	// 它只清没被收下的旧行，与回灌下界（backfill_from）无关——后者只由「窗口走完」
-	// 决定（见本轮末尾的 record）。
-	if purged, err := r.store.PurgeSkips(ctx, now.AddDate(0, 0, -SkipRetentionDays)); err != nil {
-		errs = append(errs, err)
-	} else if purged > 0 {
-		r.logger.Info("订阅筛子：清掉过期的跳过行", "count", purged)
-	}
-
 	// 词表一轮取一次（进程内缓存，重启重取）：标签 id 按名字查，不硬编码（ADR-0017）。
-	ids := r.screenTags(ctx, javdbInput.Text("token"))
+	// 详情源没装配时连词表也不必读：两条标签判据是要拿详情里的类別去比对的，没有详情
+	// 就没有比对的对象（筛子的守卫在 screen）。
+	var ids tagIDs
+	if r.details != nil {
+		ids = r.screenTags(ctx, javdbInput.Text("token"))
+	}
 
 	// 先把每条订阅的窗口取完再统一入队：限量是一轮的总预算，排队要看得到所有订阅的作品。
 	scans := make([]windowScan, 0, len(rows))
@@ -469,6 +496,18 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 	}
 
 	return result, errors.Join(errs...)
+}
+
+// anyEnabled 说这一轮有没有事可做：停用的订阅只停追新，它们不产生窗口。
+//
+// 「一条订阅都没有」与「订了但全停用」是同一个轮次（零窗口），早退对两者一样成立。
+func anyEnabled(rows []Row) bool {
+	for _, row := range rows {
+		if row.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseDateOfWork 把列表给的发行日摊成可空日期：零值不猜一个今天，落 SQL NULL。

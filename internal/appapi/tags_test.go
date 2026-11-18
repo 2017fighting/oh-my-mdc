@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// 测试缝：Client.Tags —— 标签词表 `GET /api/v2/tags?type=0`（规格 §6.4 筛子）。
+// 测试缝：Client.TagVocabulary —— 标签词表 `GET /api/v2/tags?type=0`（规格 §6.4 筛子）。
 //
 // 筛子要的三条判据里两条按标签认，而标签 id **不硬编码**（ADR-0017）：id 得按名字去
 // 这份词表里查。该端点 2026-11 起匿名一律 JWTVerificationError（§13），所以 token 在场
@@ -31,7 +31,7 @@ func TestTagsReadsTheVocabularyEndpoint(t *testing.T) {
 	})
 	c.Token = "tk"
 
-	if _, err := c.Tags(context.Background(), 0); err != nil {
+	if _, err := c.TagVocabulary(context.Background(), 0); err != nil {
 		t.Fatalf("Tags: %v", err)
 	}
 
@@ -56,7 +56,7 @@ func TestTagsParsesTheVocabulary(t *testing.T) {
 		_, _ = w.Write([]byte(envBody(tagsBody)))
 	})
 
-	tags, err := c.Tags(context.Background(), 0)
+	tags, err := c.TagVocabulary(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Tags: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestTagsAlsoTakesABareArray(t *testing.T) {
 		_, _ = w.Write([]byte(envBody(`[{"id":"8","name":"精選綜合"}]`)))
 	})
 
-	tags, err := c.Tags(context.Background(), 0)
+	tags, err := c.TagVocabulary(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Tags: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestTagsRejectsAPayloadItCannotRead(t *testing.T) {
 		_, _ = w.Write([]byte(envBody(`"不是词表"`)))
 	})
 
-	if _, err := c.Tags(context.Background(), 0); err == nil {
+	if _, err := c.TagVocabulary(context.Background(), 0); err == nil {
 		t.Fatal("Tags = nil error, want 协议错")
 	} else if Classify(err) != CodeProtocol {
 		t.Errorf("Classify = %q, want %q", Classify(err), CodeProtocol)
@@ -113,7 +113,7 @@ func TestTagsTakesAnEmptyVocabularyAsAnAnswer(t *testing.T) {
 		_, _ = w.Write([]byte(envBody(`{"tags":[]}`)))
 	})
 
-	tags, err := c.Tags(context.Background(), 0)
+	tags, err := c.TagVocabulary(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Tags: %v（空词表是个空的答案，不是协议错）", err)
 	}

@@ -262,11 +262,20 @@ func TestEnableAndDisableSubscription(t *testing.T) {
 	fake := &fakeSubscriber{}
 	h := newSubscriptionFixture(t, fake)
 
-	if rec := send(t, h, http.MethodPost, "/api/subscriptions/5/disable", ""); rec.Code != http.StatusOK {
-		t.Fatalf("disable status = %d, want 200: %s", rec.Code, rec.Body)
+	// 启停的回执用自己的 outcome 词表（enabled / disabled），不借创建的 created / duplicate。
+	disabled := send(t, h, http.MethodPost, "/api/subscriptions/5/disable", "")
+	if disabled.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, want 200: %s", disabled.Code, disabled.Body)
 	}
-	if rec := send(t, h, http.MethodPost, "/api/subscriptions/5/enable", ""); rec.Code != http.StatusOK {
-		t.Fatalf("enable status = %d, want 200: %s", rec.Code, rec.Body)
+	if outcome := jsonOf(t, disabled)["outcome"]; outcome != "disabled" {
+		t.Errorf("disable 的 outcome = %v, want disabled", outcome)
+	}
+	enabled := send(t, h, http.MethodPost, "/api/subscriptions/5/enable", "")
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, want 200: %s", enabled.Code, enabled.Body)
+	}
+	if outcome := jsonOf(t, enabled)["outcome"]; outcome != "enabled" {
+		t.Errorf("enable 的 outcome = %v, want enabled", outcome)
 	}
 	if len(fake.enabledCalls) != 2 || fake.enabledCalls[0] != false || fake.enabledCalls[1] != true {
 		t.Errorf("启停调用 = %v, want [false true]", fake.enabledCalls)
@@ -324,12 +333,12 @@ func TestBackfillSubscriptionAcceptsAll(t *testing.T) {
 	}
 }
 
-// TestBackfillSubscriptionRejectsDaysWithinTheLookback 钉住 §8.4 的那条 400：
-// days ≤ 回看窗口是空操作，服务层的 ErrBadInput 翻成 400 validation_error，
-// message 原样带到面板（它要说清「回看窗口已经覆盖」）。
-func TestBackfillSubscriptionRejectsDaysWithinTheLookback(t *testing.T) {
+// TestBackfillSubscriptionRejectsNoOpReplay 钉住 §8.4 的那条 400：落点不比起追日更早
+// （＝空操作）时服务层回 ErrBadInput，HTTP 翻成 400 validation_error，message 原样带到
+// 面板（它要说清「这一段已经被覆盖」）。「days ≤ 回看窗口」不再是判断依据。
+func TestBackfillSubscriptionRejectsNoOpReplay(t *testing.T) {
 	fake := &fakeSubscriber{backfillErr: fmt.Errorf(
-		"%w：回看窗口已经覆盖最近 30 天，回灌 30 天是空操作", subscription.ErrBadInput)}
+		"%w：回灌 30 天只到 2026-10-19，起追日已经在 2026-09-19——这一段已经覆盖了", subscription.ErrBadInput)}
 	h := newSubscriptionFixture(t, fake)
 
 	rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", `{"days":30}`)
@@ -341,7 +350,7 @@ func TestBackfillSubscriptionRejectsDaysWithinTheLookback(t *testing.T) {
 		t.Errorf("code = %v, want validation_error", errorBody["code"])
 	}
 	message, _ := errorBody["message"].(string)
-	if !strings.Contains(message, "回看窗口") {
+	if !strings.Contains(message, "覆盖") {
 		t.Errorf("message = %q, want 说清为什么不行", message)
 	}
 }

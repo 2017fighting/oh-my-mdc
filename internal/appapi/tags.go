@@ -16,15 +16,20 @@ import (
 // 只能靠夹具。
 const tagVocabPath = "/api/v2/tags"
 
-// Tags 读标签词表（`GET /api/v2/tags?type=0`）。
+// TagVocabulary 读标签词表（`GET /api/v2/tags?type=N`）。
 //
-// tagType 是片库号：0 是本站的主库，三条判据的类別都在那里。零值就是 0，所以调用方
-// 通常只写 Tags(ctx)。
+// 这一层是**传输**：它不要 token（Client 自己带着），只要片库号——`tagType` 就是
+// 上游的 `type` 参数，0 是本站主库，筛子要的三个类別都在那里（调用方今天只传 0，
+// 但把它写成参数是因为它是端点形状的一部分，不是常量）。
+//
+// 名字与 token 那一层刻意分开：拿 token 的那一层是 `javdb.Integration.TagVocabulary`
+// （它自己钉死片库号），与 `subscription.VocabularySource` 签名逐位相同，于是两处不会
+// 被写混成「谁该传 token」。
 //
 // 形态宽容到两种：`{"tags":[…]}`（与女优详情里的词表同形）与裸数组。宽容的理由是
 // **这个端点本仓没有实测记录**——猜错形状时宁可多认一种，也不要在生产上让两条判据
 // 静默失效；两种都解不出来则归 protocol（上游改版要人查，不是「词表是空的」）。
-func (c *Client) Tags(ctx context.Context, tagType int) ([]Tag, error) {
+func (c *Client) TagVocabulary(ctx context.Context, tagType int) ([]Tag, error) {
 	var raw json.RawMessage
 	if err := c.GetJSON(ctx, tagVocabPath,
 		url.Values{"type": {strconv.Itoa(tagType)}}, &raw); err != nil {

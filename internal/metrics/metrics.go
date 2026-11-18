@@ -99,7 +99,7 @@ func ObserveUpstream(recorder Recorder, upstream string, err error, permanent fu
 const (
 	// ReasonNotSingle 是详情里的女优数 > 1（多人一起的）。
 	ReasonNotSingle = "not_single"
-	// ReasonCompilation 是类別带「精選綜合」（她自己的精选合集）。
+	// ReasonCompilation 是类別带「精選綜合」（她自己的合集）。
 	ReasonCompilation = "compilation"
 	// ReasonLongForm 是类別带「4 小時以上作品」/「16 小時以上作品」（她自己的长合集）。
 	ReasonLongForm = "long_form"

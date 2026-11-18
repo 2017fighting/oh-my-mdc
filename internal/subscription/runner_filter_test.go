@@ -44,7 +44,7 @@ type fakeVocabulary struct {
 	calls int
 }
 
-func (f *fakeVocabulary) Tags(context.Context, string) ([]appapi.Tag, error) {
+func (f *fakeVocabulary) TagVocabulary(context.Context, string) ([]appapi.Tag, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, f.err
@@ -340,7 +340,7 @@ func TestMissingTagNameSkipsThatJudgementOnce(t *testing.T) {
 		t.Fatalf("RunOnce: %v（词表缺名字不该让整轮失败）", err)
 	}
 	if result.Skipped != 1 {
-		t.Errorf("skipped = %d, want 1（只有精选合集那条命中）", result.Skipped)
+		t.Errorf("skipped = %d, want 1（只有精選綜合那条命中）", result.Skipped)
 	}
 	if got := f.taskMovies(t); len(got) != 2 || got[0] != "long1" || got[1] != "long2" {
 		t.Errorf("任务表 = %v, want [long1 long2]（判据跳过的作品照常收下）", got)
@@ -397,6 +397,50 @@ func TestVocabularyFailureStillScreensActors(t *testing.T) {
 	}
 	if f.logs.count("标签词表读不到") != 1 {
 		t.Errorf("词表读不到日志 = %d 条, want 1", f.logs.count("标签词表读不到"))
+	}
+}
+
+// TestScreeningSkipsWholeFilterWhenDetailSourceIsMissing 钉住「详情源没装配」那条兜底：
+//
+// 三条判据全部从详情里来（演员数与类別），所以没有详情就没有可判的东西——这一部照常
+// 收下，而不是在 screen 里解引用一个 nil 把整轮打挂（RunnerOptions 的注释说「nil 时
+// 筛子整条跳过」，这里就要它真的跳过）。日志只记一次（与词表那条同一口径），词表也
+// 不必去读（读了也没有比对的对象）。
+func TestScreeningSkipsWholeFilterWhenDetailSourceIsMissing(t *testing.T) {
+	f := newRunFixtureWith(t, func(*fakeSettings) {}, func(opts *subscription.RunnerOptions) {
+		opts.Details = nil
+	})
+	f.backdated(t, 30, 30)
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "m1", "SSIS-001", 1),
+		f.work(t, "m2", "SSIS-002", 2),
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v（少装一个依赖不该让整轮失败）", err)
+	}
+	if result.Seen != 2 || result.Added != 2 {
+		t.Errorf("seen/added = %d/%d, want 2/2（筛子整条跳过，两件都收下）", result.Seen, result.Added)
+	}
+	if result.Skipped != 0 {
+		t.Errorf("skipped = %d, want 0", result.Skipped)
+	}
+	if got := f.taskMovies(t); len(got) != 2 {
+		t.Errorf("任务表 = %v, want 两件都在（没有判据能排掉它们）", got)
+	}
+	if got := f.skipRows(t); len(got) != 0 {
+		t.Errorf("跳过行 = %+v, want 0 行", got)
+	}
+	if f.logs.count("详情源没装配") != 1 {
+		t.Errorf("「详情源没装配」日志 = %d 条, want 1（两件作品也只说一次）",
+			f.logs.count("详情源没装配"))
+	}
+	if f.vocabulary.calls != 0 {
+		t.Errorf("标签词表读了 %d 次, want 0（没有详情就没有比对的对象）", f.vocabulary.calls)
+	}
+	if health := f.loops.Health("subscription"); health.LastOK == nil || !*health.LastOK {
+		t.Errorf("循环健康位 = %+v, want 成功", health)
 	}
 }
 

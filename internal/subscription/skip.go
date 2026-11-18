@@ -166,5 +166,5 @@ func dateParam(at *time.Time) any {
 	if at == nil {
 		return nil
 	}
-	return at.Format("2006-01-02")
+	return at.Format(dateLayout)
 }

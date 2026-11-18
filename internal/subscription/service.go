@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/2017fighting/oh-my-mdc/internal/appapi"
@@ -198,16 +199,20 @@ func (s *Service) SetEnabled(ctx context.Context, id int64, enabled bool) (Row, 
 
 // Backfill 把取数下界往回拨（「回灌 N 天」或「全部」）。
 //
-// days ≤ lookback_days 是**拒**：回看窗口本来就每轮看那么远，这样的回灌一下手就是
-// 空操作（下界没变、面板上看不出任何区别）。面板因此只给能生效的天数，服务端再把
-// 这一条守住——不发出一个什么都不做的按钮（§8.4）。
+// 只拒**真的什么都不做**的那一档：回灌的落点是 水位线 − days（见 backfillTarget），
+// 它不比起追日更早时，LEAST 过后什么都不会变，那才是空操作（§8.4）。所以「回灌 30 天」
+// 对一条刚建的订阅是**有效**的——起追日就是建订阅当天，往回 30 天正是把窗口拨回三十天前
+// 的那一下（回看窗口只在起追日之后游走，它盖不住这一段）；反过来，已经在更早处回灌过的
+// 订阅再点 30 天，落点被起追日盖住，那是空操作。
+//
+// days ≥ 1、上限 maxBackfillDays；{all:true} 不看起追日（没有下界）。
 func (s *Service) Backfill(ctx context.Context, id int64, request BackfillRequest) (Row, error) {
 	row, err := s.store.Get(ctx, id)
 	if err != nil {
 		return Row{}, err
 	}
 	if request.All {
-		row, err := s.store.SetBackfillAll(ctx, id)
+		row, err := s.store.SetBackfill(ctx, id, BackfillAllFloor())
 		if err != nil {
 			return Row{}, err
 		}
@@ -218,16 +223,28 @@ func (s *Service) Backfill(ctx context.Context, id int64, request BackfillReques
 	if days < 1 || days > maxBackfillDays {
 		return Row{}, fmt.Errorf("%w：回灌天数要在 1–%d 之间，收到 %d", ErrBadInput, maxBackfillDays, days)
 	}
-	if days <= row.LookbackDays {
+	target := backfillTarget(row, days)
+	if !target.Before(row.FloorDate) {
 		return Row{}, fmt.Errorf(
-			"%w：回看窗口已经覆盖最近 %d 天，回灌 %d 天是空操作——要更早的历史请给大于 %d 的天数，或用全部",
-			ErrBadInput, row.LookbackDays, days, row.LookbackDays)
+			"%w：回灌 %d 天只到 %s，起追日已经在 %s——这一段已经覆盖了（要更早请给更大的天数，或用全部）",
+			ErrBadInput, days, target.Format(dateLayout), row.FloorDate.Format(dateLayout))
 	}
-	updated, err := s.store.SetBackfill(ctx, id, days)
+	updated, err := s.store.SetBackfill(ctx, id, target)
 	if err != nil {
 		return Row{}, err
 	}
 	return s.withPending(updated), nil
+}
+
+// dateLayout 是日期列的线形状：回灌落点（SQL 参数与 message 共用）、水位线、面板日期串。
+const dateLayout = "2006-01-02"
+
+// backfillTarget 是「回灌 days 天」会把取数下界拨到的那一天：水位线 − days。
+//
+// 水位线为 NULL 时按今天算，与 runner 的 watermarkDate 同一口径（NULL 只可能是
+// 「还没跑过」）。天数 → 日期只有这一处算法，把 SQL 留给「只往前挪」那一条（LEAST）。
+func backfillTarget(row Row, days int) time.Time {
+	return watermarkDate(row, time.Now()).AddDate(0, 0, -days)
 }
 
 // resolveActressID 从两种输入里取出女优 id。
