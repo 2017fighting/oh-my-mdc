@@ -42,7 +42,14 @@ export function subscriptionWatermark(date: string): string {
   return date === "" ? "还没跑过" : date;
 }
 
-/** subscriptionSubtitle 是订阅区一行的那句话：水位线、带来几部、回灌开着没有、停用没有。 */
+/**
+ * subscriptionSubtitle 是订阅区一行的那句话：水位线、带来几部、两个「待办」的数、
+ * 回灌开着没有、停用没有。
+ *
+ * 两个数各管一段（§6.4「节流与去重」）：`pending_count` 是已经入队、还在等加种的版本；
+ * `deferred_count` 是「还有 N 部待入队」——回看窗口里已发现、被每轮限量留在门外的作品。
+ * 后者是限量的现场读数（每轮末尾置数），余量走完就自己消失。
+ */
 export function subscriptionSubtitle(row: Subscription): string {
   const parts = [
     `水位线 ${subscriptionWatermark(row.watermark_date)}`,
@@ -50,6 +57,9 @@ export function subscriptionSubtitle(row: Subscription): string {
   ];
   if (row.pending_count > 0) {
     parts.push(`${row.pending_count} 部待加种`);
+  }
+  if (row.deferred_count > 0) {
+    parts.push(`还有 ${row.deferred_count} 部待入队`);
   }
   if (row.backfill_from) {
     parts.push(`回灌自 ${row.backfill_from}`);

@@ -532,3 +532,141 @@ func TestTrackedWorkIsNotScreened(t *testing.T) {
 		t.Errorf("详情读取 = %d 次, want 1（已有任务的不再取详情）", len(f.details.calls))
 	}
 }
+
+// ------------------------------------------------------------------ 筛子 × 每轮限量（#48 × #49）
+
+// TestScreenedWorksDoNotSpendTheRoundBudget 钉住两条裁决的交点：**先筛后排队**。
+//
+// 被排掉的作品根本不进这一轮的队列，于是既不建任务、也不占预算——预算是给「真能入队
+// 的作品」的。要是筛子排在预算分配之后（或算作「递进 ingest 的作品」），两部合集会白白
+// 吃掉两个名额，而那部单体作品就得再等十五分钟。
+func TestScreenedWorksDoNotSpendTheRoundBudget(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(2))
+	f.backdated(t, 40, 40)
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "single1", "SSIS-001", 1),
+		f.work(t, "comp1", "OFJE-186", 5),
+		f.work(t, "comp2", "OFJE-187", 6),
+		f.work(t, "single2", "SSIS-002", 2),
+	}
+	for _, movieID := range []string{"comp1", "comp2"} {
+		f.details.byMovie[movieID] = appapi.MovieDetail{
+			Actors: []appapi.Actor{{ID: "a1"}},
+			Tags:   []appapi.Tag{{ID: "7777", Name: "精選綜合"}},
+		}
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Skipped != 2 || result.Unexamined != 0 {
+		t.Errorf("skipped/unexamined = %d/%d, want 2/0", result.Skipped, result.Unexamined)
+	}
+	// 预算 2 全给了那两部单体；被排掉的两部一件都没占。
+	if result.Candidates != 2 || result.Deferred != 0 {
+		t.Errorf("candidates/deferred = %d/%d, want 2/0（被排掉的不占预算）",
+			result.Candidates, result.Deferred)
+	}
+	if got := f.taskMovies(t); !sameStrings(got, []string{"single1", "single2"}) {
+		t.Errorf("任务表 = %v, want [single1 single2]", got)
+	}
+	if len(f.magnets.calls) != 2 {
+		t.Errorf("磁力查询 = %v, want 只有那两部单体（被排掉的不取源）", f.magnets.calls)
+	}
+	if got := f.pending.Total(); got != 0 {
+		t.Errorf("pending = %d, want 0（窗口排空了）", got)
+	}
+}
+
+// TestAcceptedSkipDoesNotWaitBehindTheCap 钉住「收下」在限量面前的位置：它是人的显式
+// 裁决，与本轮预算无关——不排在预算后面，也不占别人的名额。
+//
+// 摆法刻意让冲突显形：限量 1、已收下的那部是**最新的**（排队排在最后）。没有这条裁决
+// 时它会被余量挡住，等到下一轮；有了它，这一轮两部都进得来。
+func TestAcceptedSkipDoesNotWaitBehindTheCap(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(1))
+	f.backdated(t, 40, 40)
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "normal", "SSIS-001", 5),
+		f.work(t, "accepted", "OFJE-186", 1),
+	}
+	f.details.byMovie["accepted"] = appapi.MovieDetail{
+		Actors: []appapi.Actor{{ID: "a1"}},
+		Tags:   []appapi.Tag{{ID: "7777", Name: "精選綜合"}},
+	}
+	f.details.byMovie["normal"] = appapi.MovieDetail{Actors: []appapi.Actor{{ID: "a1"}}}
+
+	// 先落一行跳过，再「收下」——人已经裁决过了。
+	outcome, err := f.store.RecordSkip(context.Background(), subscription.Skip{
+		SubscriptionID: f.sub.ID, MovieID: "accepted", Number: "OFJE-186",
+		Title: "初ベスト", Reason: metrics.ReasonCompilation, SkippedAt: time.Now(),
+	})
+	if err != nil || outcome != subscription.SkipRecorded {
+		t.Fatalf("落跳过行: outcome=%v err=%v", outcome, err)
+	}
+	if err := f.store.AcceptSkip(context.Background(), f.sub.ID, skipID(t, f, "accepted")); err != nil {
+		t.Fatalf("收下: %v", err)
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Skipped != 0 {
+		t.Errorf("skipped = %d, want 0（已收下的不再被重新排）", result.Skipped)
+	}
+	if result.Deferred != 0 {
+		t.Errorf("deferred = %d, want 0（收下的不排在预算后面）", result.Deferred)
+	}
+	if got := f.allTaskMovies(t); len(got) != 2 {
+		t.Errorf("任务表 = %v, want 两部齐（收下的那部没被余量挡住）", got)
+	}
+	if got := f.pending.Total(); got != 0 {
+		t.Errorf("pending = %d, want 0", got)
+	}
+}
+
+// TestDetailFailureIsNotDeferredByTheCap 钉住「没被看过 ≠ 被留在门外」。
+//
+// 详情读不到的那一件不进队列、也不算 deferred（限量数的是「看过、也够格、只是这轮没
+// 轮到」的那些），而它省下来的名额给得出手：那一部的预算不该被一件没看过的作品占住。
+// 下一轮它原样再被递一遍。
+func TestDetailFailureIsNotDeferredByTheCap(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(1))
+	f.backdated(t, 40, 40)
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "flaky", "SSIS-001", 5),
+		f.work(t, "fine", "SSIS-002", 1),
+	}
+	f.details.byMovie["fine"] = appapi.MovieDetail{Actors: []appapi.Actor{{ID: "a1"}}}
+	f.details.errs["flaky"] = &appapi.TransportError{Path: "/api/v4/movies/flaky", Err: errors.New("连接被断")}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Unexamined != 1 || result.Deferred != 0 {
+		t.Errorf("unexamined/deferred = %d/%d, want 1/0（没看过的不算留在门外）",
+			result.Unexamined, result.Deferred)
+	}
+	if result.Candidates != 1 || result.Deferred != 0 {
+		t.Errorf("candidates = %d, want 1（那一个名额给了看得见的那部）", result.Candidates)
+	}
+	if got := f.pending.Total(); got != 0 {
+		t.Errorf("pending = %d, want 0（没有作品被限量留在门外）", got)
+	}
+	if got := f.taskMovies(t); len(got) != 1 || got[0] != "fine" {
+		t.Errorf("任务表 = %v, want [fine]", got)
+	}
+
+	// 下一轮详情回来了：它仍在窗口里，被正常判过并收下。
+	delete(f.details.errs, "flaky")
+	f.details.byMovie["flaky"] = appapi.MovieDetail{Actors: []appapi.Actor{{ID: "a1"}}}
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if got := f.taskMovies(t); len(got) != 2 {
+		t.Errorf("任务表 = %v, want 两部齐（下一轮重新判过）", got)
+	}
+}

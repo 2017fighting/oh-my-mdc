@@ -63,6 +63,7 @@ test("一行说清「带来 N 部」与回灌窗口", () => {
     enabled: true,
     tasks_count: 12,
     pending_count: 0,
+    deferred_count: 0,
   };
 
   assert.equal(subscriptionSubtitle(row), "水位线 2026-11-01 · 带来 12 部");
@@ -77,6 +78,23 @@ test("一行说清「带来 N 部」与回灌窗口", () => {
   assert.equal(
     subscriptionSubtitle({ ...row, tasks_count: 0, pending_count: 3 }),
     "水位线 2026-11-01 · 带来 0 部 · 3 部待加种",
+  );
+
+  // 「还有 N 部待入队」（§6.4 每轮限量 / §9）：已发现但被限量留在门外的作品数，
+  // 与 pending_count（已入队、还在等加种）是两件事，两个数都该露在行上。
+  assert.equal(
+    subscriptionSubtitle({ ...row, deferred_count: 2 }),
+    "水位线 2026-11-01 · 带来 12 部 · 还有 2 部待入队",
+  );
+  assert.equal(
+    subscriptionSubtitle({ ...row, tasks_count: 5, pending_count: 1, deferred_count: 2 }),
+    "水位线 2026-11-01 · 带来 5 部 · 1 部待加种 · 还有 2 部待入队",
+  );
+
+  // 余量走完就不再提这一句（0 不是「没有信息」，是「没有余量」）。
+  assert.equal(
+    subscriptionSubtitle({ ...row, deferred_count: 0 }),
+    "水位线 2026-11-01 · 带来 12 部",
   );
 
   // 停用的那一行要自己说出来：它不再追新，但已建任务照走完。

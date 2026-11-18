@@ -79,6 +79,9 @@ type ServiceOptions struct {
 	Material *material.Store
 	// Owner 是 claim 的持有者标识；空则用 hostname-pid。
 	Owner string
+	// Pending 是订阅循环每轮末尾置下的「待入队」现数（面板「还有 N 部待入队」）。
+	// 它与 Runner 共用同一个账；nil 时一律读 0（不装配也能用）。
+	Pending *Pending
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 }
@@ -90,6 +93,7 @@ type Service struct {
 	source   Source
 	ingest   *ingest.Ingester
 	tasks    *task.Store
+	pending  *Pending
 	logger   *slog.Logger
 }
 
@@ -104,6 +108,7 @@ func NewService(opts ServiceOptions) *Service {
 		settings: opts.Settings,
 		source:   opts.Source,
 		tasks:    opts.Tasks,
+		pending:  opts.Pending,
 		// 这一段 ingest 只在「收下」时用：与循环同一套依赖、同一个构造函数（ADR-0014）。
 		ingest: ingest.New(ingest.Options{
 			Store:    opts.Tasks,
@@ -121,8 +126,24 @@ func NewService(opts ServiceOptions) *Service {
 }
 
 // List 读全部订阅（GET /api/subscriptions）。
+//
+// deferred_count 不来自库：它是循环上一轮末尾置下的现数，这里只负责把它贴到行上，
+// 与面板「还有 N 部待入队」、指标 mdc_subscription_pending 同一份值。
 func (s *Service) List(ctx context.Context) ([]Row, error) {
-	return s.store.List(ctx)
+	rows, err := s.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rows[i].DeferredCount = s.pending.Of(rows[i].ID)
+	}
+	return rows, nil
+}
+
+// withPending 给单行结果贴上同一个现数（添加/启停/回灌的回执也是面板那一行）。
+func (s *Service) withPending(row Row) Row {
+	row.DeferredCount = s.pending.Of(row.ID)
+	return row
 }
 
 // Add 建一条订阅：解析 id → 问上游「她是谁」→ upsert actor → 建订阅。
@@ -163,12 +184,16 @@ func (s *Service) Add(ctx context.Context, request Request) (Row, string, error)
 		return Row{}, "", err
 	}
 	s.logger.Info("女优订阅", "actress", actressID, "name", name, "outcome", outcome)
-	return row, outcome, nil
+	return s.withPending(row), outcome, nil
 }
 
 // SetEnabled 启停一条订阅。停用只停追新，已建任务照走完（规格 §6.4 生命周期）。
 func (s *Service) SetEnabled(ctx context.Context, id int64, enabled bool) (Row, error) {
-	return s.store.SetEnabled(ctx, id, enabled)
+	row, err := s.store.SetEnabled(ctx, id, enabled)
+	if err != nil {
+		return Row{}, err
+	}
+	return s.withPending(row), nil
 }
 
 // Backfill 把取数下界往回拨（「回灌 N 天」或「全部」）。
@@ -182,7 +207,11 @@ func (s *Service) Backfill(ctx context.Context, id int64, request BackfillReques
 		return Row{}, err
 	}
 	if request.All {
-		return s.store.SetBackfillAll(ctx, id)
+		row, err := s.store.SetBackfillAll(ctx, id)
+		if err != nil {
+			return Row{}, err
+		}
+		return s.withPending(row), nil
 	}
 
 	days := request.Days
@@ -194,7 +223,11 @@ func (s *Service) Backfill(ctx context.Context, id int64, request BackfillReques
 			"%w：回看窗口已经覆盖最近 %d 天，回灌 %d 天是空操作——要更早的历史请给大于 %d 的天数，或用全部",
 			ErrBadInput, row.LookbackDays, days, row.LookbackDays)
 	}
-	return s.store.SetBackfill(ctx, id, days)
+	updated, err := s.store.SetBackfill(ctx, id, days)
+	if err != nil {
+		return Row{}, err
+	}
+	return s.withPending(updated), nil
 }
 
 // resolveActressID 从两种输入里取出女优 id。

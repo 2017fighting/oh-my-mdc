@@ -118,6 +118,7 @@ func TestSubscriptionsListShowsActorWatermarkAndCounts(t *testing.T) {
 		Enabled:       true,
 		TasksCount:    12,
 		PendingCount:  2,
+		DeferredCount: 4,
 	}}}
 	h := newSubscriptionFixture(t, fake)
 
@@ -145,6 +146,11 @@ func TestSubscriptionsListShowsActorWatermarkAndCounts(t *testing.T) {
 	}
 	if row["tasks_count"] != float64(12) || row["pending_count"] != float64(2) {
 		t.Errorf("tasks_count/pending_count = %v/%v, want 12/2", row["tasks_count"], row["pending_count"])
+	}
+	// deferred_count 是「还有 N 部待入队」（§6.4/§9）：与 pending_count（等加种的版本）
+	// 两个数各管一段，面板两处都读，别把它们合成一个。
+	if row["deferred_count"] != float64(4) {
+		t.Errorf("deferred_count = %v, want 4（还有 4 部被每轮限量留在门外）", row["deferred_count"])
 	}
 	actor, _ := row["actor"].(map[string]any)
 	if actor["javdb_actor_id"] != "EvkJ" || actor["name"] != "河北彩花" || actor["gender"] != "female" {

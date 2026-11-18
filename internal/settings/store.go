@@ -534,7 +534,15 @@ func (s Snapshot) GateReason() string {
 // fallback 是读不到时的兜底：与 Interval 同理，类型断言只写这一处，
 // 免得每条循环各写一遍 Sections["app"].Data[...]。
 func (s Snapshot) MaxAttempts(fallback int) int {
-	if value, ok := s.Sections["app"].Data["max_attempts"].(int); ok && value > 0 {
+	return s.AppInt("max_attempts", fallback)
+}
+
+// AppInt 读 app_config 里的一条整数设置（max_attempts / subscription_max_adds）。
+//
+// 与 Interval 同理：类型断言只写这一处，免得每条循环各写一遍
+// Sections["app"].Data[...]；读不到（或不是正数）时给调用方的兜底值。
+func (s Snapshot) AppInt(name string, fallback int) int {
+	if value, ok := s.Sections["app"].Data[name].(int); ok && value > 0 {
 		return value
 	}
 	return fallback

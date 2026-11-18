@@ -259,7 +259,13 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
   - **回看窗口**（`lookback_days`，默认 30）只在起追日之**后**那一段里回看：它让「出水时还没磁力」的作品下一轮仍被看见（磁力为空不落行那条规则的配套），不是补历史的手段。
   - **回灌** = 把 `floor_date` 与 `backfill_from` 一并往回拨 N 天（`floor_date = LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) − N)`，`backfill_from` 设为同一天），`all` 则是 `1970-01-01`（＝没有下界）。回灌窗口扫完只清 `backfill_from`，起追日留在原处。
   - **水位线只由「见过」推进，不由「入队成功」推进**：出水即无磁力的作品靠回看窗口下轮重见，与 §6.1「磁力为空不落行、下轮重查」是同一条承诺。
-- **节流与去重**：每轮最多建 `subscription_max_adds`（默认 10）个任务，余量留到下一轮且 `backfill_from` 不被清；已有任务的 `movie_id` 不再查源（§6.1 去重行，跨来源白送）——同一部作品既在清单又在某位女优的新作里，只会有一条任务。
+- **节流与去重**：每轮最多建 `subscription_max_adds`（默认 10）个任务，余量留到下一轮且 `backfill_from` 不被清；已有任务的 `movie_id` 不再查源（§6.1 去重行，跨来源白送）——同一部作品既在清单又在某位女优的新作里，只会有一条任务。限量只管「订阅再往下产、入队」，不挡清单轮询与已建任务的推进。
+  - **范围**：这个预算是**一轮所有订阅共享**的，不是每条订阅各一份（按条给预算，场上一有 N 位女优就变成 N 倍，限量就白设了）。
+  - **顺序**：按发行日**从旧到新**（同一天按 `movie_id`），跨订阅统一排队。下界（水位线 − 回看窗口 / 回灌下界）只会往前挪，离它最近的先做，才不会被余量轮挤到窗口外。
+  - **余量不落状态**：留在门外的作品什么都不写，下一轮的窗口原样再取一遍；`backfill_from` 只在「窗口扫完 **且** 这条订阅没有余量」时才清——提前清会把下界跳回水位线 − 回看窗口，被留下的老作品当场掉出窗口。
+  - **预算数的是建出来的任务**，不是递进 ingest 的作品：窗口里本来就看得到上一轮建过的作品（它们零写入），「磁力为空不落行、下轮重查」的那些也不该占预算——否则每轮都被没有磁力的老作品吃光，窗口就永远排不空。
+  - **先筛后排队**：筛子（ADR-0017）在入队之**前**——被排掉的作品根本不进这一轮的队列，既不建任务也不占预算。详情读不到的那些也不算「留在门外」（它们没被看过，只是被重新递一遍），下一轮原样重取。
+  - **收下不排在预算后面**：`收下` 是人的显式裁决（与 `POST /api/subscriptions/{id}/skips/{skip_id}/accept` 同一条 ingest），所以循环里万一撞见一条已被收下的跳过，也照常入队，不因为余量走完而留到下一轮，也不占别人的名额。
 - **来源记录**：订阅建的任务 `list_id` 为 NULL（没有清单项可删，故 list_removal 天然不触发），`subscription_id` 记这一行（§4.1）。
 - **门禁**：同 poll（三件套齐 + 未暂停）；女优订阅**不进** initialized 判据——一条订阅都没有时循环空转即返回。
 - **生命周期**：只有停用/恢复，没有删除；停用只停追新，已建任务照走完，跳过行按 30 天自然过期。
@@ -375,7 +381,7 @@ OpenAI 兼容 chat completions（`base_url` + `api_key` + `model` + `enabled`）
 
 | 端点 | 语义 |
 |---|---|
-| `GET /api/subscriptions` | `{actresses:[{id, actor:{javdb_actor_id,name,avatar_url,gender}, watermark_date, lookback_days, backfill_from, enabled, tasks_count, pending_count}]}`；`tasks_count` 数 `task.subscription_id` |
+| `GET /api/subscriptions` | `{actresses:[{id, actor:{javdb_actor_id,name,avatar_url,gender}, watermark_date, lookback_days, backfill_from, enabled, tasks_count, pending_count, deferred_count}]}`；`tasks_count` 数 `task.subscription_id`；`pending_count` 数这批里还在等加种的版本，`deferred_count` 是「还有 N 部待入队」（§6.4 的每轮限量，循环每轮末尾现算，不落库） |
 | `POST /api/subscriptions` | `{actress_id}` 或 `{javdb_url}`：解析 id → upsert actor → 建订阅；同 id 重复 → `outcome=duplicate`（幂等 200）。错误信封：形状 400 `validation_error`、id 读不到 502 `upstream_error`、门禁未开 409 `gate_closed` |
 | `POST /api/subscriptions/{id}/enable` / `disable` | 启停；停用只停追新，不碰任务与跳过行 |
 | `POST /api/subscriptions/{id}/backfill` | `{days}` 或 `{all: true}`（二选一）：把起追日与回灌下界一并往回拨 `days` 天，`all` 则拨到 `1970-01-01`（＝没有下界）；回执 `{backfill_from}`。`days` 必须是**整数**，且 **`days` ≤ `lookback_days` 一律 `400 validation_error`**——回看窗口本来就每轮看那么远，那样的回灌是空操作（message 说清「回看窗口已经覆盖」） |

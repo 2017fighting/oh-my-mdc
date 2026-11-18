@@ -103,11 +103,17 @@ type Row struct {
 	TasksCount int
 	// PendingCount 数这条订阅建的任务里还有版本在等加种（add_pending）的条数。
 	//
-	// 它是「这批还卡在门口」的现数，不是「本轮被限量留在门外」的数——每轮限量归 #49，
-	// 那一票会把后者加进来（§9 的 mdc_subscription_pending）。
+	// 它是「这批还卡在门口」的现数，不是「本轮被限量留在门外」的数——后者是
+	// DeferredCount（§6.4「节流与去重」，#49）。两个数各管一段：一个数已入队还没加进
+	// qBittorrent 的版本，一个数还没入队的作品。
 	PendingCount int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// DeferredCount 是本轮「已发现、被每轮限量留在门外」的作品数（面板「还有 N 部待入队」）。
+	//
+	// 它不由 Store 从库里扫：订阅循环每轮末尾把现数写进进程内的 Pending 账，
+	// Service 再贴到这一行上（§9 的 mdc_subscription_pending 是同一个数）。
+	DeferredCount int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Store 是订阅域的读写门面：两件事，一条订阅一行、一位女优一名演员。

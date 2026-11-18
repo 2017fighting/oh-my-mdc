@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,15 +32,20 @@ import (
 type worksSource struct {
 	// pages 按页号给答案（1 起）；超出范围的页回空（「空页即止」）。
 	pages map[int][]appapi.ActressWork
+	// byActress 按女优 id 再分一层（多条订阅的用例）；某位女优没登记就回落到 pages。
+	byActress map[string]map[int][]appapi.ActressWork
 	// errAt 让某一页读失败（窗口没扫完的那条路）。
 	errAt map[int]error
 	calls []int
 }
 
-func (f *worksSource) ActressWorks(_ context.Context, _ string, _ string, page int) ([]appapi.ActressWork, error) {
+func (f *worksSource) ActressWorks(_ context.Context, _ string, id string, page int) ([]appapi.ActressWork, error) {
 	f.calls = append(f.calls, page)
 	if err, ok := f.errAt[page]; ok {
 		return nil, err
+	}
+	if pages, ok := f.byActress[id]; ok {
+		return pages[page], nil
 	}
 	return f.pages[page], nil
 }
@@ -87,7 +94,32 @@ type runFixture struct {
 	skips      *fakeSkips
 	// logs 收这一轮打的日志：筛子「同一条日志只记一次」全靠它断言。
 	logs *captureLogs
-	sub  subscription.Row
+	// pending/gauge 是每轮限量（#49）的现数账：面板「还有 N 部待入队」与
+	// mdc_subscription_pending 读的就是它。
+	pending *subscription.Pending
+	gauge   *fakeGauge
+	sub     subscription.Row
+}
+
+// fakeGauge 是 mdc_subscription_pending 的测试替身：真实实现是 metrics.Registry。
+type fakeGauge struct {
+	mu    sync.Mutex
+	value int
+	set   bool
+}
+
+func (f *fakeGauge) SetSubscriptionPending(total int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.value = total
+	f.set = true
+}
+
+// Value 读最后一个置进来的数。
+func (f *fakeGauge) Value() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.value
 }
 
 func newRunFixture(t *testing.T) *runFixture {
@@ -120,6 +152,8 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 	skips := &fakeSkips{}
 	tasks := task.NewStore(database.Pool())
 	registry := loops.NewRegistry()
+	pending := subscription.NewPending()
+	gauge := &fakeGauge{}
 	runner := subscription.NewRunner(subscription.RunnerOptions{
 		Store:    store,
 		Tasks:    tasks,
@@ -138,10 +172,12 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 			Settings: settingsFake,
 			Logger:   logger,
 		}),
-		Pool:   database.Pool(),
-		Loops:  registry,
-		Owner:  "test-owner",
-		Logger: logger,
+		Pool:    database.Pool(),
+		Loops:   registry,
+		Pending: pending,
+		Gauge:   gauge,
+		Owner:   "test-owner",
+		Logger:  logger,
 	})
 	return &runFixture{
 		database:   database,
@@ -156,6 +192,8 @@ func newRunFixtureWith(t *testing.T, tweak func(*fakeSettings)) *runFixture {
 		vocabulary: vocabulary,
 		skips:      skips,
 		logs:       logs,
+		pending:    pending,
+		gauge:      gauge,
 		sub:        sub,
 	}
 }
@@ -216,12 +254,35 @@ func (f *runFixture) dbDate(t *testing.T, daysAgo int) string {
 // 那些作品的用例，都得先把它挪成一条真实存在了一阵的订阅。
 func (f *runFixture) backdated(t *testing.T, floorDaysAgo, watermarkDaysAgo int) {
 	t.Helper()
+	f.backdate(t, f.sub.ID, floorDaysAgo, watermarkDaysAgo)
+}
+
+// backdate 是 backdated 的按 id 版本（多条订阅的用例各自挪各自的）。
+func (f *runFixture) backdate(t *testing.T, id int64, floorDaysAgo, watermarkDaysAgo int) {
+	t.Helper()
 	if _, err := f.database.Pool().Exec(context.Background(),
 		`UPDATE subscription
 		 SET floor_date = CURRENT_DATE - $2::int, watermark_date = CURRENT_DATE - $3::int
-		 WHERE id = $1`, f.sub.ID, floorDaysAgo, watermarkDaysAgo,
+		 WHERE id = $1`, id, floorDaysAgo, watermarkDaysAgo,
 	); err != nil {
-		t.Fatalf("把订阅挪回 %d/%d 天前: %v", floorDaysAgo, watermarkDaysAgo, err)
+		t.Fatalf("把订阅 %d 挪回 %d/%d 天前: %v", id, floorDaysAgo, watermarkDaysAgo, err)
+	}
+}
+
+// subscribe 再订一位女优（每条订阅各有一套窗口与回灌状态）。
+func (f *runFixture) subscribe(t *testing.T, actorID, name string) subscription.Row {
+	t.Helper()
+	row, _, err := f.store.Create(context.Background(), subscription.Actor{ID: actorID, Name: name})
+	if err != nil {
+		t.Fatalf("建订阅 %s: %v", actorID, err)
+	}
+	return row
+}
+
+// capSettings 把每轮限量塞进设置快照（app 节就是 app_config 单行）。
+func capSettings(limit int) func(*fakeSettings) {
+	return func(s *fakeSettings) {
+		s.snapshot.Sections["app"].Data["subscription_max_adds"] = limit
 	}
 }
 
@@ -247,6 +308,43 @@ func (f *runFixture) taskMovies(t *testing.T) []string {
 		t.Fatalf("遍历任务: %v", err)
 	}
 	return out
+}
+
+// allTaskMovies 列任务表里的全部 movie_id（跨订阅的用例用）。
+func (f *runFixture) allTaskMovies(t *testing.T) []string {
+	t.Helper()
+	rows, err := f.database.Pool().Query(context.Background(),
+		`SELECT movie_id FROM task ORDER BY movie_id`)
+	if err != nil {
+		t.Fatalf("列任务: %v", err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var movie string
+		if err := rows.Scan(&movie); err != nil {
+			t.Fatalf("扫任务: %v", err)
+		}
+		out = append(out, movie)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历任务: %v", err)
+	}
+	return out
+}
+
+// sameStrings 比两组 movie_id（顺序也算，排队顺序是这一票的契约之一）。
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // work 造一件作品，并把它的磁力配好（hash 由 movie_id 决定，便于断言）。
@@ -653,5 +751,263 @@ func TestRunReadsItsOwnInterval(t *testing.T) {
 
 	if got := f.runner.Interval(context.Background()); got != 37*time.Minute {
 		t.Errorf("Interval = %v, want 37m（读 subscription_interval）", got)
+	}
+}
+
+// ------------------------------------------------------------------ 每轮限量（#49）
+
+// TestRoundCapOnlyQueuesItsBudgetEachRound 是 #49 的主验收：一次回灌掉出 5 部、限量 3 时，
+// 第一轮只建 3 个任务，其余留在窗口里下一轮接着推进。
+//
+// 顺序一并钉住：**最老的先入队**。第 3/4/5 天前那三部先走，第 1/2 天前（最新的）那两部
+// 留在门外——离窗口下界最近的先做，才不会在「回灌窗口一路往前挪」时被挤掉。
+func TestRoundCapOnlyQueuesItsBudgetEachRound(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(3))
+	f.backdated(t, 40, 40)
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "w1", "ABP-001", 1),
+		f.work(t, "w2", "ABP-002", 2),
+		f.work(t, "w3", "ABP-003", 3),
+		f.work(t, "w4", "ABP-004", 4),
+		f.work(t, "w5", "ABP-005", 5),
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("第一轮 RunOnce: %v", err)
+	}
+	if result.Seen != 5 {
+		t.Errorf("seen = %d, want 5（窗口里五部都见过）", result.Seen)
+	}
+	if result.Candidates != 3 || result.Added != 3 {
+		t.Errorf("candidates/added = %d/%d, want 3/3（限量 3）", result.Candidates, result.Added)
+	}
+	if result.Deferred != 2 {
+		t.Errorf("deferred = %d, want 2（被限量留在门外）", result.Deferred)
+	}
+	if got := f.taskMovies(t); !sameStrings(got, []string{"w3", "w4", "w5"}) {
+		t.Errorf("第一轮任务 = %v, want [w3 w4 w5]（最老的先入队）", got)
+	}
+
+	// 第二轮：余量还在窗口里（下界没被限量推走），剩下的两部入队。
+	result, err = f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if result.Candidates != 2 || result.Deferred != 0 {
+		t.Errorf("第二轮 candidates/deferred = %d/%d, want 2/0", result.Candidates, result.Deferred)
+	}
+	if got := f.taskMovies(t); !sameStrings(got, []string{"w1", "w2", "w3", "w4", "w5"}) {
+		t.Errorf("两轮之后的任务 = %v, want 五部齐", got)
+	}
+}
+
+// TestRoundCapIsOneBudgetForTheWholeRound 钉住限量的**范围**：一轮的总预算，不是每条订阅
+// 各有一份（§6.4「每轮最多建 N 个任务」——一个 15 分钟周期对 qBittorrent / M-Team 的冲击，
+// 不随订阅条数翻倍）。
+//
+// 两条订阅各 2 部、限量 3：第一轮建 3 部（跨订阅按发行日排队），而不是每条各建 2 部。
+func TestRoundCapIsOneBudgetForTheWholeRound(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(3))
+	f.backdated(t, 40, 40)
+	second := f.subscribe(t, "Av2e", "七海ティナ")
+	f.backdate(t, second.ID, 40, 40)
+
+	f.works.byActress = map[string]map[int][]appapi.ActressWork{
+		"EvkJ": {1: {
+			f.work(t, "a1", "ABP-001", 1),
+			f.work(t, "a2", "ABP-002", 10),
+		}},
+		"Av2e": {1: {
+			f.work(t, "b1", "ABP-101", 2),
+			f.work(t, "b2", "ABP-102", 20),
+		}},
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Subscriptions != 2 || result.Seen != 4 {
+		t.Errorf("subscriptions/seen = %d/%d, want 2/4", result.Subscriptions, result.Seen)
+	}
+	if result.Candidates != 3 || result.Deferred != 1 {
+		t.Errorf("candidates/deferred = %d/%d, want 3/1（一轮总共 3 部）",
+			result.Candidates, result.Deferred)
+	}
+	// 排队顺序是发行日升序：b2(20 天前) → a2(10 天前) → b1(2 天前)，最新的 a1 留在门外。
+	got := f.allTaskMovies(t)
+	if !sameStrings(got, []string{"a2", "b1", "b2"}) {
+		t.Errorf("第一轮任务 = %v, want [a2 b1 b2]（跨订阅按发行日排队）", got)
+	}
+}
+
+// TestCapKeepsTheBackfillBoundUntilTheRemainderIsQueued 钉住「窗口里还有余量就不许清
+// backfill_from」（§6.4）：清掉它，下界会跳回水位线 − 回看窗口，被限量留在门外的老作品
+// 当场掉出窗口、永远进不来。
+func TestCapKeepsTheBackfillBoundUntilTheRemainderIsQueued(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(2))
+	if _, err := f.store.SetBackfill(context.Background(), f.sub.ID, 90); err != nil {
+		t.Fatalf("回灌: %v", err)
+	}
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "d40", "ABP-040", 40),
+		f.work(t, "d50", "ABP-050", 50),
+		f.work(t, "d60", "ABP-060", 60),
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("第一轮 RunOnce: %v", err)
+	}
+	if result.Candidates != 2 || result.Deferred != 1 {
+		t.Errorf("candidates/deferred = %d/%d, want 2/1", result.Candidates, result.Deferred)
+	}
+	if row := f.current(t); row.BackfillFrom == nil {
+		t.Error("backfill_from 被清了 —— 窗口里还有一部没入队，下轮还要接着扫")
+	} else if got := dateOf(*row.BackfillFrom); got != f.dbDate(t, 90) {
+		t.Errorf("backfill_from = %s, want %s（余量没走完，下界不许动）", got, f.dbDate(t, 90))
+	}
+
+	// 第二轮把最后一部领走，窗口这才算走完：下界清掉，起追日留在原处。
+	result, err = f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if result.Candidates != 1 || result.Deferred != 0 {
+		t.Errorf("第二轮 candidates/deferred = %d/%d, want 1/0", result.Candidates, result.Deferred)
+	}
+	row := f.current(t)
+	if row.BackfillFrom != nil {
+		t.Errorf("backfill_from = %v, want NULL（余量走完了要清）", row.BackfillFrom)
+	}
+	if got := dateOf(row.FloorDate); got != f.dbDate(t, 90) {
+		t.Errorf("floor_date = %s, want %s（走完也不回退）", got, f.dbDate(t, 90))
+	}
+}
+
+// TestTrackedWorksDoNotSpendTheRoundBudget 钉住限量的**口径**：预算数的是「建出来的任务」，
+// 不是「这一轮递进 ingest 的作品」。窗口里本来就躺着上一轮建过的作品（回看窗口 30 天），
+// 它们零写入、零上游调用——要是也吃预算，限量会被历史作品吃光，新作品永远轮不到。
+func TestTrackedWorksDoNotSpendTheRoundBudget(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(3))
+	f.backdated(t, 40, 40)
+
+	// 第一轮：三部老作品入队（限量 3 够用）。
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "t10", "ABP-010", 10),
+		f.work(t, "t9", "ABP-009", 9),
+		f.work(t, "t8", "ABP-008", 8),
+	}
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第一轮 RunOnce: %v", err)
+	}
+
+	// 第二轮：窗口里那三部老作品仍在（回看窗口 30 天），新出两部。预算 3 只该被新作品吃，
+	// 于是两部新作品这一轮都进得来——要是已建过的作品也吃预算，它们一个都进不来。
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "t10", "ABP-010", 10),
+		f.work(t, "t9", "ABP-009", 9),
+		f.work(t, "t8", "ABP-008", 8),
+		f.work(t, "t1", "ABP-001", 1),
+		f.work(t, "t2", "ABP-002", 2),
+	}
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if result.Candidates != 2 || result.Deferred != 0 {
+		t.Errorf("第二轮 candidates/deferred = %d/%d, want 2/0（已建过的作品不占预算）",
+			result.Candidates, result.Deferred)
+	}
+	if got := f.allTaskMovies(t); len(got) != 5 {
+		t.Errorf("任务 = %v, want 五部齐（两部新的都进来了）", got)
+	}
+}
+
+// TestRunSetsThePendingCountsAtTheEndOfEachRound 是 §9 那条 gauge 与面板「还有 N 部待入队」
+// 的同一份现数：每轮末尾置数，余量走完就归零（不是一个只增不减的累计）。
+func TestRunSetsThePendingCountsAtTheEndOfEachRound(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(1))
+	f.backdated(t, 40, 40)
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "w1", "ABP-001", 1),
+		f.work(t, "w2", "ABP-002", 2),
+		f.work(t, "w3", "ABP-003", 3),
+	}
+
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第一轮 RunOnce: %v", err)
+	}
+	if got := f.pending.Total(); got != 2 {
+		t.Errorf("pending 合计 = %d, want 2", got)
+	}
+	if got := f.pending.Of(f.sub.ID); got != 2 {
+		t.Errorf("这条订阅的 pending = %d, want 2（面板那一行）", got)
+	}
+	if got := f.gauge.Value(); got != 2 {
+		t.Errorf("mdc_subscription_pending = %d, want 2", got)
+	}
+
+	for round := 0; round < 2; round++ {
+		if _, err := f.runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("第 %d 轮补跑 RunOnce: %v", round+2, err)
+		}
+	}
+	if got := f.pending.Total(); got != 0 {
+		t.Errorf("余量走完之后 pending = %d, want 0", got)
+	}
+	if got := f.gauge.Value(); got != 0 {
+		t.Errorf("余量走完之后 gauge = %d, want 0（每轮末尾置数，不是累计）", got)
+	}
+	// 限量只作用于订阅来源：本轮新落的版本照常加种，不被预算挡住。
+	if got := f.pending.Of(f.sub.ID); got != 0 {
+		t.Errorf("这条订阅的 pending = %d, want 0", got)
+	}
+}
+
+// TestCapDoesNotBlockVersionsAlreadyQueued 钉住「限量只作用于订阅来源」——
+// 「限量只作用于订阅来源，不影响清单轮询与已建任务的推进」那条验收：预算用完之后，
+// 上一轮（或别的来源）已经落库、还在等加种的版本照常加种——限量挡的是「再往下产」，
+// 不是「已经排到门口的活」。
+func TestCapDoesNotBlockVersionsAlreadyQueued(t *testing.T) {
+	f := newRunFixtureWith(t, capSettings(1))
+	f.backdated(t, 40, 40)
+
+	// 一条早就排在门口的版本（上一轮崩在落库与加种之间，或者别的来源落的）。
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`INSERT INTO task (movie_id, number) VALUES ('p0', 'ABP-900')`); err != nil {
+		t.Fatalf("种任务: %v", err)
+	}
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`INSERT INTO task_version (infohash, movie_id, source, delivery, payload, add_pending)
+		 VALUES ('p0-hash', 'p0', 'javdb_magnet', 'magnet', 'magnet:?xt=urn:btih:p0-hash', true)`,
+	); err != nil {
+		t.Fatalf("种待加种版本: %v", err)
+	}
+
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "w1", "ABP-001", 1),
+		f.work(t, "w2", "ABP-002", 2),
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Candidates != 1 || result.Deferred != 1 {
+		t.Errorf("candidates/deferred = %d/%d, want 1/1（限量 1）",
+			result.Candidates, result.Deferred)
+	}
+	// 加种这一条独立于预算：p0 与这一轮新落的 w1 都该加进去。
+	if result.Added != 2 || len(f.adder.calls) != 2 {
+		t.Fatalf("added/calls = %d/%d, want 2/2（已排队的版本不受限量影响）",
+			result.Added, len(f.adder.calls))
+	}
+	numbers := []string{f.adder.calls[0].Number, f.adder.calls[1].Number}
+	sort.Strings(numbers)
+	// ABP-002 是两部里最老的那部（限量 1，最老的先入队），另一部下一轮再来。
+	if !sameStrings(numbers, []string{"ABP-002", "ABP-900"}) {
+		t.Errorf("加种的番号 = %v, want [ABP-002 ABP-900]", numbers)
 	}
 }

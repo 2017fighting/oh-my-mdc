@@ -63,6 +63,9 @@ type subscriptionBody struct {
 	// TasksCount 是「带来 N 部」；PendingCount 是这批里还有版本在等加种的条数。
 	TasksCount   int `json:"tasks_count"`
 	PendingCount int `json:"pending_count"`
+	// DeferredCount 是「还有 N 部待入队」（§6.4「节流与去重」/§9）：回看窗口里已发现、
+	// 被每轮限量留在门外的作品数，由订阅循环每轮末尾置数（不落库，重启后第一个轮次重算）。
+	DeferredCount int `json:"deferred_count"`
 }
 
 type subscriptionsBody struct {
@@ -358,6 +361,7 @@ func subscriptionBodyOf(row subscription.Row) subscriptionBody {
 		Enabled:       row.Enabled,
 		TasksCount:    row.TasksCount,
 		PendingCount:  row.PendingCount,
+		DeferredCount: row.DeferredCount,
 	}
 }
 
