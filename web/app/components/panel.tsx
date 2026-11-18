@@ -1,16 +1,20 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router";
-import { AlertTriangle, ChevronRight, CircleDashed, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
+import { AlertTriangle, ArrowUp, ChevronRight, CircleDashed, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
 import { PANEL_ACTION_SIZE, ROW_ACTION_SIZE, RowAction } from "~/components/row-action";
-import { SubscriptionPanel } from "~/components/subscriptions";
+import { ConfirmBar } from "~/components/confirm-bar";
+import { ReceiptAnnouncer, ReceiptList, RECEIPT_CEILING, RECEIPT_LIMIT, useReceipts } from "~/components/receipts";
+import { backfillSummary } from "~/lib/backfill";
+import { subscriptionSummaryLine } from "~/lib/subscription";
 import { Button } from "~/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
 import { Notice, TextInput, Field } from "~/components/form";
+import { useNow } from "~/lib/clock";
 import { focusablesIn, holdShellInert } from "~/lib/modal";
 import { CONFUSABLES, MISSING_FACE_LABELS, STATUS_NAMES, STATUS_NOTES, STATUS_ORDER, WIZARD_CONFUSABLES } from "~/lib/copy";
 import { groupByNumber, groupStuck, oldestCreatedAt, attentionRowCount, type FailureGroup, type StuckGroup } from "~/lib/attention";
@@ -28,15 +32,13 @@ import {
   remedyForStalled,
   settingsLabel,
 } from "~/lib/remedy";
-import type { SubscriptionSkip } from "~/lib/skips";
-import type { Receipt, ReceiptDraft, RetryNotice } from "~/lib/receipts";
+import type { ReceiptDraft, RetryNotice } from "~/lib/receipts";
 import {
   api,
   notifyEventLabels,
   notifyEventOf,
   type Attention,
   type AttentionItem,
-  type BackfillResult,
   type BackfillScan,
   type IncompleteItem,
   type ManualRegistration,
@@ -53,7 +55,11 @@ import {
 } from "~/lib/api";
 
 /**
- * 面板（规格 §8.2）：统计行 →「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康。
+ * 面板（规格 §8.2）：统计行 →「需要人工」区 → 待补齐 → 稠密任务表 → 副作用队列 → 维护一行 → 循环健康。
+ *
+ * 维护那两行（补录目录、女优订阅）只是指路：它们的两块本体在 `/settings/backfill` 与
+ * `/settings/actresses`。原因写在 DESIGN 的 Off-The-Desk Rule 里——一次性的大宗家务与
+ * 配置面不进值班台，否则「一眼看完」要按 37 屏来算。
  *
  * 这里只放面板自己的东西；整站外壳（导航、门禁、视图切换）在 routes/home.tsx。
  */
@@ -81,7 +87,7 @@ export const LOOP_ORDER: LoopName[] = ["poll", "reconcile", "sidefx", "subscript
  * 「抽屉还开着吗」：抽屉恰好在这时关掉，外壳的 inert 就被提前撤掉，底下又能点。
  * 改用计数之后，两个弹层各拿一只把手，最后一个放手才真的放手。
  */
-/** Panel 是面板：统计卡 → 「需要人工」区 → 稠密任务表 → 副作用队列 → 循环健康（规格 §8.2）。 */
+/** Panel 是面板：统计卡 → 「需要人工」区 → 待补齐 → 稠密任务表 → 副作用队列 → 维护 → 循环健康（规格 §8.2）。 */
 export function Panel({
   overview,
   tasks,
@@ -90,8 +96,6 @@ export function Panel({
   sideEffects,
   backfill,
   subscriptions,
-  subscriptionSkips,
-  javdbConfigured,
   query,
   pageSize,
   loadedAt,
@@ -108,20 +112,13 @@ export function Panel({
   total: number;
   attention: Attention | null;
   sideEffects: SideEffect[];
-  /** 未补录目录的实时扫描（GLOSSARY「补录」）；null = 读不到，整块不渲染。 */
+  /**
+   * 补录扫描（GLOSSARY「补录」）：面板只用它的两个数，列表本体在 `/settings/backfill`。
+   * 用它的**个数**（而不是列表）回答「有没有一坨家务在等着」——502 行不进面板。
+   */
   backfill: BackfillScan | null;
-  /** 订阅区（女优订阅，§6.4）；null = 读不到，整块不渲染。 */
+  /** 女优订阅（§6.4）：面板只用它拼一行摘要，行与动作在 `/settings/actresses`。 */
   subscriptions: SubscriptionList | null;
-  /**
-   * 「最近被排掉的」按订阅 id 分摊（GLOSSARY「跳过」）；某一条是 null＝那一条读不到，
-   * 于是那块折叠格不渲染——一个假的 0 会让人以为判据从没命中过。
-   */
-  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
-  /**
-   * JavDB 那一节配好了没有（token 已保存）。「从 App 收藏导入」要凭据才读得到上游
-   * （收藏名单匿名不可用，§13），没配时那入口整颗禁掉并写出原因——不是点了才静默失败。
-   */
-  javdbConfigured: boolean;
   query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
@@ -460,21 +457,8 @@ export function Panel({
           onRefresh={onRefresh}
         />
 
-        <BackfillDirs
-          backfill={backfill}
-          onReceipt={receiptsState.push}
-          onRefresh={onRefresh}
-        />
-
-        <SubscriptionPanel
-          subscriptions={subscriptions}
-          subscriptionSkips={subscriptionSkips}
-          javdbConfigured={javdbConfigured}
-          actions={{ onReceipt: receiptsState.push, onRefresh }}
-        />
-
-        <Card>
-          <CardHeader>
+        <Card className="scroll-mt-4 overflow-visible" id="task-card">
+          <CardHeader className="sticky top-0 z-10 rounded-t-xl border-b bg-card">
             <CardTitle as="h2">任务</CardTitle>
             <CardDescription className="text-xs tabular-nums">
               {query.q || query.state ? `筛选后 ${total} 条` : `共 ${total} 条`}
@@ -490,7 +474,7 @@ export function Panel({
               </Button>
             </CardAction>
           </CardHeader>
-          <CardContent className="px-0">
+          <CardContent className="overflow-hidden rounded-b-xl px-0">
             <TaskFilters query={query} onQuery={onQuery} />
             {tasks.length === 0 ? (
               <EmptyTasks
@@ -650,6 +634,8 @@ export function Panel({
           onRefresh={onRefresh}
         />
 
+        <MaintenanceSummary backfill={backfill} subscriptions={subscriptions} now={now} />
+
         <Card>
           <CardHeader>
             <CardTitle as="h2">循环健康</CardTitle>
@@ -760,6 +746,8 @@ export function Panel({
           dialogRef={helpDialogRef}
         />
       ) : null}
+
+      <BackToTop />
     </>
   );
 }
@@ -784,10 +772,14 @@ function IncompleteTasks({
   onRefresh: () => Promise<void>;
 }) {
   const taskRetry = useTaskRetry(onRefresh);
+  // 强制重刮是可逆性最差的那一类动作（会重写落盘、拉回版本）：一行一次确认，
+  // 确认条就地出现，不开对话框（DESIGN 的 Consequence-First Rule）。
+  const [confirming, setConfirming] = React.useState<string | null>(null);
+  const triggerRef = React.useRef<HTMLElement | null>(null);
   if (items.length === 0) return null;
 
   return (
-    <Card role="region" aria-labelledby="incomplete-heading">
+    <Card role="region" aria-labelledby="incomplete-heading" className="overflow-visible">
       <CardHeader className="max-sm:grid-cols-1">
         <div>
           <h2 id="incomplete-heading" className="font-heading text-base font-medium">
@@ -866,11 +858,10 @@ function IncompleteTasks({
                     variant="outline"
                     className={ROW_ACTION_SIZE}
                     disabled={busy}
-                    onClick={() =>
-                      void taskRetry.retry(item.movie_id, true, {
-                        title: item.number,
-                      })
-                    }
+                    onClick={(event) => {
+                      triggerRef.current = event.currentTarget;
+                      setConfirming(item.movie_id);
+                    }}
                     title={`强制重刮 ${item.number}：重新取数并重写 NFO 与图片，完成后这一行自动退场`}
                   >
                     {busy ? (
@@ -888,6 +879,22 @@ function IncompleteTasks({
                     查看
                   </Button>
                 </div>
+                {confirming === item.movie_id ? (
+                  <div className="w-full">
+                    <ConfirmBar
+                      label={`确认强制重刮 ${item.number}`}
+                      text={`确认把 ${item.number} 的已入库版本拉回加工开头？重刮会重新取数并重写 NFO 与图片，原来的取数快照留在任务事件里。四面齐了这一行会自己退场。`}
+                      confirmLabel="确认强制重刮"
+                      busy={busy}
+                      cancelFocusRef={triggerRef}
+                      onCancel={() => setConfirming(null)}
+                      onConfirm={() => {
+                        setConfirming(null);
+                        void taskRetry.retry(item.movie_id, true, { title: item.number });
+                      }}
+                    />
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -898,110 +905,111 @@ function IncompleteTasks({
 }
 
 /**
- * BackfillDirs 是「未补录目录」区（#43 / GLOSSARY「补录」）。
+ * MaintenanceSummary 是面板底部的「维护」两行：补录目录与女优订阅。
  *
- * 媒体库里已落盘、不归本项目的旧目录：一键补录把它们收进任务域——现有视频原地
- * 入库，重刮由流水线接着做（零下载、不过 qBittorrent）。补录成功的行随下次刷新
- * 消失：列表与任务表实时一致，后端每个请求都现扫现比。空区整块不渲染
- * （562 个目录收完之后，这里应该安静）。
+ * 两块的本体都搬进了集成设置（`/settings/backfill`、`/settings/actresses`）：
+ *
+ * - 补录是**一次性的大宗家务**（502 个目录 = 26,533px），它把值班台从「一眼看完」
+ *   变成目录页——85% 的滚动都在那一节里，任务表与循环健康被推到了 37 屏之外；
+ * - 订阅是**配置面**：它没有「卡住」态，每行七颗控件换来三个零。
+ *
+ * 面板要留的只是「有没有一坨事在等着、要不要现在去」，所以是两行、两个数、两个链接。
+ * 两样都没有时整块不渲染（Nothing-To-Do Rule）：空卡片只是首屏的家具。
  */
-function BackfillDirs({
+function MaintenanceSummary({
   backfill,
-  onReceipt,
-  onRefresh,
+  subscriptions,
+  now,
 }: {
   backfill: BackfillScan | null;
-  onReceipt: (draft: ReceiptDraft) => void;
-  onRefresh: () => Promise<void>;
+  subscriptions: SubscriptionList | null;
+  now: number;
 }) {
-  const dirs = backfill?.dirs ?? [];
-  const [busy, setBusy] = React.useState<string | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  if (dirs.length === 0) return null;
+  const backfillLine = backfillSummary(backfill);
+  const subscriptionLine = subscriptions
+    ? subscriptionSummaryLine(subscriptions.actresses, now)
+    : null;
+  if (backfillLine === null && subscriptionLine === null) return null;
 
-  const run = async (number: string) => {
-    if (busy) return;
-    setBusy(number);
-    setError(null);
-    try {
-      const result: BackfillResult = await api.backfill(number);
-      onReceipt(backfillReceipt(result));
-      await onRefresh();
-    } catch (cause: unknown) {
-      // 错误文案来自端点的 zh-CN 信封（门禁、目录没了、没有视频），直译即可。
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
+  const rows = [
+    {
+      key: "backfill",
+      label: "补录目录",
+      line: backfillLine,
+      to: "/settings/backfill",
+      action: "去处理",
+    },
+    {
+      key: "actresses",
+      label: "女优订阅",
+      line: subscriptionLine,
+      to: "/settings/actresses",
+      action: "去管理",
+    },
+  ].filter(
+    (row): row is { key: string; label: string; line: string; to: string; action: string } =>
+      row.line !== null,
+  );
 
   return (
-    <Card role="region" aria-labelledby="backfill-heading">
-      <CardHeader className="max-sm:grid-cols-1">
-        <div>
-          <h2 id="backfill-heading" className="font-heading text-base font-medium">
-            未补录目录
-          </h2>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            媒体库里还不归本项目的旧目录。一键补录：现有视频原地入库，随即强制重刮重写 NFO 与图片；
-            旧的 {'{番号}'}.nfo 会被删掉（movie.nfo 除外）。零下载、不过 qBittorrent。
-          </p>
-        </div>
-        <CardAction className="max-sm:col-start-1 max-sm:row-start-2">
-          <span className="text-xs tabular-nums text-muted-foreground">{dirs.length} 个目录</span>
-        </CardAction>
+    <Card role="region" aria-labelledby="maintenance-heading">
+      <CardHeader>
+        <CardTitle as="h2" id="maintenance-heading">
+          维护
+        </CardTitle>
+        <CardDescription className="text-xs">
+          一次性的大宗家务与订阅配置：动作在集成设置里，面板只报个数。
+        </CardDescription>
       </CardHeader>
-      <CardContent>
-        {error ? (
-          <div className="mb-2">
-            <Notice tone="bad" onClose={() => setError(null)}>
-              {error}
-            </Notice>
-          </div>
-        ) : null}
-        <div className="divide-y">
-          {dirs.map((dir) => (
-            <div
-              key={dir.number}
-              data-backfill={dir.number}
-              className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-x-4"
-            >
-              <div className="min-w-0 flex-1 space-y-1 font-medium tabular-nums">
-                {dir.number}
-                <span className="ml-2 text-xs font-normal text-muted-foreground">
-                  {dir.videos} 个视频
-                </span>
-              </div>
-              <RowAction
-                onClick={() => void run(dir.number)}
-                disabled={busy !== null}
-                aria-label={`补录 ${dir.number}`}
-              >
-                {busy === dir.number ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
-                补录
-              </RowAction>
+      <CardContent className="divide-y">
+        {rows.map((row) => (
+          <div
+            key={row.key}
+            data-maintenance={row.key}
+            className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-x-4"
+          >
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="dense font-medium">{row.label}</p>
+              <p className="dense tabular-nums text-muted-foreground">{row.line}</p>
             </div>
-          ))}
-        </div>
+            <Button variant="outline" className={ROW_ACTION_SIZE} asChild>
+              <Link to={row.to}>{row.action}</Link>
+            </Button>
+          </div>
+        ))}
       </CardContent>
     </Card>
   );
 }
 
-/** backfillReceipt 把补录结局翻成回执：两种结局都算「按成了」，语调分两档。 */
-function backfillReceipt(result: BackfillResult): ReceiptDraft {
-  if (result.outcome === "duplicate") {
-    return {
-      title: result.number,
-      tone: "ok",
-      text: result.message ?? `${result.number} 已有任务，不用补录`,
-    };
-  }
-  return {
-    title: result.number,
-    tone: "ok",
-    text: `已补录 ${result.number}（${result.versions} 条版本），重刮会重写 NFO 与图片`,
-  };
+/**
+ * BackToTop 是「滚到一万多像素之后怎么回去」的答案。
+ *
+ * 只在滚过一屏半之后出现，落在右下拇指区；衰减动效的用户直接被送到顶（不滑）。
+ * 它不带阴影（DESIGN 的 Hairline Depth Rule），位置在 DOM 末尾。
+ */
+function BackToTop() {
+  const [shown, setShown] = React.useState(false);
+  React.useEffect(() => {
+    const onScroll = () => setShown(window.scrollY > 1200);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  if (!shown) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        window.scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" });
+      }}
+      className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 z-30 inline-flex h-11 items-center gap-1.5 rounded-lg border bg-card px-3 text-xs font-medium transition-colors hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+    >
+      <ArrowUp className="size-3.5" aria-hidden />
+      回到顶部
+    </button>
+  );
 }
 
 /** NeedsAttention 是「需要人工」区（规格 §8.2：置顶，行内直接动手）。
@@ -1384,109 +1392,6 @@ function NeedsAttention({
 
 /** 回执留 3 条、活 10 分钟：足够看见刚才那几下，又不至于把卡片变成一块日志。
  *  批量重试时限额临时放宽（见 NeedsAttention.runBatch），但永不超天花板 8。 */
-const RECEIPT_LIMIT = 3;
-const RECEIPT_CEILING = 8;
-const RECEIPT_TTL = 10 * 60_000;
-
-/**
- * useReceipts 是「动完手」的回执队列。
- *
- * 它必须挂在卡片上，不能挂在行里：重试成功之后那一行就从树上消失了，而回执正是
- * 那一刻唯一的证据。以前回执写在行里，于是被拒时有话、成功时无话。
- */
-function useReceipts() {
-  const [receipts, setReceipts] = React.useState<Receipt[]>([]);
-  const nextID = React.useRef(1);
-  const listRef = React.useRef<HTMLDivElement>(null);
-
-  const push = React.useCallback((draft: ReceiptDraft, limit = RECEIPT_LIMIT) => {
-    setReceipts((current) =>
-      [{ ...draft, id: nextID.current++, at: Date.now() }, ...current].slice(
-        0,
-        Math.min(limit, RECEIPT_CEILING),
-      ),
-    );
-  }, []);
-
-  const dismiss = React.useCallback((id: number) => {
-    setReceipts((current) => current.filter((receipt) => receipt.id !== id));
-  }, []);
-
-  // 回执自己退场：不用人清理，但退场前有整整十分钟可被读到。
-  React.useEffect(() => {
-    if (receipts.length === 0) return;
-    const timer = window.setInterval(() => {
-      const cutoff = Date.now() - RECEIPT_TTL;
-      setReceipts((current) =>
-        current.some((receipt) => receipt.at < cutoff)
-          ? current.filter((receipt) => receipt.at >= cutoff)
-          : current,
-      );
-    }, 30_000);
-    return () => window.clearInterval(timer);
-  }, [receipts.length]);
-
-  return { receipts, push, dismiss, listRef };
-}
-
-/** ReceiptList 是卡片顶部的回执行：一行一条，语气词打头，能逐条收起。 */
-function ReceiptList({
-  receipts,
-  now,
-  listRef,
-  onDismiss,
-}: {
-  receipts: Receipt[];
-  now: number;
-  listRef: React.RefObject<HTMLDivElement | null>;
-  onDismiss: (id: number) => void;
-}) {
-  if (receipts.length === 0) return null;
-  return (
-    <div
-      ref={listRef}
-      tabIndex={-1}
-      role="group"
-      aria-label="操作回执"
-      className="mb-3 divide-y rounded-lg bg-muted/50 px-3 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-    >
-      {receipts.map((receipt) => (
-        <div key={receipt.id} className="flex items-start gap-2 py-1.5 text-xs leading-relaxed">
-          <span
-            className={cn(
-              "shrink-0 font-medium",
-              receipt.tone === "ok" ? "text-status-done-text" : "text-status-progress-text",
-            )}
-          >
-            {receipt.tone === "ok" ? `已${receipt.verb ?? "重试"}` : "没成"}
-          </span>
-          <span className="min-w-0 flex-1 break-words">
-            <span className="font-medium tabular-nums">{receipt.title}</span>
-            {/* 两个版本以上时一行会变成日志：逐版结论各占一行，
-                番号仍在第一行开头，回执是一段话不是一串分号。 */}
-            {(receipt.parts ?? receipt.text.split("；")).map((part, index) => (
-              <span key={index} className={index > 0 ? "block pl-2" : undefined}>
-                {index === 0 ? ` · ${part}` : part}
-              </span>
-            ))}
-            <span className="ml-1.5 tabular-nums text-muted-foreground">
-              {formatWhen(receipt.at, now)}
-            </span>
-          </span>
-          <button
-            type="button"
-            onClick={() => onDismiss(receipt.id)}
-            aria-label={`收起回执：${receipt.title}`}
-            className="-m-1 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors before:absolute before:-inset-2 before:content-[''] relative hover:bg-popover hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:size-6"
-          >
-            <X className="size-3" aria-hidden />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /**
  * AttentionHeading 只报分节名，不再报数：数已经有唯一的说话人（页标题 + 构成行）。
  * 以前这里写「失败 4 条版本」而构成行写「失败 3 部」，两个单位并排 40px，
@@ -1656,24 +1561,6 @@ function VersionGroup({
         </RowAction>
       </div>
     </div>
-  );
-}
-
-/**
- * ReceiptAnnouncer 是「刚才那一按成了没有」的唯一播报位。
- *
- * 它常驻在 Panel 上（卡片会被清空、会消失，而这个位不能），且只拿最新的那一条：
- * 三条一起念会把一句结论变成一段日志。可见的回执行是它的视觉版，不再兼任活区。
- */
-function ReceiptAnnouncer({ receipts }: { receipts: Receipt[] }) {
-  const latest = receipts[0];
-  const text = latest
-    ? `${latest.tone === "ok" ? `已${latest.verb ?? "重试"}` : "没成"} ${latest.title} · ${latest.text}`
-    : "";
-  return (
-    <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-      {text}
-    </p>
   );
 }
 
@@ -3052,21 +2939,9 @@ export function ShortcutsHelp({
 }
 
 /**
- * useNow 是一分钟一跳的「现在」。
- *
- * 相对时间（3 分钟前）不自己走的话，一屏「3 分钟前」会挂到用户关掉标签页为止，
- * 那比写绝对时间更骗人。间隔取 60s：秒级的「正在跑 43 秒」不是这一跳能兑现的精度，
- * 那一行说的是「醒着」，不是秒表。
+ * useNow 本体搬到了 `lib/clock.ts`（面板、维护节、订阅行都要它），这里转出去是为了
+ * 外壳仍然只从 panel 拿面板相关的那几个出口。
  */
-function useNow(interval = 60_000): number {
-  const [now, setNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), interval);
-    return () => window.clearInterval(timer);
-  }, [interval]);
-  return now;
-}
-
 export { useNow };
 
 type LoopLine = { label: string; text: string; failing: boolean };

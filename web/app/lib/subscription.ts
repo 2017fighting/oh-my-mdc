@@ -1,4 +1,5 @@
 import type { Subscription } from "./api";
+import { formatWhen } from "./time.ts";
 
 /**
  * 订阅区（规格 §6.4/§8.2）的纯逻辑：面板一行的那句话，与「添加」那颗按钮发出去的形状。
@@ -39,9 +40,15 @@ export function subscriptionBackfillDays(raw: string): number | null {
   return days;
 }
 
-/** subscriptionWatermark 说「上次见过哪一天」；不知道就说不知道，不编今天。 */
-export function subscriptionWatermark(date: string): string {
-  return date === "" ? "还没跑过" : date;
+/**
+ * subscriptionWatermark 说「上次见过哪一天」；不知道就说不知道，不编今天。
+ *
+ * 说相对时间（`3 天前` / `昨天`），不说 `2026-11-18`：订阅行问的是「她最近一次
+ * 带来东西是多久之前」，不是「那是哪一天」（DESIGN 的 Relative-Forever Rule）。
+ * 绝对日期仍进 `title`，由调用方给。
+ */
+export function subscriptionWatermark(date: string, now: number = Date.now()): string {
+  return date === "" ? "还没跑过" : formatWhen(date, now);
 }
 
 /**
@@ -52,9 +59,9 @@ export function subscriptionWatermark(date: string): string {
  * `deferred_count` 是「还有 N 部待入队」——回看窗口里已发现、被每轮限量留在门外的作品。
  * 后者是限量的现场读数（每轮末尾置数），余量走完就自己消失。
  */
-export function subscriptionSubtitle(row: Subscription): string {
+export function subscriptionSubtitle(row: Subscription, now: number = Date.now()): string {
   const parts = [
-    `水位线 ${subscriptionWatermark(row.watermark_date)}`,
+    `水位线 ${subscriptionWatermark(row.watermark_date, now)}`,
     `带来 ${row.tasks_count} 部`,
   ];
   if (row.pending_count > 0) {
@@ -64,10 +71,38 @@ export function subscriptionSubtitle(row: Subscription): string {
     parts.push(`还有 ${row.deferred_count} 部待入队`);
   }
   if (row.backfill_from) {
-    parts.push(`回灌自 ${row.backfill_from}`);
+    // 同一份台阶：行上说「多久以前」，绝对日期进 title（Relative-Forever Rule）。
+    parts.push(`回灌自 ${formatWhen(row.backfill_from, now)}`);
   }
   if (!row.enabled) {
     parts.push("已停用");
   }
+  return parts.join(" · ");
+}
+
+/**
+ * subscriptionSummaryLine 是面板上那一行摘要（订阅区本体在 `/settings/actresses`）。
+ *
+ * 面板只回答两个问题：「订了几个人、还在不在追」「最近一次带来东西是什么时候」。
+ * 一条订阅都没有时返回 null：面板据此整行不渲染，不留一句「还没订阅」的家具
+ * （DESIGN 的 Nothing-To-Do Rule）——那句话属于设置面。
+ */
+export function subscriptionSummaryLine(
+  rows: Subscription[],
+  now: number = Date.now(),
+): string | null {
+  if (rows.length === 0) return null;
+  const enabled = rows.filter((row) => row.enabled).length;
+  const latestWatermark = rows
+    .map((row) => row.watermark_date)
+    .filter((date) => date !== "")
+    .sort()
+    .at(-1);
+  const tasks = rows.reduce((sum, row) => sum + row.tasks_count, 0);
+  const parts = [
+    enabled === rows.length ? `${rows.length} 位女优` : `${rows.length} 位女优 · 启用 ${enabled}`,
+    latestWatermark === undefined ? "还没跑过" : `最近水位线 ${formatWhen(latestWatermark, now)}`,
+    `带来 ${tasks} 部`,
+  ];
   return parts.join(" · ");
 }

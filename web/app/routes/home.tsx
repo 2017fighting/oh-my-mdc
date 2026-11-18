@@ -10,8 +10,17 @@ import { Notice } from "~/components/form";
 import { Panel, isTaskState, loopLines, useNow, type PanelQuery } from "~/components/panel";
 import { ROW_ACTION_SIZE, PANEL_ACTION_SIZE } from "~/components/row-action";
 import { ThemeToggle } from "~/components/theme";
+import { BackfillSection } from "~/components/backfill";
+import { ActressImportSection, ActressesSection } from "~/components/subscriptions";
 import { attentionRowCount } from "~/lib/attention";
-import { SECTION_ORDER, Wizard, isSectionName } from "~/routes/wizard";
+import {
+  SECTION_ORDER,
+  SettingsRail,
+  Wizard,
+  isSectionName,
+  isToolSection,
+  type ToolSection,
+} from "~/routes/wizard";
 import { durationSeconds, formatInterval } from "~/lib/time";
 import {
   api,
@@ -24,7 +33,6 @@ import {
   type SectionName,
   type SideEffect,
   type SubscriptionList,
-  type SubscriptionSkip,
   type TaskRow,
 } from "~/lib/api";
 
@@ -58,9 +66,6 @@ export default function Home() {
   const [sideEffects, setSideEffects] = React.useState<SideEffect[]>([]);
   const [backfill, setBackfill] = React.useState<BackfillScan | null>(null);
   const [subscriptions, setSubscriptions] = React.useState<SubscriptionList | null>(null);
-  const [subscriptionSkips, setSubscriptionSkips] = React.useState<
-    Record<number, SubscriptionSkip[] | null>
-  >({});
   const [pageSize, setPageSize] = React.useState(50);
   // 存错误本身而不是一句话：网关类失败（登录页、401/403）要拿它决定给什么动作。
   const [loadError, setLoadError] = React.useState<unknown | null>(null);
@@ -106,7 +111,6 @@ export default function Home() {
     setSideEffects(loaded.sideEffects);
     setBackfill(loaded.backfill);
     setSubscriptions(loaded.subscriptions);
-    setSubscriptionSkips(loaded.subscriptionSkips);
     setPageSize(loaded.pageSize);
     setLoadError(null);
     setLoadedAt(Date.now());
@@ -167,6 +171,8 @@ export default function Home() {
   const route = parseRoute(location.pathname);
   const view: View = initialized && route.view === "panel" ? "panel" : "settings";
   const section = route.section ?? SECTION_ORDER[0];
+  // 维护节只有初始化之后才存在：门禁没齐时同一个地址回落成向导（不另开一屏）。
+  const tool = initialized ? route.tool : null;
 
   // 从设置回到面板时重读一次：改完 Telegram 再回来，得看到改完之后的队列，
   // 而不是离开前的快照。首次挂载不重复拉（上面那个 effect 已经拉过了）。
@@ -395,10 +401,6 @@ export default function Home() {
               sideEffects={sideEffects}
               backfill={backfill}
               subscriptions={subscriptions}
-              subscriptionSkips={subscriptionSkips}
-              // 「从 App 收藏导入」要 JavDB 凭据（收藏名单匿名不可用，§13）：没保存就把那入口
-              // 整颗禁掉并写出原因，而不是让人点了才发现失败。
-              javdbConfigured={snapshot?.sections?.javdb?.configured ?? false}
               query={query}
               pageSize={pageSize}
               loadedAt={loadedAt}
@@ -409,6 +411,8 @@ export default function Home() {
               onQuery={writeQuery}
               onRefresh={refreshOnly}
             />
+          ) : tool ? (
+            <MaintenanceSection tool={tool} snapshot={snapshot} />
           ) : (
             <Wizard
               snapshot={snapshot}
@@ -523,11 +527,47 @@ function Unavailable({
  *
  * 认不出的地址一律回面板（已初始化时）；未初始化时调用方会把它按向导渲染。
  */
-function parseRoute(pathname: string): { view: View; section: SectionName | null } {
-  const match = /^\/settings(?:\/([a-z_]+))?\/?$/.exec(pathname);
-  if (!match) return { view: "panel", section: null };
+function parseRoute(pathname: string): {
+  view: View;
+  section: SectionName | null;
+  tool: ToolSection | null;
+} {
+  // 地址里允许连字符：维护节是 `actress-import`（八节全是下划线，两类 id 不会撞）。
+  const match = /^\/settings(?:\/([a-z_-]+))?\/?$/.exec(pathname);
+  if (!match) return { view: "panel", section: null, tool: null };
   const candidate = match[1];
-  return { view: "settings", section: isSectionName(candidate) ? candidate : null };
+  return {
+    view: "settings",
+    section: isSectionName(candidate) ? candidate : null,
+    tool: isToolSection(candidate) ? candidate : null,
+  };
+}
+
+/**
+ * MaintenanceSection 是维护节的外壳：左边同一份侧栏（八节 + 三节维护），右边是那一节本体。
+ *
+ * 三节各有自己的地址与自己的读取（补录扫描、订阅表、收藏名单）：谁的数据不拖累谁，
+ * 也不会因为打开「从收藏导入」就把 502 个目录再扫一遍。
+ */
+function MaintenanceSection({
+  tool,
+  snapshot,
+}: {
+  tool: ToolSection;
+  snapshot: ConfigSnapshot;
+}) {
+  return (
+    <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[230px_1fr]">
+      <SettingsRail activeSection={tool} snapshot={snapshot} />
+      <div className="min-w-0 space-y-4">
+        {tool === "backfill" ? <BackfillSection /> : null}
+        {tool === "actresses" ? <ActressesSection /> : null}
+        {tool === "actress-import" ? (
+          <ActressImportSection javdbConfigured={snapshot.sections.javdb.configured} />
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -634,8 +674,6 @@ type Dashboard = {
   sideEffects: SideEffect[];
   backfill: BackfillScan | null;
   subscriptions: SubscriptionList | null;
-  /** 「最近被排掉的」按订阅 id 分摊（null＝这一条读不到，那块折叠格就不渲染）。 */
-  subscriptionSkips: Record<number, SubscriptionSkip[] | null>;
   page: number;
   pageSize: number;
 };
@@ -663,35 +701,9 @@ async function fetchDashboard(query: PanelQuery): Promise<Dashboard> {
     sideEffects: sideEffects.side_effects,
     backfill,
     subscriptions,
-    subscriptionSkips: await fetchSubscriptionSkips(subscriptions),
     page: taskList.page,
     pageSize: taskList.page_size,
   };
-}
-
-/**
- * fetchSubscriptionSkips 读每一条订阅「最近被排掉的」（§8.2 的折叠格，GLOSSARY「跳过」）。
- *
- * 一条订阅一个请求，而不是把跳过数塞进订阅行：那个列表形状早就定下来了，而这一块是
- * 一个带展开面的东西（行里连标题与日期都有）。第一条订阅都没有时零请求。
- *
- * 单条读不到只让**那一条**的折叠格不渲染（null）：跳过表是附加面，一个假的「0 条」
- * 会让人以为判据从没命中过——那正是这块要证明的事。
- */
-async function fetchSubscriptionSkips(
-  subscriptions: SubscriptionList | null,
-): Promise<Record<number, SubscriptionSkip[] | null>> {
-  const rows = subscriptions?.actresses ?? [];
-  const entries = await Promise.all(
-    rows.map(async (row) => {
-      try {
-        return [row.id, (await api.subscriptionSkips(row.id)).skips] as const;
-      } catch {
-        return [row.id, null] as const;
-      }
-    }),
-  );
-  return Object.fromEntries(entries);
 }
 
 /**

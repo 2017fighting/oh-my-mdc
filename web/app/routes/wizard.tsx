@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Link, useNavigate } from "react-router";
-import { ChevronLeft, ChevronRight, CircleHelp, Loader2, Plus, RefreshCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleHelp, Loader2, Plus, RefreshCw, Wrench } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
@@ -218,6 +218,43 @@ export const SECTION_ORDER: SectionName[] = steps.map((step) => step.section);
 export function isSectionName(value: string | undefined): value is SectionName {
   return value !== undefined && (SECTION_ORDER as string[]).includes(value);
 }
+
+/**
+ * 维护节：初始化之后才存在的三个地址（`/settings/backfill`、`/settings/actresses`、
+ * `/settings/actress-import`）。
+ *
+ * 它们**不是向导步骤**：门禁与它们无关（六判据里没有一项问「补录完了没有」），
+ * 也没有自己的配置表（快照里 `snapshot.sections` 没有这三张表）。所以它们与
+ * SectionName 是两套 id，只在设置面的侧栏与地址解析里汇合。
+ *
+ * 为什么搬出面板：补录是 502 行的一次性家务、订阅是与门禁无关的配置面，
+ * 它们挂在值班台上会把「一眼看完」变成 44 屏。
+ */
+export type ToolSection = "backfill" | "actresses" | "actress-import";
+
+export const TOOL_SECTIONS: { section: ToolSection; title: string; help: string }[] = [
+  {
+    section: "backfill",
+    title: "补录目录",
+    help: "媒体库里不归本项目的旧目录：分前缀、搜索、按批补录。",
+  },
+  {
+    section: "actresses",
+    title: "女优订阅",
+    help: "盯住女优新作的订阅：添加、回灌、启停、被排掉的出口。",
+  },
+  {
+    section: "actress-import",
+    title: "从收藏导入",
+    help: "把 JavDB App 里收藏的女优勾过来建订阅。",
+  },
+];
+
+/** isToolSection 收窄地址里的那一段；认不出就不是维护节。 */
+export function isToolSection(value: string | undefined): value is ToolSection {
+  return value !== undefined && TOOL_SECTIONS.some((tool) => tool.section === value);
+}
+
 
 /** 动作行里的按钮：手机上 44px 热区，md 起回到 28px 的紧凑高度（DESIGN 的拇指规则）。 */
 const ACTION = "h-11 px-3 text-[0.8125rem] md:h-7 md:px-2.5 md:text-xs";
@@ -564,41 +601,7 @@ export function Wizard({
       {/* 窄屏：一条可横滑的分区链。以前 lg 以下整条导航是 hidden，手机上「去 Telegram 设置」
           只能靠六个「下一步」穿过去；现在每一节都是一个地址。
           当前项自动滚到链中央：第 8 步时它原本在 350px 视口外，屏上只剩前三步。 */}
-      <nav aria-label={railLabel} className="min-w-0 lg:hidden">
-        <StepChain stepIndex={stepIndex} snapshot={snapshot} />
-      </nav>
-
-      <ol className="hidden space-y-1 lg:block" aria-label={railLabel}>
-        {steps.map((candidate, index) => {
-          const current = index === stepIndex;
-          return (
-            <li key={candidate.section}>
-              <Link
-                to={`/settings/${candidate.section}`}
-                aria-current={current ? "step" : undefined}
-                className={cn(
-                  "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left dense transition-colors",
-                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-                  current
-                    ? "bg-card font-medium ring-1 ring-foreground/10"
-                    : "text-muted-foreground hover:bg-secondary/60",
-                )}
-              >
-                <StepDot index={index} configured={isStepConfigured(candidate, snapshot)} current={current} />
-                <span className="leading-snug">
-                  {candidate.title}
-                  {candidate.optional ? (
-                    <span className="ml-1 text-xs text-muted-foreground">可跳过</span>
-                  ) : null}
-                  <span className="sr-only">
-                    {isStepConfigured(candidate, snapshot) ? "，已配置" : "，未配置"}
-                  </span>
-                </span>
-              </Link>
-            </li>
-          );
-        })}
-      </ol>
+      <SettingsRail activeSection={step.section} snapshot={snapshot} railLabel={railLabel} />
 
       <div className="min-w-0 space-y-4">
         {!snapshot.initialized ? (
@@ -795,22 +798,113 @@ export function Wizard({
  * 前三步，导航等于没有），以及给读屏器的「已配置 / 未配置」——小圆点里的 ✓ 是
  * aria-hidden 的，状态以前只存在于颜色与字形里。
  */
-function StepChain({ stepIndex, snapshot }: { stepIndex: number; snapshot: ConfigSnapshot }) {
+/**
+ * SettingsRail 是设置面左栏（桌面上是八节 + 维护三节，窄屏是一条可横滑的分区链）。
+ *
+ * 抽出来是因为维护节与向导不是同一个组件：两处各写一份侧栏，维护节那一份迟早会
+ * 与「当前项」「已配置」这两件事漂开。
+ */
+export function SettingsRail({
+  activeSection,
+  snapshot,
+  railLabel = "设置分区",
+}: {
+  activeSection: SectionName | ToolSection;
+  snapshot: ConfigSnapshot;
+  railLabel?: string;
+}) {
+  const activeStep = steps.findIndex((step) => step.section === activeSection);
+  return (
+    <>
+      <nav aria-label={railLabel} className="min-w-0 lg:hidden">
+        <StepChain activeSection={activeSection} snapshot={snapshot} />
+      </nav>
+
+      <ol className="hidden space-y-1 lg:block" aria-label={railLabel}>
+        {steps.map((candidate, index) => {
+          const current = candidate.section === activeSection;
+          return (
+            <li key={candidate.section}>
+              <Link
+                to={`/settings/${candidate.section}`}
+                aria-current={index === activeStep ? "step" : undefined}
+                className={cn(
+                  "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left dense transition-colors",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                  current
+                    ? "bg-card font-medium ring-1 ring-foreground/10"
+                    : "text-muted-foreground hover:bg-secondary/60",
+                )}
+              >
+                <StepDot index={index} configured={isStepConfigured(candidate, snapshot)} current={current} />
+                <span className="leading-snug">
+                  {candidate.title}
+                  {candidate.optional ? (
+                    <span className="ml-1 text-xs text-muted-foreground">可跳过</span>
+                  ) : null}
+                  <span className="sr-only">
+                    {isStepConfigured(candidate, snapshot) ? "，已配置" : "，未配置"}
+                  </span>
+                </span>
+              </Link>
+            </li>
+          );
+        })}
+        <li className="pt-2 text-xs text-muted-foreground" aria-hidden>
+          维护
+        </li>
+        {TOOL_SECTIONS.map((tool) => {
+          const current = tool.section === activeSection;
+          return (
+            <li key={tool.section}>
+              <Link
+                to={`/settings/${tool.section}`}
+                aria-current={current ? "page" : undefined}
+                className={cn(
+                  "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left dense transition-colors",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                  current
+                    ? "bg-card font-medium ring-1 ring-foreground/10"
+                    : "text-muted-foreground hover:bg-secondary/60",
+                )}
+              >
+                <Wrench className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                <span className="leading-snug">{tool.title}</span>
+              </Link>
+            </li>
+          );
+        })}
+      </ol>
+    </>
+  );
+}
+
+function StepChain({
+  activeSection,
+  snapshot,
+}: {
+  activeSection: SectionName | ToolSection;
+  snapshot: ConfigSnapshot;
+}) {
   const listRef = React.useRef<HTMLOListElement>(null);
 
   React.useEffect(() => {
-    const list = listRef.current;
-    const current = list?.querySelector<HTMLElement>('[aria-current="step"]');
-    if (!list || !current) return;
-    // 直接算 scrollLeft，不用 scrollIntoView：后者会把整页也竖着滚一下。
-    const target = current.offsetLeft - (list.clientWidth - current.offsetWidth) / 2;
-    list.scrollLeft = Math.max(0, target);
-  }, [stepIndex]);
+    // 等一帧：首绘时字宽与 scrollWidth 还没定，offsetLeft 会算偏，当前项就被晾在链外。
+    const frame = window.requestAnimationFrame(() => {
+      const list = listRef.current;
+      const current = list?.querySelector<HTMLElement>('[aria-current="step"], [aria-current="page"]');
+      if (!list || !current) return;
+      // 直接算 scrollLeft，不用 scrollIntoView：后者会把整页也竖着滚一下。
+      const target = current.offsetLeft - (list.clientWidth - current.offsetWidth) / 2;
+      list.scrollLeft = Math.max(0, target);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSection]);
 
   return (
     <ol ref={listRef} className="-mx-1 flex gap-1 overflow-x-auto px-1 py-1">
       {steps.map((candidate, index) => {
-        const current = index === stepIndex;
+        const current = candidate.section === activeSection;
         return (
           <li key={candidate.section} className="shrink-0">
             <Link
@@ -829,6 +923,27 @@ function StepChain({ stepIndex, snapshot }: { stepIndex: number; snapshot: Confi
               <span className="sr-only">
                 {isStepConfigured(candidate, snapshot) ? "，已配置" : "，未配置"}
               </span>
+            </Link>
+          </li>
+        );
+      })}
+      {TOOL_SECTIONS.map((tool) => {
+        const current = tool.section === activeSection;
+        return (
+          <li key={tool.section} className="shrink-0">
+            <Link
+              to={`/settings/${tool.section}`}
+              aria-current={current ? "page" : undefined}
+              className={cn(
+                "flex h-11 items-center gap-1.5 rounded-lg border px-2.5 dense transition-colors",
+                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                current
+                  ? "border-border bg-card font-medium"
+                  : "border-transparent text-muted-foreground",
+              )}
+            >
+              <Wrench className="size-3.5" aria-hidden />
+              {tool.title}
             </Link>
           </li>
         );

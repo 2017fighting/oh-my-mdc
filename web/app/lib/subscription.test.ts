@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   subscriptionAddBody,
   subscriptionBackfillDays,
+  subscriptionSummaryLine,
   subscriptionSubtitle,
   subscriptionWatermark,
 } from "./subscription.ts";
@@ -47,8 +48,12 @@ test("自由天数只要是正整数就能发：回灌 30 天正是把窗口拨�
 });
 
 test("水位线说成日期，不知道就说不知道", () => {
-  assert.equal(subscriptionWatermark("2026-11-01"), "2026-11-01");
-  assert.equal(subscriptionWatermark(""), "还没跑过");
+  // 相对时间，永不回落绝对日期（DESIGN 的 Relative-Forever Rule）：绝对日期进 title。
+  const now = Date.parse("2026-11-04T09:00:00");
+  assert.equal(subscriptionWatermark("2026-11-01", now), "3 天前");
+  assert.equal(subscriptionWatermark("2026-11-03", now), "昨天");
+  assert.equal(subscriptionWatermark("", now), "还没跑过");
+  assert.doesNotMatch(subscriptionWatermark("2026-10-04", now), /2026/);
 });
 
 test("一行说清「带来 N 部」与回灌窗口", () => {
@@ -64,40 +69,70 @@ test("一行说清「带来 N 部」与回灌窗口", () => {
     deferred_count: 0,
   };
 
-  assert.equal(subscriptionSubtitle(row), "水位线 2026-11-01 · 带来 12 部");
+  const now = Date.parse("2026-11-04T09:00:00");
+  assert.equal(subscriptionSubtitle(row, now), "水位线 3 天前 · 带来 12 部");
 
   // 回灌窗口开着时把下界说在行上：它是「为什么这一轮在翻旧账」的答案。
   assert.equal(
-    subscriptionSubtitle({ ...row, backfill_from: "2026-10-02" }),
-    "水位线 2026-11-01 · 带来 12 部 · 回灌自 2026-10-02",
+    subscriptionSubtitle({ ...row, backfill_from: "2026-10-02" }, now),
+    "水位线 3 天前 · 带来 12 部 · 回灌自 1 个月前",
   );
 
   // 还有版本在等加种时说个数，别让人以为「带来 12 部」等于「12 部都动起来了」。
   assert.equal(
-    subscriptionSubtitle({ ...row, tasks_count: 0, pending_count: 3 }),
-    "水位线 2026-11-01 · 带来 0 部 · 3 部待加种",
+    subscriptionSubtitle({ ...row, tasks_count: 0, pending_count: 3 }, now),
+    "水位线 3 天前 · 带来 0 部 · 3 部待加种",
   );
 
   // 「还有 N 部待入队」（§6.4 每轮限量 / §9）：已发现但被限量留在门外的作品数，
   // 与 pending_count（已入队、还在等加种）是两件事，两个数都该露在行上。
   assert.equal(
-    subscriptionSubtitle({ ...row, deferred_count: 2 }),
-    "水位线 2026-11-01 · 带来 12 部 · 还有 2 部待入队",
+    subscriptionSubtitle({ ...row, deferred_count: 2 }, now),
+    "水位线 3 天前 · 带来 12 部 · 还有 2 部待入队",
   );
   assert.equal(
-    subscriptionSubtitle({ ...row, tasks_count: 5, pending_count: 1, deferred_count: 2 }),
-    "水位线 2026-11-01 · 带来 5 部 · 1 部待加种 · 还有 2 部待入队",
+    subscriptionSubtitle({ ...row, tasks_count: 5, pending_count: 1, deferred_count: 2 }, now),
+    "水位线 3 天前 · 带来 5 部 · 1 部待加种 · 还有 2 部待入队",
   );
 
   // 余量走完就不再提这一句（0 不是「没有信息」，是「没有余量」）。
   assert.equal(
-    subscriptionSubtitle({ ...row, deferred_count: 0 }),
-    "水位线 2026-11-01 · 带来 12 部",
+    subscriptionSubtitle({ ...row, deferred_count: 0 }, now),
+    "水位线 3 天前 · 带来 12 部",
   );
 
   // 停用的那一行要自己说出来：它不再追新，但已建任务照走完。
   assert.equal(
-    subscriptionSubtitle({ ...row, enabled: false }),
-    "水位线 2026-11-01 · 带来 12 部 · 已停用",
+    subscriptionSubtitle({ ...row, enabled: false }, now),
+    "水位线 3 天前 · 带来 12 部 · 已停用",
+  );
+});
+
+test("面板摘要只回答「订了几个、最近带来过什么」，一条都没有就没有那一行", () => {
+  const now = Date.parse("2026-11-04T09:00:00");
+  const base = {
+    id: 1,
+    actor: { javdb_actor_id: "EvkJ", name: "七澤美亞", avatar_url: "", gender: "0" },
+    lookback_days: 30,
+    backfill_from: null,
+    enabled: true,
+    pending_count: 0,
+    deferred_count: 0,
+  };
+  assert.equal(subscriptionSummaryLine([], now), null);
+
+  const rows = [
+    { ...base, watermark_date: "2026-11-01", tasks_count: 2 },
+    { ...base, id: 2, watermark_date: "2026-11-03", tasks_count: 1 },
+  ];
+  assert.equal(subscriptionSummaryLine(rows, now), "2 位女优 · 最近水位线 昨天 · 带来 3 部");
+
+  const stopped = [{ ...rows[0], enabled: false }];
+  assert.equal(subscriptionSummaryLine(stopped, now), "1 位女优 · 启用 0 · 最近水位线 3 天前 · 带来 2 部");
+
+  // 从没跑过：不编一个今天的水位线。
+  assert.equal(
+    subscriptionSummaryLine([{ ...base, watermark_date: "", tasks_count: 0 }], now),
+    "1 位女优 · 还没跑过 · 带来 0 部",
   );
 });
