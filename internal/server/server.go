@@ -86,7 +86,7 @@ type Options struct {
 	// Sidefx 是副作用出箱（overview 的「需人工」要把驻留待办算进去；/api/side-effects 也走它）。
 	// nil 时 overview 按 0 计，副作用端点回 503 db_unavailable。
 	Sidefx *sidefx.Outbox
-	// Loops 是三条循环的进程内健康位；nil 时 overview 的 loops 全空。
+	// Loops 是四条循环的进程内健康位；nil 时 overview 的 loops 全空。
 	Loops *loops.Registry
 	// Metrics 是 /metrics 的四族指标；nil 时端点回 503（进程还没接上可观测性）。
 	Metrics *metrics.Registry
@@ -99,6 +99,9 @@ type Options struct {
 	// Backfiller 是补录（GET /api/backfill/scan、POST /api/backfill，GLOSSARY「补录」）；
 	// nil 时端点回 503。
 	Backfiller Backfiller
+	// Subscriptions 是女优订阅（/api/subscriptions 一族，规格 §6.4/§8.4）；
+	// nil 时端点回 503。
+	Subscriptions Subscriber
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Unready 是启动期留下的致命依赖问题（迁移失败、连接池建不起来）。
@@ -122,22 +125,23 @@ func New(opts Options) (http.Handler, error) {
 	}
 
 	s := &server{
-		version:   version,
-		db:        opts.DB,
-		assets:    opts.Assets,
-		unready:   opts.Unready,
-		settings:  opts.Settings,
-		javdb:     opts.JavDB,
-		qbt:       opts.Qbt,
-		tasks:     opts.Tasks,
-		sidefx:    opts.Sidefx,
-		loops:     opts.Loops,
-		metrics:   opts.Metrics,
-		hooks:     opts.Hooks,
-		retrier:   opts.Retrier,
-		registrar: opts.Registrar,
-		backfill:  opts.Backfiller,
-		logger:    logger,
+		version:       version,
+		db:            opts.DB,
+		assets:        opts.Assets,
+		unready:       opts.Unready,
+		settings:      opts.Settings,
+		javdb:         opts.JavDB,
+		qbt:           opts.Qbt,
+		tasks:         opts.Tasks,
+		sidefx:        opts.Sidefx,
+		loops:         opts.Loops,
+		metrics:       opts.Metrics,
+		hooks:         opts.Hooks,
+		retrier:       opts.Retrier,
+		registrar:     opts.Registrar,
+		backfill:      opts.Backfiller,
+		subscriptions: opts.Subscriptions,
+		logger:        logger,
 	}
 
 	shell, err := fs.ReadFile(opts.Assets, "index.html")
@@ -160,6 +164,11 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/manual-tasks", s.manualRegister)
 	mux.HandleFunc("GET /api/backfill/scan", s.backfillScan)
 	mux.HandleFunc("POST /api/backfill", s.backfillRun)
+	mux.HandleFunc("GET /api/subscriptions", s.subscriptionsList)
+	mux.HandleFunc("POST /api/subscriptions", s.subscriptionCreate)
+	mux.HandleFunc("POST /api/subscriptions/{id}/enable", s.subscriptionEnable)
+	mux.HandleFunc("POST /api/subscriptions/{id}/disable", s.subscriptionDisable)
+	mux.HandleFunc("POST /api/subscriptions/{id}/backfill", s.subscriptionBackfill)
 	mux.HandleFunc("GET /api/attention", s.attention)
 	mux.HandleFunc("GET /api/side-effects", s.sideEffectsList)
 	mux.HandleFunc("POST /api/side-effects/{id}/retry", s.sideEffectRetry)
@@ -176,23 +185,24 @@ func New(opts Options) (http.Handler, error) {
 }
 
 type server struct {
-	version   string
-	db        Pinger
-	assets    fs.FS
-	shell     []byte
-	unready   error
-	settings  *settings.Store
-	javdb     *javdb.Integration
-	qbt       *qbittorrent.Integration
-	tasks     *task.Store
-	sidefx    *sidefx.Outbox
-	loops     *loops.Registry
-	metrics   *metrics.Registry
-	hooks     Hooks
-	retrier   Retrier
-	registrar Registrar
-	backfill  Backfiller
-	logger    *slog.Logger
+	version       string
+	db            Pinger
+	assets        fs.FS
+	shell         []byte
+	unready       error
+	settings      *settings.Store
+	javdb         *javdb.Integration
+	qbt           *qbittorrent.Integration
+	tasks         *task.Store
+	sidefx        *sidefx.Outbox
+	loops         *loops.Registry
+	metrics       *metrics.Registry
+	hooks         Hooks
+	retrier       Retrier
+	registrar     Registrar
+	backfill      Backfiller
+	subscriptions Subscriber
+	logger        *slog.Logger
 }
 
 // healthz 只看进程活不活：数据库或上游挂了也不该让编排器重启容器。

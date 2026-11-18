@@ -114,12 +114,16 @@ var (
 //
 // 一条 Candidate 同时保证任务行存在与版本行唯一：同 infohash 已有版本行时不写任何东西。
 type Candidate struct {
-	MovieID  string
-	Number   string
-	ListID   string
-	Infohash string
-	Source   Source
-	Delivery Delivery
+	MovieID string
+	Number  string
+	// ListID 与 SubscriptionID 是「首次发现来源」的两半（规格 §4.1）：清单轮询给前者，
+	// 女优订阅给后者，手工登记两样都不给。#47 起两者可以同时有值。
+	ListID string
+	// SubscriptionID 是发现这件作品的女优订阅行；0 表示不是订阅发现的。
+	SubscriptionID int64
+	Infohash       string
+	Source         Source
+	Delivery       Delivery
 	// Label 是 best-effort 展示标签（如「中文」），空串表示没有可展示的标签。
 	Label string
 	// Payload 是磁力串或 .torrent 备份路径（规格 §4.1）。
@@ -128,9 +132,12 @@ type Candidate struct {
 
 // Version 是面板与循环都要读的一条版本。
 type Version struct {
-	Infohash           string
-	MovieID            string
-	Number             string
+	Infohash string
+	MovieID  string
+	Number   string
+	// ListID 是**任务**的首次发现清单（空串＝不在任何清单上：手工登记、补录、女优订阅）。
+	// 加种那一步拿它判「要不要置清单项待删」：没有清单项可删就不该置。
+	ListID             string
 	Source             Source
 	Delivery           Delivery
 	Label              string

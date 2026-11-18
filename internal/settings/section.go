@@ -171,6 +171,11 @@ var sections = []Section{
 			{Name: "poll_interval", Type: TypeDuration, Min: 30, Max: 24 * 3600},
 			{Name: "reconcile_interval", Type: TypeDuration, Min: 30, Max: 24 * 3600},
 			{Name: "sidefx_interval", Type: TypeDuration, Min: 10, Max: 3600},
+			// subscription_interval 是女优订阅循环的独立节拍（#47 / 规格 §6.2）：一位女优的
+			// 接口挂掉不该拖死清单轮询，所以两条循环各有各的间隔。
+			// app_config.subscription_max_adds 是 #49 的每轮限量，本票只建列不读，故不列在这里
+			// —— 一个改了不生效的旋钮比没有旋钮更糟。
+			{Name: "subscription_interval", Type: TypeDuration, Min: 30, Max: 24 * 3600},
 			{Name: "max_attempts", Type: TypeInt, Min: 1, Max: 100},
 			{Name: "paused", Type: TypeBool},
 		},

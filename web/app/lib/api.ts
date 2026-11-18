@@ -108,7 +108,7 @@ export type Overview = {
     failed: number;
   };
   loops: Record<
-    "poll" | "reconcile" | "sidefx",
+    "poll" | "reconcile" | "sidefx" | "subscription",
     {
       last_run_at: string | null;
       last_ok: boolean | null;
@@ -120,6 +120,36 @@ export type Overview = {
       iterations: { ok: number; error: number };
     }
   >;
+};
+
+/** 订阅区的一行（规格 §6.4/§8.4，GLOSSARY「女优订阅」）。 */
+export type Subscription = {
+  id: number;
+  /** 演员快照：名字来自上游，gender/avatar_url 等刮削补（建订阅时是空的）。 */
+  actor: { javdb_actor_id: string; name: string; avatar_url: string; gender: string };
+  /** 上一轮见过的最晚发行日（`YYYY-MM-DD`）；空串＝不知道，不编今天。 */
+  watermark_date: string;
+  /** 回看窗口天数（默认 30）：让「出水时还没磁力」的作品下一轮仍被看见。 */
+  lookback_days: number;
+  /** 回灌设置的取数下界；null＝没在回灌。 */
+  backfill_from: string | null;
+  enabled: boolean;
+  /** 「带来 N 部」：任务表里由这条订阅发现的任务数。 */
+  tasks_count: number;
+  /** 这批里还有版本在等加种（add_pending）的条数。 */
+  pending_count: number;
+};
+
+export type SubscriptionList = {
+  ok: boolean;
+  actresses: Subscription[];
+};
+
+/** 添加订阅的回执：outcome=duplicate 是幂等放行（同一位女优第二次添加）。 */
+export type SubscriptionWrite = {
+  ok: boolean;
+  outcome: string;
+  actress: Subscription;
 };
 
 /** 版本状态：四个值是规格 §3 的完整集合（任务级状态由视图聚合，名字相同）。 */
@@ -484,6 +514,29 @@ export const api = {
 
   /** 补录扫描：媒体库里的旧目录 ∧ 任务表无此番号（GLOSSARY「补录」）。 */
   backfillScan: () => request<BackfillScan>("/api/backfill/scan"),
+
+  /** 订阅区列表：只列已订阅的女优（上游没有搜名字的端点，所以没有搜索框）。 */
+  subscriptions: () => request<SubscriptionList>("/api/subscriptions"),
+
+  /** 添加订阅：贴女优 id 或女优页链接，二选一（服务端解析 id 并 upsert actor）。 */
+  addSubscription: (input: { actress_id: string } | { javdb_url: string }) =>
+    request<SubscriptionWrite>("/api/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  /** 启停：停用只停追新，已建任务照走完。 */
+  setSubscriptionEnabled: (id: number, enabled: boolean) =>
+    request<SubscriptionWrite>(`/api/subscriptions/${id}/${enabled ? "enable" : "disable"}`, {
+      method: "POST",
+    }),
+
+  /** 回灌 N 天：把取数下界往回拨，回执给 backfill_from。 */
+  backfillSubscription: (id: number, days: number) =>
+    request<{ ok: boolean; backfill_from: string | null }>(`/api/subscriptions/${id}/backfill`, {
+      method: "POST",
+      body: JSON.stringify({ days }),
+    }),
 
   /** 一键补录：删旧 NFO、现有视频原地入库，重刮由流水线接着做（GLOSSARY「补录」）。 */
   backfill: (number: string) =>

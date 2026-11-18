@@ -127,6 +127,7 @@ var credentialFreeTables = map[string]bool{
 	"side_effect":  true,
 	"actor":        true,
 	"task_actor":   true,
+	"subscription": true,
 }
 
 // settingsColumns 只留下落在设置域表里的列（八节各自的表）。

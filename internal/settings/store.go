@@ -517,7 +517,7 @@ func (s *Store) registeredLists(ctx context.Context) ([]ListEntry, error) {
 
 // GateReason 回答「这一轮循环该不该跑」：空串表示可以跑。
 //
-// 三条循环的门禁判词只有这一处（规格 §4.4/§8.3）：主线三件套齐了、没暂停。
+// 四条循环的门禁判词只有这一处（规格 §4.4/§8.3）：主线三件套齐了、没暂停。
 // 把它放在设置域是因为判据全在 Snapshot 上——散在各循环里会让同一句话各写一遍。
 func (s Snapshot) GateReason() string {
 	switch {

@@ -59,6 +59,10 @@ func (s *Store) ResetForRetry(ctx context.Context, infohash, owner string, force
 // （加下载之后才删，规格 §6.1）。另外清掉上一次失败留下的错误列与尝试计数：
 // 它们描述的是过去，而这条版本现在是一个新的下载。
 //
+// 清单项待删只在**任务真的有清单 id** 时置起：手工登记、补录、女优订阅的任务都不在
+// 任何清单上（list_id NULL），给它们置这一位会让旁路引擎入箱一条 list_id 为空的删除
+// 待办——那条路重试变不出来，只会驻留进需人工（与 MarkAdded 的 listRemoval 同一判据）。
+//
 // forceRescrape=true 顺手置起 force_rescrape（对人点了「强制重刮」的下载中任务：
 // 下载完之后那一次取数也不复用元数据）。标记只增不减，与 ResetForRetry 同一口径。
 func (s *Store) MarkRetryDownloading(ctx context.Context, infohash, owner string, forceRescrape bool) (Version, error) {
@@ -70,7 +74,7 @@ func (s *Store) MarkRetryDownloading(ctx context.Context, infohash, owner string
 		     attempts = 0,
 		     next_attempt_at = NULL,
 		     add_pending = false,
-		     list_removal_pending = true,
+		     list_removal_pending = (t.list_id IS NOT NULL),
 		     force_rescrape = v.force_rescrape OR $3,
 		     claimed_at = NULL, claimed_by = '', updated_at = now()
 		 FROM task t

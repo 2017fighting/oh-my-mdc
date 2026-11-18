@@ -650,7 +650,9 @@ func TestOverviewIsEmptyWithoutTaskDomain(t *testing.T) {
 	if !ok {
 		t.Fatalf("loops = %v, want 对象", body["loops"])
 	}
-	for _, key := range []string{"poll", "reconcile", "sidefx"} {
+	// 第四条循环（女优订阅，#47）与另外三条并列：面板「循环健康」与 §9 的
+	// mdc_loop_* 指标都按这四个 loop 标签出数。
+	for _, key := range []string{"poll", "reconcile", "sidefx", "subscription"} {
 		loop, ok := loops[key].(map[string]any)
 		if !ok {
 			t.Fatalf("loops.%s = %v, want 对象", key, loops[key])

@@ -18,8 +18,10 @@
 // 每轮读一次的东西），把每一件待办喂给它的 Ingest，最后用 AddPending 收口——那一步捡的
 // 是**所有** add_pending 的版本，不只是这一轮新落的（上轮崩在落库与加种之间的那些）。
 //
-// 今天 AddPending 恒置「清单项待删」（清单轮询口径）。订阅来源的作品不在任何清单上，
-// 要不要置这一位是 #47 的账——MarkAdded 的 listRemoval 参数已经是那个开关的入口。
+// 「置待删」的判据是**这条版本所属的任务有没有清单 id**（task.Version.ListID）：
+// 清单轮询建的任务有，订阅与手工登记建的没有（规格 §6.4「list_removal 天然不触发」）。
+// 判据落在版本上而不是「这一轮是哪个来源」，因为 AddPending 捡的是**所有**待加种的版本
+// ——订阅上一轮落库、这一轮被清单轮询的 AddPending 捡走是正常的，它照样不该置待删。
 package ingest
 
 import (
@@ -45,11 +47,13 @@ type Work struct {
 	// Number 是番号：M-Team 的搜索词、qBittorrent 的 tag、媒体库的目录名都靠它。
 	Number string
 	// ListID 是首次发现它的清单；订阅发现的作品不在任何清单上（规格 §6.4）。
-	//
-	// 今天它还必须有值：任务行的「首次发现来源」只有清单这一半（task.Candidate），
-	// store 的校验也只放行手工登记的空值。订阅来源要落「清单空、订阅非空」的候选，
-	// 那是 #47 把 subscription_id 接进候选形状的事，不是这一段的事。
+	// 与 SubscriptionID 互斥：清单轮询给前者，女优订阅给后者。
 	ListID string
+	// SubscriptionID 是发现这件作品的女优订阅行；0 表示不是订阅发现的。
+	//
+	// 它随候选一起落进 task.subscription_id（「首次发现来源」的另一半，§4.1），
+	// 面板的「带来 N 部」与订阅循环的逐条遍历都按它查。
+	SubscriptionID int64
 }
 
 // Ingested 是一件作品走完「定源 → 先落库」之后的事实。
@@ -214,14 +218,15 @@ func (r *Round) Ingest(ctx context.Context, work Work) (Ingested, error) {
 
 	// 先摆好磁力兜底的形状（规格 §6.1 定源行）：M-Team 任何一步失败都落它。
 	candidate := task.Candidate{
-		MovieID:  work.MovieID,
-		Number:   work.Number,
-		ListID:   work.ListID,
-		Infohash: best.Hash,
-		Source:   task.SourceJavDBMagnet,
-		Delivery: task.DeliveryMagnet,
-		Label:    labelFor(best),
-		Payload:  appapi.MagnetLink(best.Hash, work.Number),
+		MovieID:        work.MovieID,
+		Number:         work.Number,
+		ListID:         work.ListID,
+		SubscriptionID: work.SubscriptionID,
+		Infohash:       best.Hash,
+		Source:         task.SourceJavDBMagnet,
+		Delivery:       task.DeliveryMagnet,
+		Label:          labelFor(best),
+		Payload:        appapi.MagnetLink(best.Hash, work.Number),
 	}
 	size := best.SizeMiB
 

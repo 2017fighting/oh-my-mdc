@@ -39,7 +39,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
-// LockIDReconcile 是 reconcile 的 advisory lock key（三条循环各持一把，规格 §4.4）。
+// LockIDReconcile 是 reconcile 的 advisory lock key（四条循环各持一把，规格 §4.4）。
 const LockIDReconcile int64 = 4230002
 
 // DefaultInterval 是 app_config 读不到 reconcile_interval 时的兜底（与表默认值一致）。

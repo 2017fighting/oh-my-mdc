@@ -191,11 +191,12 @@ const steps: StepSpec[] = [
   {
     section: "app",
     title: "完成",
-    help: "间隔与重试都在这一步。三件套齐了「已初始化」才成立，三个循环才开始跑；「完成初始化」会先保存本步再检查门禁——齐了给回执，没齐把差的项列成链接。",
+    help: "间隔与重试都在这一步。三件套齐了「已初始化」才成立，四个循环才开始跑；「完成初始化」会先保存本步再检查门禁——齐了给回执，没齐把差的项列成链接。",
     fields: [
       { key: "poll_interval", label: "清单轮询（分钟）", kind: "duration", min: 1, max: 1440 },
       { key: "reconcile_interval", label: "对账（分钟）", kind: "duration", min: 1, max: 1440 },
       { key: "sidefx_interval", label: "副作用（分钟）", kind: "duration", min: 1, max: 60 },
+      { key: "subscription_interval", label: "女优订阅（分钟）", kind: "duration", min: 1, max: 1440 },
       { key: "max_attempts", label: "最大重试次数", kind: "number", min: 1, max: 100 },
       { key: "paused", label: "暂停循环", hint: "正在跑的版本会跑完，不接新的；初始化请保持关闭", kind: "bool" },
     ],
@@ -1310,12 +1311,13 @@ function initializedReceipt(snapshot: ConfigSnapshot): string {
     ["清单轮询", formatInterval(data.poll_interval)],
     ["对账", formatInterval(data.reconcile_interval)],
     ["副作用", formatInterval(data.sidefx_interval)],
+    ["女优订阅", formatInterval(data.subscription_interval)],
   ]
     .filter(([, text]) => text !== null)
     .map(([label, text]) => `${label} ${text}`);
   return parts.length > 0
-    ? `已初始化：${parts.join("、")}，三条循环已开始跑。`
-    : "已初始化：三条循环已开始跑。";
+    ? `已初始化：${parts.join("、")}，四条循环已开始跑。`
+    : "已初始化：四条循环已开始跑。";
 }
 
 /** ListAssist 是清单步的助手：探测已有清单 → 按 id 选中，或一键代建，或手动填 id 兜底。 */

@@ -35,6 +35,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/server"
 	"github.com/2017fighting/oh-my-mdc/internal/settings"
 	"github.com/2017fighting/oh-my-mdc/internal/sidefx"
+	"github.com/2017fighting/oh-my-mdc/internal/subscription"
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 	"github.com/2017fighting/oh-my-mdc/internal/telegram"
 	"github.com/2017fighting/oh-my-mdc/internal/translate"
@@ -89,6 +90,7 @@ func run(logger *slog.Logger) error {
 	var retryRunner *retry.Runner
 	var manualRegistrar *manual.Registrar
 	var backfillRunner *backfill.Runner
+	var subscriptionService *subscription.Service
 	// loopDone 是循环退出的信号：关连接池之前要先等它们，别把在途查询踩掉。
 	var loopDone []chan struct{}
 	// 登记处不依赖数据库：库连不上时循环一个都不跑，但 /metrics 仍该把「没跑过」
@@ -200,6 +202,16 @@ func run(logger *slog.Logger) error {
 					Logger:   logger,
 				})
 
+				// 女优订阅（#47，GLOSSARY「女优订阅」）：第二个待办来源。面板的四个动作走
+				// Service，「产出一批待办作品」走第四个循环——两条订阅共用同一段 ingest。
+				subscriptionStore := subscription.NewStore(database.Pool())
+				subscriptionService = subscription.NewService(subscription.ServiceOptions{
+					Store:    subscriptionStore,
+					Settings: settingsStore,
+					Source:   javdbIntegration,
+					Logger:   logger,
+				})
+
 				// 下载完成的第二条通道：qbt 回调（即时）+ 对账循环（5 分钟）。
 				// 两者共用一个推进引擎，互斥靠版本行租约（规格 §4.4）。
 				// 对账同时推进 processing：取数段交给 scrape（§6.2）。
@@ -253,6 +265,30 @@ func run(logger *slog.Logger) error {
 				}()
 				loopDone = append(loopDone, reconcileDone)
 				logger.Info("reconcile 循环已启动")
+
+				// 第四个循环：女优订阅追新（规格 §6.2 的 subscription 通道，独立锁 4230004）。
+				// 它自己看门禁，一条订阅都没有时空转即返回——订阅不进 initialized 判据。
+				subscriptionRunner := subscription.NewRunner(subscription.RunnerOptions{
+					Store:    subscriptionStore,
+					Tasks:    taskStore,
+					Outbox:   sidefxOutbox,
+					Settings: settingsStore,
+					Source:   javdbIntegration,
+					Magnets:  javdbIntegration,
+					Adder:    qbtIntegration,
+					Torrents: mteamIntegration,
+					Material: materials,
+					Pool:     database.Pool(),
+					Loops:    loopsRegistry,
+					Logger:   logger,
+				})
+				subscriptionDone := make(chan struct{})
+				go func() {
+					defer close(subscriptionDone)
+					subscriptionRunner.Run(ctx)
+				}()
+				loopDone = append(loopDone, subscriptionDone)
+				logger.Info("女优订阅循环已启动")
 
 				// 旁路副作用引擎：删清单项 / 刷 Jellyfin / 发通知（规格 §6.2 的 sidefx 通道）。
 				// 它自己入箱（把 list_removal_pending 翻成待办）、自己重试，失败不阻塞任务。
@@ -315,24 +351,29 @@ func run(logger *slog.Logger) error {
 	if backfillRunner != nil {
 		backfiller = backfillRunner
 	}
+	var subscriber server.Subscriber
+	if subscriptionService != nil {
+		subscriber = subscriptionService
+	}
 
 	handler, err := server.New(server.Options{
-		Version:    version,
-		DB:         pinger,
-		Assets:     web.Assets(),
-		Unready:    unready,
-		Settings:   settingsStore,
-		JavDB:      javdbIntegration,
-		Qbt:        qbtIntegration,
-		Tasks:      taskStore,
-		Sidefx:     sidefxOutbox,
-		Loops:      loopsRegistry,
-		Metrics:    metricsRegistry,
-		Hooks:      hooks,
-		Retrier:    retrier,
-		Registrar:  registrar,
-		Backfiller: backfiller,
-		Logger:     logger,
+		Version:       version,
+		DB:            pinger,
+		Assets:        web.Assets(),
+		Unready:       unready,
+		Settings:      settingsStore,
+		JavDB:         javdbIntegration,
+		Qbt:           qbtIntegration,
+		Tasks:         taskStore,
+		Sidefx:        sidefxOutbox,
+		Loops:         loopsRegistry,
+		Metrics:       metricsRegistry,
+		Hooks:         hooks,
+		Retrier:       retrier,
+		Registrar:     registrar,
+		Backfiller:    backfiller,
+		Subscriptions: subscriber,
+		Logger:        logger,
 	})
 	if err != nil {
 		return err

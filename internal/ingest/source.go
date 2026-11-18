@@ -86,14 +86,15 @@ func (a *mteamAccess) apiKey(ctx context.Context) (string, error) {
 func candidateFromTorrent(work Work, stashed stashedTorrent) task.Candidate {
 	torrent := stashed.torrent
 	return task.Candidate{
-		MovieID:  work.MovieID,
-		Number:   work.Number,
-		ListID:   work.ListID,
-		Infohash: torrent.Infohash,
-		Source:   task.SourceMTeamTorrent,
-		Delivery: task.DeliveryTorrent,
-		Label:    torrent.Label,
-		Payload:  stashed.path,
+		MovieID:        work.MovieID,
+		Number:         work.Number,
+		ListID:         work.ListID,
+		SubscriptionID: work.SubscriptionID,
+		Infohash:       torrent.Infohash,
+		Source:         task.SourceMTeamTorrent,
+		Delivery:       task.DeliveryTorrent,
+		Label:          torrent.Label,
+		Payload:        stashed.path,
 	}
 }
 

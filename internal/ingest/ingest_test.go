@@ -271,3 +271,92 @@ func notifySizes(t *testing.T, f *fixture) map[string]string {
 	}
 	return sizes
 }
+
+// TestSubscriptionWorkIsPersistedWithoutListRemoval 是 #47 与这一段的两处接口：
+//
+//   - 订阅形状的候选（清单空、订阅非空）落得了库：validateCandidate 的放行清单从
+//     「只有手工登记」扩到「有订阅 id 也行」（#47），同一段 ingest 才真的是两个来源共用；
+//   - 加种之后**不置清单项待删**：订阅作品不在任何清单上，置起只会让旁路引擎入箱一条
+//     list_id 为空的删除待办（它重试变不出来，只会驻留进需人工）。
+//
+// 判据是「这条版本所属的任务有没有清单 id」，所以它同时覆盖这条用例里最刁的那条路：
+// 订阅上一轮落库的版本，这一轮被清单轮询的 AddPending 捡走加种——它照样不该置待删。
+func TestSubscriptionWorkIsPersistedWithoutListRemoval(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// 订阅行：task.subscription_id 的外键要求它先存在。
+	var subscriptionID int64
+	if _, err := f.database.Pool().Exec(ctx,
+		`INSERT INTO actor (javdb_actor_id, name) VALUES ('EvkJ', '河北彩花')
+		 ON CONFLICT (javdb_actor_id) DO NOTHING`); err != nil {
+		t.Fatalf("种演员: %v", err)
+	}
+	if err := f.database.Pool().QueryRow(ctx,
+		`INSERT INTO subscription (actress_actor_id, watermark_date) VALUES ('EvkJ', CURRENT_DATE)
+		 RETURNING id`).Scan(&subscriptionID); err != nil {
+		t.Fatalf("种订阅: %v", err)
+	}
+
+	f.magnets.byMovie[movieA] = []appapi.Magnet{{Hash: magnetHashA, SizeMiB: 2048}}
+	round := f.ingester.Round(f.settings.snapshot, "tk", f.cfg)
+
+	ingested, err := round.Ingest(ctx, ingest.Work{
+		MovieID:        movieA,
+		Number:         numberA,
+		SubscriptionID: subscriptionID,
+	})
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if !ingested.Inserted {
+		t.Fatalf("ingested = %+v, want 订阅形状的候选落成一条版本", ingested)
+	}
+	if ingested.Candidate.SubscriptionID != subscriptionID {
+		t.Errorf("候选的 subscription_id = %d, want %d", ingested.Candidate.SubscriptionID, subscriptionID)
+	}
+
+	var stored *int64
+	if err := f.database.Pool().QueryRow(ctx,
+		`SELECT subscription_id FROM task WHERE movie_id = $1`, movieA).Scan(&stored); err != nil {
+		t.Fatalf("读任务的首次发现来源: %v", err)
+	}
+	if stored == nil || *stored != subscriptionID {
+		t.Errorf("task.subscription_id = %v, want %d", stored, subscriptionID)
+	}
+
+	if added, errs := round.AddPending(ctx); added != 1 || len(errs) != 0 {
+		t.Fatalf("AddPending = %d, %v, want 1 条、无错误", added, errs)
+	}
+	version := detail(t, f, movieA).Versions[0]
+	if version.AddPending {
+		t.Error("add_pending = true, want false")
+	}
+	if version.ListRemovalPending {
+		t.Error("list_removal_pending = true, want false（订阅作品没有清单项可删）")
+	}
+	if removed, err := sidefx.New(f.database.Pool()).DrainPendingRemovals(ctx, 10); err != nil {
+		t.Fatalf("DrainPendingRemovals: %v", err)
+	} else if removed != 0 {
+		t.Errorf("入箱的删清单待办 = %d 条, want 0（list_id 是空的删除永远做不成）", removed)
+	}
+}
+
+// TestCandidateWithoutAnySourceIsRejected 是上面那条放行的反面：
+// 清单 id 与订阅 id 都没有、又不是手工登记的候选，仍然落不了库——它填不上
+// 「首次发现来源」这一列（规格 §4.1）。
+func TestCandidateWithoutAnySourceIsRejected(t *testing.T) {
+	f := newFixture(t)
+
+	_, err := f.store.SaveCandidate(context.Background(), task.Candidate{
+		MovieID:  movieA,
+		Number:   numberA,
+		Infohash: magnetHashA,
+		Source:   task.SourceJavDBMagnet,
+		Delivery: task.DeliveryMagnet,
+		Payload:  "magnet:?xt=urn:btih:" + magnetHashA,
+	})
+	if err == nil {
+		t.Fatal("没有首次发现来源的候选落库成功了，want 拒绝")
+	}
+}

@@ -26,6 +26,7 @@ import {
   remedyForStalled,
   settingsLabel,
 } from "~/lib/remedy";
+import { subscriptionAddBody, subscriptionSubtitle } from "~/lib/subscription";
 import {
   api,
   notifyEventLabels,
@@ -39,6 +40,8 @@ import {
   type Overview,
   type SideEffect,
   type SideEffectKind,
+  type Subscription,
+  type SubscriptionList,
   type TaskDetail,
   type TaskEvent,
   type TaskRow,
@@ -65,6 +68,19 @@ export type PanelQuery = { page: number; q: string; state: TaskState | "" };
  */
 export const ROW_ACTION_SIZE = "h-11 px-3 dense md:h-7 md:px-2.5 md:text-xs";
 
+/** 四条循环的名字与它们的展示名（规格 §6.2）：面板与侧栏都按这一份说话。 */
+export type LoopName = "poll" | "reconcile" | "sidefx" | "subscription";
+
+export const LOOP_LABELS: Record<LoopName, string> = {
+  poll: "清单轮询",
+  reconcile: "对账",
+  sidefx: "副作用",
+  subscription: "女优订阅",
+};
+
+/** LOOP_ORDER 是四条循环的固定顺序：与后端 loops.All 一致（指标与面板同源）。 */
+export const LOOP_ORDER: LoopName[] = ["poll", "reconcile", "sidefx", "subscription"];
+
 /** 面板与错误块里的主按钮：比行内动作高 4px（md 起 32px），字号同族。 */
 export const PANEL_ACTION_SIZE = "h-11 px-3 dense md:h-8 md:px-2.5 md:text-sm";
 
@@ -83,6 +99,7 @@ export function Panel({
   attention,
   sideEffects,
   backfill,
+  subscriptions,
   query,
   pageSize,
   loadedAt,
@@ -101,12 +118,19 @@ export function Panel({
   sideEffects: SideEffect[];
   /** 未补录目录的实时扫描（GLOSSARY「补录」）；null = 读不到，整块不渲染。 */
   backfill: BackfillScan | null;
+  /** 订阅区（女优订阅，§6.4）；null = 读不到，整块不渲染。 */
+  subscriptions: SubscriptionList | null;
   query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
   loadedAt: number | null;
-  /** 三条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
-  intervals: { poll: string | null; reconcile: string | null; sidefx: string | null };
+  /** 四条循环的间隔，读自 app_config；读不到就是 null，不编默认值。 */
+  intervals: {
+    poll: string | null;
+    reconcile: string | null;
+    sidefx: string | null;
+    subscription: string | null;
+  };
   /** 自动复读的间隔（毫秒）；null = 读不到轮询间隔，宁可不自动读、也不编一个默认值。 */
   autoRefreshMs: number | null;
   /** 帮助浮层开着没有。状态住在 routes/home.tsx：侧栏那颗入口也在那边。 */
@@ -440,6 +464,12 @@ export function Panel({
           onRefresh={onRefresh}
         />
 
+        <SubscriptionPanel
+          subscriptions={subscriptions}
+          onReceipt={receiptsState.push}
+          onRefresh={onRefresh}
+        />
+
         <Card>
           <CardHeader>
             <CardTitle as="h2">任务</CardTitle>
@@ -622,9 +652,9 @@ export function Panel({
             <CardTitle as="h2">循环健康</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-1.5 dense">
-            {(["poll", "reconcile", "sidefx"] as const).map((loop) => {
+            {(["poll", "reconcile", "sidefx", "subscription"] as const).map((loop) => {
               const health = overview?.loops?.[loop];
-              const label = loop === "poll" ? "清单轮询" : loop === "reconcile" ? "对账" : "副作用";
+              const label = LOOP_LABELS[loop];
               const interval = intervals[loop];
               // 四样数据一个优先级：正在跑 → 上轮 → 上次成功（连败时才可见）→ 迭代计数（title）。
               // 「正在跑」是「机器此刻醒着」的最直接证据；上轮的成败在跑着时退到第二行。
@@ -952,6 +982,259 @@ function BackfillDirs({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * SubscriptionPanel 是「订阅」区（规格 §8.2/§6.4，GLOSSARY「女优订阅」）。
+ *
+ * 只列**已订阅**的女优：上游没有按名字搜女优的端点（§13 实测），所以这里没有搜索框，
+ * 入口只有「贴 id / 女优页链接」。每行三样：她是谁（名字快照 + 水位线 + 带来 N 部）、
+ * 启停、回灌。
+ *
+ * 回灌之所以要一颗按钮：新订阅的水位线是建订阅当天，于是不点它就只看回看窗口那一段；
+ * 想立刻验证「这条路通不通」就得把下界往回拨（§6.4 回灌）。点完之后下界会写进行上，
+ * 窗口扫完由循环清掉——面板不需要第二个「取消回灌」的入口。
+ */
+function SubscriptionPanel({
+  subscriptions,
+  onReceipt,
+  onRefresh,
+}: {
+  subscriptions: SubscriptionList | null;
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  // 读不到就不渲染：空卡片会让人以为「一位都没订阅」，而那是另一个事实。
+  if (!subscriptions) return null;
+
+  const rows = subscriptions.actresses;
+
+  return (
+    <Card role="region" aria-labelledby="subscriptions-heading">
+      <CardHeader className="max-sm:grid-cols-1">
+        <div>
+          <h2 id="subscriptions-heading" className="font-heading text-base font-medium">
+            订阅
+          </h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            盯住女优新作的订阅：贴她的 JavDB id 或女优页链接即可（上游没有按名字搜的端点）。
+            新订阅只看回看窗口那一段，想追更早的历史按「回灌」。
+          </p>
+        </div>
+        <CardAction className="max-sm:col-start-1 max-sm:row-start-2">
+          <span className="text-xs tabular-nums text-muted-foreground">{rows.length} 位女优</span>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <SubscribeForm onReceipt={onReceipt} onRefresh={onRefresh} />
+        {rows.length === 0 ? (
+          <p className="dense text-muted-foreground">
+            还没订阅任何女优。贴一个 id 或女优页链接，她的新作就会走与清单轮询同一条流水线。
+          </p>
+        ) : (
+          <div className="divide-y">
+            {rows.map((row) => (
+              <SubscriptionRow
+                key={row.id}
+                row={row}
+                onReceipt={onReceipt}
+                onRefresh={onRefresh}
+              />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** SubscriptionRow 是订阅区的一行：身份、水位线与「带来 N 部」，加两颗动作。 */
+function SubscriptionRow({
+  row,
+  onReceipt,
+  onRefresh,
+}: {
+  row: Subscription;
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [busy, setBusy] = React.useState<"toggle" | "backfill" | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const name = row.actor.name || row.actor.javdb_actor_id;
+
+  const toggle = async () => {
+    if (busy) return;
+    setBusy("toggle");
+    setError(null);
+    try {
+      const result = await api.setSubscriptionEnabled(row.id, !row.enabled);
+      onReceipt({
+        title: name,
+        tone: "ok",
+        verb: result.actress.enabled ? "恢复" : "停用",
+        text: result.actress.enabled
+          ? "已恢复追新，已建任务照走完"
+          : "已停用追新；已建任务照常下载、入库",
+      });
+      await onRefresh();
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const backfill = async () => {
+    if (busy) return;
+    setBusy("backfill");
+    setError(null);
+    try {
+      const result = await api.backfillSubscription(row.id, BACKFILL_DAYS);
+      onReceipt({
+        title: name,
+        tone: "ok",
+        verb: "回灌",
+        text: result.backfill_from
+          ? `回灌自 ${result.backfill_from}，下一轮把她那段作品过一遍`
+          : "回灌窗口已设好，下一轮过一遍",
+      });
+      await onRefresh();
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div
+      data-subscription={row.actor.javdb_actor_id}
+      className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-x-4"
+    >
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 font-medium">
+          {name}
+          {row.actor.name ? (
+            <span className="text-xs font-normal text-muted-foreground tabular-nums">
+              {row.actor.javdb_actor_id}
+            </span>
+          ) : null}
+          {row.enabled ? null : <Badge variant="outline">已停用</Badge>}
+        </div>
+        <p className="dense tabular-nums text-muted-foreground">{subscriptionSubtitle(row)}</p>
+        {error ? (
+          <Notice tone="bad" onClose={() => setError(null)}>
+            {error}
+          </Notice>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <RowAction
+          onClick={() => void backfill()}
+          disabled={busy !== null}
+          aria-label={`回灌 ${name} 最近 ${BACKFILL_DAYS} 天`}
+          title={`把取数下界往回拨 ${BACKFILL_DAYS} 天，扫完自动清掉`}
+        >
+          {busy === "backfill" ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
+          回灌 {BACKFILL_DAYS} 天
+        </RowAction>
+        <RowAction
+          variant="outline"
+          onClick={() => void toggle()}
+          disabled={busy !== null}
+          aria-label={`${row.enabled ? "停用" : "恢复"} ${name}`}
+        >
+          {busy === "toggle" ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
+          {row.enabled ? "停用" : "恢复"}
+        </RowAction>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * BACKFILL_DAYS 是「回灌」那颗按钮拨回去的天数。
+ *
+ * 30 天与回看窗口的默认值同档：它是「这位女优最近三十天出了什么」这一问的答案，
+ * 也是 §6.4 验收里那句「点回灌 30 天」的原文。更长的历史由服务端的天数参数承担，
+ * v1 面板不为此再开一个输入框（手改库或后续票再说）。
+ */
+const BACKFILL_DAYS = 30;
+
+/**
+ * SubscribeForm 是「添加」那一步：一个输入框，贴 id 或女优页链接。
+ *
+ * 没有搜索框（上游没有按名字搜的端点）。判定「这是 id 还是链接」交给
+ * `subscriptionAddBody`：面板不猜，服务端也不猜。
+ */
+function SubscribeForm({
+  onReceipt,
+  onRefresh,
+}: {
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [value, setValue] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const body = subscriptionAddBody(value);
+  const inputID = React.useId();
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!body || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.addSubscription(body);
+      const name = result.actress.actor.name || result.actress.actor.javdb_actor_id;
+      onReceipt({
+        title: name,
+        tone: "ok",
+        verb: "订阅",
+        text:
+          result.outcome === "duplicate"
+            ? "这位女优已经订过了，水位线原样保留"
+            : "已订阅；她的新作下一轮就会走同一条流水线",
+      });
+      setValue("");
+      await onRefresh();
+    } catch (cause: unknown) {
+      // 错误文案来自端点的 zh-CN 信封（门禁、id 读不到、形状不对），直译即可。
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="flex flex-col gap-2 sm:flex-row sm:items-end">
+      <div className="min-w-0 flex-1">
+        <Field id={inputID} label="女优 id 或女优页链接">
+          <TextInput
+            id={inputID}
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            placeholder="EvkJ 或 https://javdb.com/actors/EvkJ"
+            mono
+            autoComplete="off"
+          />
+        </Field>
+      </div>
+      <RowAction type="submit" disabled={!body || busy}>
+        {busy ? <Loader2 className="size-3 animate-spin" aria-hidden /> : <Plus className="size-3.5" aria-hidden />}
+        添加
+      </RowAction>
+      {error ? (
+        <div className="sm:w-full">
+          <Notice tone="bad" onClose={() => setError(null)}>
+            {error}
+          </Notice>
+        </div>
+      ) : null}
+    </form>
   );
 }
 
@@ -1352,8 +1635,11 @@ function NeedsAttention({
 /** ReceiptDraft 是一条新回执（还没编号）：番号或待办名 + 结局 + 一句后果。 */
 type ReceiptDraft = RetryNotice & {
   title: string;
-  /** 回执说的那个动作本身：任务侧是「重试」，副作用侧是「重发」。 */
-  verb?: "重试" | "重发";
+  /**
+   * 回执说的那个动作本身：任务侧是「重试」，副作用侧是「重发」，订阅区是
+   * 「订阅 / 回灌 / 停用 / 恢复」。播报位念的是「已<verb> <title> · <text>」。
+   */
+  verb?: "重试" | "重发" | "订阅" | "回灌" | "停用" | "恢复";
 };
 
 /** Receipt 是已经发出的一条回执。 */
@@ -3078,14 +3364,13 @@ type LoopLine = { label: string; text: string; failing: boolean };
  */
 function loopLines(
   overview: Overview | null,
-  intervals: { poll: string | null; reconcile: string | null; sidefx: string | null },
+  intervals: Record<LoopName, string | null>,
   now: number,
 ): LoopLine[] {
-  const rows: { key: "poll" | "reconcile" | "sidefx"; label: string }[] = [
-    { key: "poll", label: "清单轮询" },
-    { key: "reconcile", label: "对账" },
-    { key: "sidefx", label: "副作用" },
-  ];
+  const rows: { key: LoopName; label: string }[] = LOOP_ORDER.map((key) => ({
+    key,
+    label: LOOP_LABELS[key],
+  }));
   return rows.map(({ key, label }) => {
     const health = overview?.loops?.[key];
     // 读不到概览时不说「还没跑过」：那是一个我们并不知道的事实。

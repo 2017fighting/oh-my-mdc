@@ -35,7 +35,7 @@ import (
 	"github.com/2017fighting/oh-my-mdc/internal/task"
 )
 
-// LockIDPoll 是 poll 的 advisory lock key。三条循环各持一把（规格 §4.4）。
+// LockIDPoll 是 poll 的 advisory lock key。四条循环各持一把（规格 §4.4）。
 const LockIDPoll int64 = 4230001
 
 // DefaultInterval 是 app_config 读不到 poll_interval 时的兜底（与表默认值一致）。

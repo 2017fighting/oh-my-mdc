@@ -130,12 +130,12 @@ func TestWriteRendersAllFiveFamilies(t *testing.T) {
 		}
 	}
 
-	// 三循环 × 一条时间 + 两条迭代计数。
-	if got := len(families["mdc_loop_last_success_unix_seconds"].Metric); got != 3 {
-		t.Errorf("last_success 样本数 = %d, want 3（poll/reconcile/sidefx）", got)
+	// 四循环 × 一条时间 + 两条迭代计数（第四条是 subscription，#47）。
+	if got := len(families["mdc_loop_last_success_unix_seconds"].Metric); got != 4 {
+		t.Errorf("last_success 样本数 = %d, want 4（poll/reconcile/sidefx/subscription）", got)
 	}
-	if got := len(families["mdc_loop_iterations_total"].Metric); got != 6 {
-		t.Errorf("iterations 样本数 = %d, want 6（三循环 × ok/error）", got)
+	if got := len(families["mdc_loop_iterations_total"].Metric); got != 8 {
+		t.Errorf("iterations 样本数 = %d, want 8（四循环 × ok/error）", got)
 	}
 	if got := len(families["mdc_upstream_requests_total"].Metric); got != 21 {
 		t.Errorf("upstream 样本数 = %d, want 21（七上游 × 三结局）", got)

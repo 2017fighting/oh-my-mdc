@@ -111,7 +111,9 @@ func (r *Round) addOne(ctx context.Context, version task.Version) (bool, error) 
 		return false, err
 	}
 
-	if err := i.store.MarkAdded(ctx, version.Infohash, i.owner, true); err != nil {
+	// 清单项待删只在「任务真的在清单上」时置起：订阅与手工登记的任务 list_id 是 NULL，
+	// 没有清单项可删，置起只会入箱一条 list_id 为空的删除待办（它重试变不出来）。
+	if err := i.store.MarkAdded(ctx, version.Infohash, i.owner, version.ListID != ""); err != nil {
 		if errors.Is(err, task.ErrClaimLost) {
 			// 租约已经过期并被别人接手：这次的加种结果不该覆盖当前占用者的账。
 			return false, nil

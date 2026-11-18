@@ -211,9 +211,9 @@ func (r *Registry) Write(ctx context.Context, w io.Writer) {
 
 // writeLoops 写两条循环指标：最近一次成功的时间与迭代计数。
 //
-// 三条循环恒列满：从没成功过的用启动时间当基线（见 Registry.startedAt）。
+// 四条循环恒列满：从没成功过的用启动时间当基线（见 Registry.startedAt）。
 func writeLoops(w io.Writer, status *loops.Registry, startedAt time.Time) {
-	fmt.Fprintln(w, "# HELP mdc_loop_last_success_unix_seconds 三条循环最近一次成功的时间（Unix 秒）；从没成功过时是进程启动时间。")
+	fmt.Fprintln(w, "# HELP mdc_loop_last_success_unix_seconds 四条循环最近一次成功的时间（Unix 秒）；从没成功过时是进程启动时间。")
 	fmt.Fprintln(w, "# TYPE mdc_loop_last_success_unix_seconds gauge")
 	for _, name := range loops.All {
 		lastSuccess := startedAt
@@ -223,7 +223,7 @@ func writeLoops(w io.Writer, status *loops.Registry, startedAt time.Time) {
 		fmt.Fprintf(w, "mdc_loop_last_success_unix_seconds{loop=\"%s\"} %d\n", escapeLabel(name), lastSuccess.Unix())
 	}
 
-	fmt.Fprintln(w, "# HELP mdc_loop_iterations_total 三条循环的迭代计数；门禁没开或抢锁抢输的轮次不算。")
+	fmt.Fprintln(w, "# HELP mdc_loop_iterations_total 四条循环的迭代计数；门禁没开或抢锁抢输的轮次不算。")
 	fmt.Fprintln(w, "# TYPE mdc_loop_iterations_total counter")
 	for _, name := range loops.All {
 		iterations := status.Health(name).Iterations
