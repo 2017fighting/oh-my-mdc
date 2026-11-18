@@ -307,3 +307,53 @@ func TestDetailReadsTheV4Endpoint(t *testing.T) {
 		t.Error("raw 快照为空（raw_snapshot 要按源留一份）")
 	}
 }
+
+// TestCollectedActressesWithoutTokenDoesNotCallUpstream 守住 #50 的入口判据：
+// 收藏名单**需要 token**（匿名实测 JWTVerificationError），没保存就本地报错、不发请求——
+// 空名单会让用户以为「我 App 里一位都没收藏」，那是最难排查的一种静默失败。
+func TestCollectedActressesWithoutTokenDoesNotCallUpstream(t *testing.T) {
+	called := false
+	srv := fakeJavDB(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v1/users/collected_actors": func(w http.ResponseWriter, _ *http.Request) {
+			called = true
+		},
+	})
+	integration := New(Options{Host: srv.URL})
+
+	_, err := integration.CollectedActresses(context.Background(), "")
+	if err == nil {
+		t.Fatal("没 token 应当报错")
+	}
+	if appapi.Classify(err) != appapi.CodeBusiness {
+		t.Errorf("Classify = %q, want business（要人先去保存 token，重试无用）", appapi.Classify(err))
+	}
+	if called {
+		t.Error("没 token 不该发请求")
+	}
+}
+
+// TestCollectedActressesPagesThroughTheFixture 确认门面只做一件事：把 token 递下去、
+// 把上游的行原样带回来（去重/截断是传输层的活，测试在那里钉）。
+func TestCollectedActressesPagesThroughTheFixture(t *testing.T) {
+	srv := fakeJavDB(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/api/v1/users/collected_actors": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = w.Write([]byte(env(`{"actors":[]}`)))
+				return
+			}
+			_, _ = w.Write([]byte(env(`{"actors":[{"id":"D2EdJ","name":"花守夏歩","videos_count":179,"gender":0}]}`)))
+		},
+	})
+	integration := New(Options{Host: srv.URL})
+
+	got, err := integration.CollectedActresses(context.Background(), "tk")
+	if err != nil {
+		t.Fatalf("CollectedActresses: %v", err)
+	}
+	if len(got.Actresses) != 1 || got.Actresses[0].ID != "D2EdJ" || got.Actresses[0].VideosCount != 179 {
+		t.Errorf("actresses = %+v, want 一行 D2EdJ", got.Actresses)
+	}
+	if got.Truncated {
+		t.Error("Truncated = true, want false")
+	}
+}

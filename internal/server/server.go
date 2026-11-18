@@ -180,6 +180,9 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/config/{section}/test", s.testSection)
 	mux.HandleFunc("GET /api/javdb/lists", s.javdbLists)
 	mux.HandleFunc("POST /api/javdb/lists", s.javdbCreateList)
+	// 收藏导入（#50）：只读。没有 /api/javdb/actress-search —— 上游不提供按名字搜女优的
+	// 端点（§13 实测），面板也不开搜索框。
+	mux.HandleFunc("GET /api/javdb/collected-actors", s.javdbCollectedActors)
 	mux.HandleFunc("GET /api/qbittorrent/autorun", s.qbtAutorunPlan)
 	mux.HandleFunc("POST /api/qbittorrent/autorun", s.qbtAutorunApply)
 	mux.Handle("/", s.spa())
