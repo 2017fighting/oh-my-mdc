@@ -26,7 +26,11 @@ import {
   remedyForStalled,
   settingsLabel,
 } from "~/lib/remedy";
-import { subscriptionAddBody, subscriptionSubtitle } from "~/lib/subscription";
+import {
+  subscriptionAddBody,
+  subscriptionBackfillDays,
+  subscriptionSubtitle,
+} from "~/lib/subscription";
 import {
   api,
   notifyEventLabels,
@@ -41,6 +45,7 @@ import {
   type SideEffect,
   type SideEffectKind,
   type Subscription,
+  type SubscriptionBackfillBody,
   type SubscriptionList,
   type TaskDetail,
   type TaskEvent,
@@ -992,9 +997,11 @@ function BackfillDirs({
  * 入口只有「贴 id / 女优页链接」。每行三样：她是谁（名字快照 + 水位线 + 带来 N 部）、
  * 启停、回灌。
  *
- * 回灌之所以要一颗按钮：新订阅的水位线是建订阅当天，于是不点它就只看回看窗口那一段；
- * 想立刻验证「这条路通不通」就得把下界往回拨（§6.4 回灌）。点完之后下界会写进行上，
- * 窗口扫完由循环清掉——面板不需要第二个「取消回灌」的入口。
+ * 回灌之所以要按钮：一条订阅的起追日（floor_date）是建订阅当天，她更早的作品它永远
+ * 不看；想追历史只能显式回灌一次（§6.4 回灌），它把起追日往前挪。三档预设
+ * （90 天 / 365 天 / 全部）覆盖「最近三个月 / 一年 / 从头」，再加一格自由天数；
+ * 比回看窗口还小的天数不发——那是空操作。点完之后下界会写进行上，窗口扫完由循环
+ * 清掉——面板不需要第二个「取消回灌」的入口。
  */
 function SubscriptionPanel({
   subscriptions,
@@ -1019,7 +1026,7 @@ function SubscriptionPanel({
           </h2>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             盯住女优新作的订阅：贴她的 JavDB id 或女优页链接即可（上游没有按名字搜的端点）。
-            新订阅只看回看窗口那一段，想追更早的历史按「回灌」。
+            新订阅从建订阅当天开始追，更早的历史要按「回灌」才翻。
           </p>
         </div>
         <CardAction className="max-sm:col-start-1 max-sm:row-start-2">
@@ -1049,7 +1056,7 @@ function SubscriptionPanel({
   );
 }
 
-/** SubscriptionRow 是订阅区的一行：身份、水位线与「带来 N 部」，加两颗动作。 */
+/** SubscriptionRow 是订阅区的一行：身份、水位线与「带来 N 部」，加回灌与启停两组动作。 */
 function SubscriptionRow({
   row,
   onReceipt,
@@ -1060,7 +1067,12 @@ function SubscriptionRow({
   onRefresh: () => Promise<void>;
 }) {
   const [busy, setBusy] = React.useState<"toggle" | "backfill" | null>(null);
+  // pending 记住按的是哪一颗：回灌有四颗按钮，转圈要转在被按的那一颗上。
+  const [pending, setPending] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [daysInput, setDaysInput] = React.useState("");
+  const daysID = React.useId();
+  const days = subscriptionBackfillDays(daysInput, row.lookback_days);
 
   const name = row.actor.name || row.actor.javdb_actor_id;
 
@@ -1086,12 +1098,13 @@ function SubscriptionRow({
     }
   };
 
-  const backfill = async () => {
+  const backfill = async (body: SubscriptionBackfillBody, key: string) => {
     if (busy) return;
     setBusy("backfill");
+    setPending(key);
     setError(null);
     try {
-      const result = await api.backfillSubscription(row.id, BACKFILL_DAYS);
+      const result = await api.backfillSubscription(row.id, body);
       onReceipt({
         title: name,
         tone: "ok",
@@ -1105,7 +1118,14 @@ function SubscriptionRow({
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
+      setPending(null);
     }
+  };
+
+  const backfillDays = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (days === null) return;
+    await backfill({ days }, "days");
   };
 
   return (
@@ -1131,15 +1151,42 @@ function SubscriptionRow({
         ) : null}
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
-        <RowAction
-          onClick={() => void backfill()}
-          disabled={busy !== null}
-          aria-label={`回灌 ${name} 最近 ${BACKFILL_DAYS} 天`}
-          title={`把取数下界往回拨 ${BACKFILL_DAYS} 天，扫完自动清掉`}
-        >
-          {busy === "backfill" ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
-          回灌 {BACKFILL_DAYS} 天
-        </RowAction>
+        {/* 回灌是一组：三档预设 + 一格天数。比回看窗口还小的天数不发（服务端会 400，
+            面板先自己守住），所以那颗按钮只在真有作用时亮着。 */}
+        <span className="dense text-muted-foreground">回灌</span>
+        {BACKFILL_PRESETS.map((preset) => (
+          <RowAction
+            key={preset.key}
+            onClick={() => void backfill(preset.body, preset.key)}
+            disabled={busy !== null}
+            aria-label={`回灌 ${name} ${preset.aria}`}
+            title={`把取数下界往回拨${preset.aria}，扫完自动清掉`}
+          >
+            {pending === preset.key ? (
+              <Loader2 className="size-3 animate-spin" aria-hidden />
+            ) : null}
+            {preset.label}
+          </RowAction>
+        ))}
+        <form onSubmit={backfillDays} className="flex items-center gap-1">
+          <label htmlFor={daysID} className="sr-only">
+            回灌 {name} 多少天
+          </label>
+          <TextInput
+            id={daysID}
+            value={daysInput}
+            onChange={(event) => setDaysInput(event.target.value)}
+            inputMode="numeric"
+            placeholder={`>${row.lookback_days}`}
+            aria-label={`回灌 ${name} 多少天（要大于回看窗口 ${row.lookback_days} 天）`}
+            title={`比回看窗口（${row.lookback_days} 天）还小的天数是空操作`}
+            className="h-11 w-16 px-2 text-center tabular-nums md:h-7 md:text-xs"
+          />
+          <RowAction type="submit" disabled={busy !== null || days === null}>
+            {pending === "days" ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
+            回灌
+          </RowAction>
+        </form>
         <RowAction
           variant="outline"
           onClick={() => void toggle()}
@@ -1155,13 +1202,22 @@ function SubscriptionRow({
 }
 
 /**
- * BACKFILL_DAYS 是「回灌」那颗按钮拨回去的天数。
+ * BACKFILL_PRESETS 是「回灌」的三档预设：最近三个月 / 一年 / 从头。
  *
- * 30 天与回看窗口的默认值同档：它是「这位女优最近三十天出了什么」这一问的答案，
- * 也是 §6.4 验收里那句「点回灌 30 天」的原文。更长的历史由服务端的天数参数承担，
- * v1 面板不为此再开一个输入框（手改库或后续票再说）。
+ * 三档都远大于回看窗口（默认 30 天），所以点下去一定真能往前拨——面板不给「回灌 30 天」
+ * 那种一下手就是空操作的按钮（§8.4：days ≤ lookback_days 会被 400 拒掉）。
+ * 「全部」走的是同一个端点的另一种形状（{all:true} → 起追日拨到 1970-01-01）。
  */
-const BACKFILL_DAYS = 30;
+const BACKFILL_PRESETS: {
+  key: string;
+  label: string;
+  aria: string;
+  body: SubscriptionBackfillBody;
+}[] = [
+  { key: "90", label: "90 天", aria: "最近 90 天", body: { days: 90 } },
+  { key: "365", label: "365 天", aria: "最近 365 天", body: { days: 365 } },
+  { key: "all", label: "全部", aria: "全部作品", body: { all: true } },
+];
 
 /**
  * SubscribeForm 是「添加」那一步：一个输入框，贴 id 或女优页链接。

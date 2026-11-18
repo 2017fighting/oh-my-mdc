@@ -23,14 +23,24 @@ var (
 	ErrUpstream = errors.New("上游读不到这位女优")
 )
 
-// maxBackfillDays 是回灌天数的上限：一年足够把任何一位女优的历史扫一遍，
-// 再往上只会把上游翻页翻成无尽循环（不设上限时 days 就是个放大器）。
+// maxBackfillDays 是回灌天数的上限：十年足够把任何一位女优的历史扫一遍，
+// 再往上只会把上游翻页翻成无尽循环（不设上限时 days 就是个放大器）。要更早的
+// 历史有 `all`——它是「没有下界」，不必拿一个巨大的天数和上游对赌。
 const maxBackfillDays = 3650
 
 // Request 是一次「添加订阅」的输入：贴 id 或贴女优页链接，二选一。
 type Request struct {
 	ActressID string
 	JavdbURL  string
+}
+
+// BackfillRequest 是一次「回灌」的输入（§8.4）：{days} 或 {all: true}，二选一。
+//
+// days 是「往回拨多少天」，all 是「拨到她最早的作品」（起追日 = 1970-01-01）。
+// 两个都给时 all 胜出——「全部」本来就盖住了任何天数。
+type BackfillRequest struct {
+	Days int
+	All  bool
 }
 
 // Settings 是订阅门面对设置域的全部要求：门禁（Load）与上游凭据（Input）。
@@ -124,10 +134,28 @@ func (s *Service) SetEnabled(ctx context.Context, id int64, enabled bool) (Row, 
 	return s.store.SetEnabled(ctx, id, enabled)
 }
 
-// Backfill 把取数下界往回拨 days 天（「回灌 N 天」）。
-func (s *Service) Backfill(ctx context.Context, id int64, days int) (Row, error) {
+// Backfill 把取数下界往回拨（「回灌 N 天」或「全部」）。
+//
+// days ≤ lookback_days 是**拒**：回看窗口本来就每轮看那么远，这样的回灌一下手就是
+// 空操作（下界没变、面板上看不出任何区别）。面板因此只给能生效的天数，服务端再把
+// 这一条守住——不发出一个什么都不做的按钮（§8.4）。
+func (s *Service) Backfill(ctx context.Context, id int64, request BackfillRequest) (Row, error) {
+	row, err := s.store.Get(ctx, id)
+	if err != nil {
+		return Row{}, err
+	}
+	if request.All {
+		return s.store.SetBackfillAll(ctx, id)
+	}
+
+	days := request.Days
 	if days < 1 || days > maxBackfillDays {
 		return Row{}, fmt.Errorf("%w：回灌天数要在 1–%d 之间，收到 %d", ErrBadInput, maxBackfillDays, days)
+	}
+	if days <= row.LookbackDays {
+		return Row{}, fmt.Errorf(
+			"%w：回看窗口已经覆盖最近 %d 天，回灌 %d 天是空操作——要更早的历史请给大于 %d 的天数，或用全部",
+			ErrBadInput, row.LookbackDays, days, row.LookbackDays)
 	}
 	return s.store.SetBackfill(ctx, id, days)
 }

@@ -145,6 +145,13 @@ export type SubscriptionList = {
   actresses: Subscription[];
 };
 
+/**
+ * 回灌的两种请求形状（规格 §8.4）：{days} 或 {all:true}，二选一。
+ *
+ * `days` 要大于回看窗口（否则是空操作，服务端 400）；`all` 是「翻到她最早的作品」。
+ */
+export type SubscriptionBackfillBody = { days: number } | { all: true };
+
 /** 添加订阅的回执：outcome=duplicate 是幂等放行（同一位女优第二次添加）。 */
 export type SubscriptionWrite = {
   ok: boolean;
@@ -532,10 +539,10 @@ export const api = {
     }),
 
   /** 回灌 N 天：把取数下界往回拨，回执给 backfill_from。 */
-  backfillSubscription: (id: number, days: number) =>
+  backfillSubscription: (id: number, body: SubscriptionBackfillBody) =>
     request<{ ok: boolean; backfill_from: string | null }>(`/api/subscriptions/${id}/backfill`, {
       method: "POST",
-      body: JSON.stringify({ days }),
+      body: JSON.stringify(body),
     }),
 
   /** 一键补录：删旧 NFO、现有视频原地入库，重刮由流水线接着做（GLOSSARY「补录」）。 */

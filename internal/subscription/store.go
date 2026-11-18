@@ -1,8 +1,8 @@
 // Package subscription 是女优订阅（规格 §6.4，ADR-0014/0015）：第二个待办来源。
 //
-// 它只负责「产出一批待办作品」——取数窗口（水位线 + 回看窗口 + 回灌下界）与名单（哪些
-// 女优被订了、停用了没有），之后每一件作品往下一律走 internal/ingest（定源 → 先落库 →
-// 加种），与清单轮询同一段。所以本包不含磁力、M-Team、qBittorrent 的任何决定：
+// 它只负责「产出一批待办作品」——取数窗口（起追日 + 水位线 + 回看窗口 + 回灌下界）与
+// 名单（哪些女优被订了、停用了没有），之后每一件作品往下一律走 internal/ingest（定源 →
+// 先落库 → 加种），与清单轮询同一段。所以本包不含磁力、M-Team、qBittorrent 的任何决定：
 // 那些写两遍必然漂移（ADR-0014 的后果一节）。
 //
 // 三个部分：
@@ -55,7 +55,10 @@ type Row struct {
 	Actor Actor
 	// WatermarkDate 是上一轮见过的最晚发行日；NULL 时读方按「建订阅当天」兜底。
 	WatermarkDate *time.Time
-	LookbackDays  int
+	// FloorDate 是起追日（GLOSSARY）：这条订阅永不看她这一天之前的作品。
+	// 建订阅当天定下，此后只能被回灌往前挪。
+	FloorDate    time.Time
+	LookbackDays int
 	// BackfillFrom 是回灌设置的取数下界；窗口扫完清 NULL。
 	BackfillFrom *time.Time
 	Enabled      bool
@@ -83,8 +86,8 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // rowColumns 是 Row 的选取清单，与 scanRow 逐一对应。
 //
 // 演员的名字/性别/头像用 COALESCE：它们是 NULL，不该让整行读不出来。
-const rowColumns = `s.id, s.kind, s.actress_actor_id, s.watermark_date, s.lookback_days,
-	s.backfill_from, s.enabled, s.created_at, s.updated_at,
+const rowColumns = `s.id, s.kind, s.actress_actor_id, s.watermark_date, s.floor_date,
+	s.lookback_days, s.backfill_from, s.enabled, s.created_at, s.updated_at,
 	COALESCE(a.name, ''), COALESCE(a.gender, ''), COALESCE(a.avatar_url, ''),
 	(SELECT count(*) FROM task t WHERE t.subscription_id = s.id),
 	(SELECT count(*) FROM task t JOIN task_version v ON v.movie_id = t.movie_id
@@ -159,9 +162,11 @@ func (s *Store) Create(ctx context.Context, actor Actor) (Row, string, error) {
 		return Row{}, "", fmt.Errorf("subscription: 落演员 %s: %w", actor.ID, err)
 	}
 
-	// 水位线 = 建订阅当天：新订阅不回灌历史，否则「通没通」要等上游真出片才知道。
+	// 水位线与起追日都 = 建订阅当天：新订阅只从今天往后追，否则「通没通」要等上游
+	// 真出片才知道。起追日只有回灌能往前挪（§6.4），重复添加也不重置它。
 	inserted, err := tx.Exec(ctx,
-		`INSERT INTO subscription (kind, actress_actor_id, watermark_date) VALUES ($1, $2, CURRENT_DATE)
+		`INSERT INTO subscription (kind, actress_actor_id, watermark_date, floor_date)
+		 VALUES ($1, $2, CURRENT_DATE, CURRENT_DATE)
 		 ON CONFLICT (kind, actress_actor_id) DO NOTHING`,
 		KindActress, actor.ID,
 	)
@@ -199,14 +204,17 @@ func (s *Store) SetEnabled(ctx context.Context, id int64, enabled bool) (Row, er
 	return s.Get(ctx, id)
 }
 
-// SetBackfill 把取数下界往回拨 days 天（§6.4 回灌）。
+// SetBackfill 把取数下界往回拨 days 天（§6.4 回灌），同时把起追日往前挪。
 //
-// 下界 = watermark_date − days，水位线本身不动：窗口扫完由循环清 NULL，
-// 所以「回灌 30 天」不会被一次水位线推进立刻吃掉。
+// 两件事都动：backfill_from 是这次回灌的游标（扫完由循环清 NULL），floor_date 是
+// 「这条订阅永不看她之前」的永久下界——回灌是它唯一能往前挪的手段，所以不清。
+// 起追日只会越来越早（LEAST）：再点一次短的回灌不会把上次挪开的窗口关小。
 func (s *Store) SetBackfill(ctx context.Context, id int64, days int) (Row, error) {
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE subscription
-		 SET backfill_from = COALESCE(watermark_date, CURRENT_DATE) - $2::int, updated_at = now()
+		 SET backfill_from = LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) - $2::int),
+		     floor_date = LEAST(floor_date, COALESCE(watermark_date, CURRENT_DATE) - $2::int),
+		     updated_at = now()
 		 WHERE id = $1`, id, days,
 	); err != nil {
 		return Row{}, fmt.Errorf("subscription: 设订阅 %d 的回灌窗口: %w", id, err)
@@ -214,21 +222,44 @@ func (s *Store) SetBackfill(ctx context.Context, id int64, days int) (Row, error
 	return s.Get(ctx, id)
 }
 
-// Seen 记一轮的结果：水位线推成「这轮见过的最晚发行日」，扫完才清回灌下界。
+// SetBackfillAll 是「全部」那颗按钮：起追日与游标一并挪到 1970-01-01。
+//
+// 1970-01-01 不是「很早的一个日期」而是「没有下界」的那个数：JavDB 上没有比它更早的
+// 作品，写死它比再引入一层 NULL 语义（回灌下界已经用过那个坑位）更直白。
+func (s *Store) SetBackfillAll(ctx context.Context, id int64) (Row, error) {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE subscription
+		 SET backfill_from = LEAST(floor_date, DATE '1970-01-01'),
+		     floor_date = LEAST(floor_date, DATE '1970-01-01'),
+		     updated_at = now()
+		 WHERE id = $1`, id,
+	); err != nil {
+		return Row{}, fmt.Errorf("subscription: 设订阅 %d 的全量回灌: %w", id, err)
+	}
+	return s.Get(ctx, id)
+}
+
+// Seen 记一轮的结果：水位线推成「这轮见过的最晚发行日」（**封顶到今天**），
+// 扫完才清回灌下界。
 //
 // 水位线只由「见过」推进（不是「入队成功」）：出水即无磁力的作品靠回看窗口下轮重见，
 // 与 §6.1「磁力为空不落行、下轮重查」是同一条承诺。
 //
-// GREATEST 是「只增不减」：新订阅的水位线是建订阅当天，而窗口里见到的作品总比今天老，
-// 因此头几轮它推不动——正是这一点让「不点回灌就不会回灌历史」成立。会往回退的水位线
-// 等于把一位退休女优三年前的作品当场回灌进来（那正是「回灌」要人按一下的原因）。
+// GREATEST 是「只增不减」：会往回退的水位线等于把一位退休女优三年前的作品当场回灌进来
+// （那正是「回灌」要人按一下的原因）。
+//
+// 外层那个 LEAST(…, CURRENT_DATE) 是**预告片护栏**：上游会把还没发行的作品先登在列表里，
+// 要是让它的发行日推上去，水位线就跳进未来、下界跟着跳过她的全部现存作品——订阅会静默
+// 停追到那一天为止（规格 §13）。封顶到今天既留住「只增不减」，也不跑到时间前面。
 //
 // clearBackfill 只在回灌窗口**真的扫完**时为 true：中途读上游失败就留着，
 // 下一轮接着从同一个下界开始（规格 §6.4「余量留到下一轮且 backfill_from 不被清」）。
 func (s *Store) Seen(ctx context.Context, id int64, seen time.Time, clearBackfill bool) error {
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE subscription
-		 SET watermark_date = GREATEST(COALESCE(watermark_date, $2::date), $2::date),
+		 SET watermark_date = LEAST(
+		         GREATEST(COALESCE(watermark_date, CURRENT_DATE), $2::date),
+		         CURRENT_DATE),
 		     backfill_from = CASE WHEN $3 THEN NULL ELSE backfill_from END,
 		     updated_at = now()
 		 WHERE id = $1`,
@@ -252,7 +283,7 @@ func scanRow(row scanner) (Row, error) {
 		backfill  *time.Time
 	)
 	err := row.Scan(
-		&out.ID, &out.Kind, &out.Actor.ID, &watermark, &out.LookbackDays,
+		&out.ID, &out.Kind, &out.Actor.ID, &watermark, &out.FloorDate, &out.LookbackDays,
 		&backfill, &out.Enabled, &out.CreatedAt, &out.UpdatedAt,
 		&out.Actor.Name, &out.Actor.Gender, &out.Actor.AvatarURL,
 		&out.TasksCount, &out.PendingCount,
@@ -261,6 +292,8 @@ func scanRow(row scanner) (Row, error) {
 		return Row{}, err
 	}
 	out.WatermarkDate = dateOnly(watermark)
+	floor := out.FloorDate
+	out.FloorDate = *dateOnly(&floor)
 	out.BackfillFrom = dateOnly(backfill)
 	return out, nil
 }

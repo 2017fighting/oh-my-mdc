@@ -187,6 +187,45 @@ func (f *runFixture) dbDate(t *testing.T, daysAgo int) string {
 	return dateOf(f.daysAgo(t, daysAgo))
 }
 
+// backdated 把这条订阅的起追日与水位线一并挪到 N 天前，模拟「已经在追的一位女优」。
+//
+// 刚建好的订阅 floor_date 就是今天（起追日，永不回看历史），所以凡是要看见今天之前
+// 那些作品的用例，都得先把它挪成一条真实存在了一阵的订阅。
+func (f *runFixture) backdated(t *testing.T, floorDaysAgo, watermarkDaysAgo int) {
+	t.Helper()
+	if _, err := f.database.Pool().Exec(context.Background(),
+		`UPDATE subscription
+		 SET floor_date = CURRENT_DATE - $2::int, watermark_date = CURRENT_DATE - $3::int
+		 WHERE id = $1`, f.sub.ID, floorDaysAgo, watermarkDaysAgo,
+	); err != nil {
+		t.Fatalf("把订阅挪回 %d/%d 天前: %v", floorDaysAgo, watermarkDaysAgo, err)
+	}
+}
+
+// taskMovies 列任务表里由这条订阅带来的 movie_id（断言「谁进来了」用）。
+func (f *runFixture) taskMovies(t *testing.T) []string {
+	t.Helper()
+	rows, err := f.database.Pool().Query(context.Background(),
+		`SELECT movie_id FROM task WHERE subscription_id = $1 ORDER BY movie_id`, f.sub.ID)
+	if err != nil {
+		t.Fatalf("列任务: %v", err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var movie string
+		if err := rows.Scan(&movie); err != nil {
+			t.Fatalf("扫任务: %v", err)
+		}
+		out = append(out, movie)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历任务: %v", err)
+	}
+	return out
+}
+
 // work 造一件作品，并把它的磁力配好（hash 由 movie_id 决定，便于断言）。
 func (f *runFixture) work(t *testing.T, movieID, number string, daysAgo int) appapi.ActressWork {
 	t.Helper()
@@ -205,6 +244,7 @@ func (f *runFixture) work(t *testing.T, movieID, number string, daysAgo int) app
 // 但**来源记录**是订阅（list_id NULL、subscription_id 设了），因此不置清单项待删。
 func TestRunOnceBringsWindowWorksIntoTheTaskTable(t *testing.T) {
 	f := newRunFixture(t)
+	f.backdated(t, 30, 30) // 订阅建于 30 天前：回看窗口那一段里的作品都算新
 	f.works.pages[1] = []appapi.ActressWork{
 		f.work(t, "m1", "ABP-001", 1),
 		f.work(t, "m2", "ABP-002", 3),
@@ -271,13 +311,16 @@ func TestRunOnceBringsWindowWorksIntoTheTaskTable(t *testing.T) {
 	}
 }
 
-// TestRunStopsAtTheLookbackWindow 钉住取数下界的第一半：不点回灌时只看回看窗口
-// （水位线 − lookback_days），更老的历史不进来。
-func TestRunStopsAtTheLookbackWindow(t *testing.T) {
-	f := newRunFixture(t)
+// TestNewSubscriptionNeverIngestsPreSubscriptionWorks 是起追日（floor_date）那条裁决：
+// 今天订的订阅**永不看她今天之前的作品**——昨天那部虽然已经出水、有磁力，也不进来。
+//
+// 机制是取数下界的下界：下界 = GREATEST(floor_date, …)，而 floor_date 是建订阅当天。
+// 没有它时回看窗口每轮都会往回带 30 天，「新订阅不追历史」只是一句好听话。
+func TestNewSubscriptionNeverIngestsPreSubscriptionWorks(t *testing.T) {
+	f := newRunFixture(t) // 订阅建于今天：floor_date = 今天
 	f.works.pages[1] = []appapi.ActressWork{
-		f.work(t, "fresh", "ABP-001", 1),
-		f.work(t, "stale", "ABP-002", 60),
+		f.work(t, "today", "ABP-002", 0),
+		f.work(t, "yesterday", "ABP-001", 1),
 	}
 
 	result, err := f.runner.RunOnce(context.Background())
@@ -285,26 +328,84 @@ func TestRunStopsAtTheLookbackWindow(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if result.Seen != 1 {
-		t.Errorf("seen = %d, want 1（只有窗口内那一件）", result.Seen)
+		t.Errorf("seen = %d, want 1（只有建订阅当天及以后的作品）", result.Seen)
+	}
+	if len(f.magnets.calls) != 1 || f.magnets.calls[0] != "today" {
+		t.Errorf("查了磁力的作品 = %v, want [today]（昨天的作品连查都不该查）", f.magnets.calls)
+	}
+	if got := f.taskMovies(t); len(got) != 1 || got[0] != "today" {
+		t.Errorf("任务表 = %v, want [today]", got)
+	}
+}
+
+// TestNewSubscriptionReseesWorksAfterTheFloor 是起追日的另一半：它挡的是**今天之前**，
+// 不是「一切」——建订阅之后出现、出水时还没有磁力的作品，下一轮仍在窗口里被重查。
+func TestNewSubscriptionReseesWorksAfterTheFloor(t *testing.T) {
+	f := newRunFixture(t) // 订阅建于今天
+	work := appapi.ActressWork{MovieID: "nomagnet", Number: "ABP-404", ReleaseDate: f.daysAgo(t, 0)}
+	delete(f.magnets.byMovie, "nomagnet")
+	f.works.pages[1] = []appapi.ActressWork{work}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Seen != 1 || result.Candidates != 0 || result.Added != 0 {
+		t.Errorf("seen/candidates/added = %d/%d/%d, want 1/0/0（出水时还没磁力）",
+			result.Seen, result.Candidates, result.Added)
+	}
+
+	// 下一轮：磁力出来了，同一件作品仍在窗口里（起追日只挡今天之前）。
+	f.work(t, "nomagnet", "ABP-404", 0)
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if got := f.taskMovies(t); len(got) != 1 || got[0] != "nomagnet" {
+		t.Errorf("任务表 = %v, want [nomagnet]（无磁力的作品下一轮仍在窗口内）", got)
+	}
+}
+
+// TestRunStopsAtTheLookbackWindow 钉住回看窗口那一层：水位线已经追到最近时，
+// 下界 = 水位线 − lookback_days（30），更老的历史不进来——哪怕它在起追日之后。
+//
+// 子集分得开才有信息量：40 天前那件在起追日（90 天前）之后，被回看窗口排除；
+// 100 天前那件在起追日之前，被起追日排除。两层各管一段。
+func TestRunStopsAtTheLookbackWindow(t *testing.T) {
+	f := newRunFixture(t)
+	f.backdated(t, 90, 1) // 建于 90 天前、水位线已经追到昨天
+	f.works.pages[1] = []appapi.ActressWork{
+		f.work(t, "fresh", "ABP-001", 1),
+		f.work(t, "stale", "ABP-002", 40),
+		f.work(t, "ancient", "ABP-003", 100),
+	}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Seen != 1 {
+		t.Errorf("seen = %d, want 1（只有回看窗口里那一件）", result.Seen)
 	}
 	if len(f.magnets.calls) != 1 || f.magnets.calls[0] != "fresh" {
 		t.Errorf("查了磁力的作品 = %v, want [fresh]", f.magnets.calls)
 	}
 
-	// 水位线只增不减：窗口里见到的作品比「建订阅当天」老，于是水位线仍然是今天。
-	// 这条不变式是「不点回灌就不会回灌历史」的机制本身——会往回退的水位线等于把
-	// 一位退休女优的三年前作品当场回灌进来。
+	// 水位线只增不减：见到的是昨天那件，于是水位线就停在昨天。
 	row := f.current(t)
-	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 0) {
-		t.Errorf("watermark_date = %v, want 建订阅当天（水位线只增不减）", row.WatermarkDate)
+	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 1) {
+		t.Errorf("watermark_date = %v, want 昨天（水位线只增不减）", row.WatermarkDate)
 	}
 	if row.BackfillFrom != nil {
 		t.Errorf("backfill_from = %v, want NULL（没点回灌）", row.BackfillFrom)
 	}
+	if got := dateOf(row.FloorDate); got != f.dbDate(t, 90) {
+		t.Errorf("floor_date = %s, want %s（回灌才会挪它，追新不动）", got, f.dbDate(t, 90))
+	}
 }
 
 // TestBackfillWindowReachesHistoricWorksThenClears 是「手动回灌」那条验收：
-// 设了 backfill_from 之后取数下界往回拨，窗口扫完清 NULL。
+// 点回灌 90 天之后取数下界往回拨（60 天前那件进来、120 天前那件还在外面），
+// 起追日一并往前挪，窗口扫完只清 backfill_from。
 func TestBackfillWindowReachesHistoricWorksThenClears(t *testing.T) {
 	f := newRunFixture(t)
 	if _, err := f.store.SetBackfill(context.Background(), f.sub.ID, 90); err != nil {
@@ -331,16 +432,20 @@ func TestBackfillWindowReachesHistoricWorksThenClears(t *testing.T) {
 	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 0) {
 		t.Errorf("watermark_date = %v, want 建订阅当天（回灌不动水位线）", row.WatermarkDate)
 	}
+	// 起追日被回灌往前挪到 90 天前，而且**扫完也不回退**：它是永久的「这条订阅从哪
+	// 一天开始追」，不是这一轮的上限。
+	if got := dateOf(row.FloorDate); got != f.dbDate(t, 90) {
+		t.Errorf("floor_date = %s, want %s（回灌把它往前挪，不清）", got, f.dbDate(t, 90))
+	}
 }
 
 // TestWatermarkAdvancesOnSeenEvenWithoutMagnets 是「水位线只由『见过』推进」那条验收：
-// 上游预告的新作（发行日在今天之后）这一轮还没有磁力、不落任何行，但水位线照推——
-// 它把取数窗口往前带，而「没入队」不推进水位线。
+// 昨天出水、还没有磁力的作品这一轮不落任何行，但水位线照推。
 func TestWatermarkAdvancesOnSeenEvenWithoutMagnets(t *testing.T) {
 	f := newRunFixture(t)
-	// 还没出水的那部作品：上游先给了发行日，磁力还没有。
-	work := appapi.ActressWork{MovieID: "nomagnet", Number: "ABP-404", ReleaseDate: f.daysAgo(t, -2)}
-	delete(f.magnets.byMovie, "nomagnet")
+	f.backdated(t, 30, 30)
+	// 还没出水的作品：上游先给了发行日，磁力还没有。
+	work := appapi.ActressWork{MovieID: "nomagnet", Number: "ABP-404", ReleaseDate: f.daysAgo(t, 1)}
 	f.works.pages[1] = []appapi.ActressWork{work}
 
 	result, err := f.runner.RunOnce(context.Background())
@@ -352,7 +457,7 @@ func TestWatermarkAdvancesOnSeenEvenWithoutMagnets(t *testing.T) {
 			result.Seen, result.Queried, result.Candidates, result.Added)
 	}
 	row := f.current(t)
-	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != dateOf(f.daysAgo(t, -2)) {
+	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 1) {
 		t.Errorf("watermark_date = %v, want 见过的那一天（不是「入队成功」才推）", row.WatermarkDate)
 	}
 
@@ -365,10 +470,42 @@ func TestWatermarkAdvancesOnSeenEvenWithoutMagnets(t *testing.T) {
 	}
 }
 
+// TestFutureReleaseDateDoesNotPushTheWatermark 钉住 §13 的预告片护栏：
+// 上游会把还没发行的作品先登在列表里（预告），于是「见过的最晚发行日」可能落在未来。
+// 水位线一旦跳进未来，下界（水位线 − 回看窗口）就跑到她全部现存作品之后——订阅会
+// 静默停追到那个日子为止。水位线因此封顶在今天。
+func TestFutureReleaseDateDoesNotPushTheWatermark(t *testing.T) {
+	f := newRunFixture(t) // 订阅建于今天
+	future := appapi.ActressWork{MovieID: "future", Number: "ABP-900", ReleaseDate: f.daysAgo(t, -60)}
+	today := appapi.ActressWork{MovieID: "today", Number: "ABP-001", ReleaseDate: f.daysAgo(t, 0)}
+	delete(f.magnets.byMovie, "future")
+	delete(f.magnets.byMovie, "today")
+	f.works.pages[1] = []appapi.ActressWork{future, today} // 列表按 release 倒序
+
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第一轮 RunOnce: %v", err)
+	}
+	row := f.current(t)
+	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 0) {
+		t.Errorf("watermark_date = %v, want 今天（预告片的发行日不许把水位线推出去）", row.WatermarkDate)
+	}
+
+	// 下一轮：那部「今天发行」的作品出水了，必须被捡进来。水位线若停在 60 天后，
+	// 下界会变成 30 天后，它就被当成「比下界还老」而直接跳过。
+	f.work(t, "today", "ABP-001", 0)
+	if _, err := f.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("第二轮 RunOnce: %v", err)
+	}
+	if got := f.taskMovies(t); len(got) != 1 || got[0] != "today" {
+		t.Errorf("任务表 = %v, want [today]（水位线封顶后，今天这部仍进得来）", got)
+	}
+}
+
 // TestWindowDedupesOverlappingPages 钉住翻页护栏：上游的页可以重叠（清单扫描也按
 // movie_id 去重），同一部作品不该被算两次「见过」、更不该被查两次磁力。
 func TestWindowDedupesOverlappingPages(t *testing.T) {
 	f := newRunFixture(t)
+	f.backdated(t, 30, 30)
 	first := f.work(t, "m1", "ABP-001", 1)
 	f.works.pages[1] = []appapi.ActressWork{first}
 	f.works.pages[2] = []appapi.ActressWork{first}
@@ -379,6 +516,24 @@ func TestWindowDedupesOverlappingPages(t *testing.T) {
 	}
 	if result.Seen != 1 || result.Queried != 1 {
 		t.Errorf("seen/queried = %d/%d, want 1/1（重叠的页不该算两遍）", result.Seen, result.Queried)
+	}
+}
+
+// TestBackfillAllReachesAncientWorks 是「全部」那颗按钮的循环面：起追日挪到 1970 之后，
+// 十几年前的作品也进得来——90 天那种按天数往回拨够不到的地方。
+func TestBackfillAllReachesAncientWorks(t *testing.T) {
+	f := newRunFixture(t)
+	if _, err := f.store.SetBackfillAll(context.Background(), f.sub.ID); err != nil {
+		t.Fatalf("全部回灌: %v", err)
+	}
+	f.works.pages[1] = []appapi.ActressWork{f.work(t, "ancient", "ABP-001", 4000)}
+
+	result, err := f.runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if result.Seen != 1 || result.Added != 1 {
+		t.Errorf("seen/added = %d/%d, want 1/1（四千天前的作品也在窗口里）", result.Seen, result.Added)
 	}
 }
 

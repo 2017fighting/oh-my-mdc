@@ -3,7 +3,9 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,8 +29,8 @@ type fakeSubscriber struct {
 	enabledCalls []bool
 	disableErr   error
 
-	backfillDays []int
-	backfillErr  error
+	backfillRequests []subscription.BackfillRequest
+	backfillErr      error
 }
 
 func (f *fakeSubscriber) List(context.Context) ([]subscription.Row, error) {
@@ -55,12 +57,15 @@ func (f *fakeSubscriber) SetEnabled(_ context.Context, id int64, enabled bool) (
 	return subscription.Row{ID: id, Enabled: enabled, Actor: subscription.Actor{ID: "EvkJ", Name: "河北彩花"}}, nil
 }
 
-func (f *fakeSubscriber) Backfill(_ context.Context, id int64, days int) (subscription.Row, error) {
+func (f *fakeSubscriber) Backfill(_ context.Context, id int64, request subscription.BackfillRequest) (subscription.Row, error) {
 	if f.backfillErr != nil {
 		return subscription.Row{}, f.backfillErr
 	}
-	f.backfillDays = append(f.backfillDays, days)
+	f.backfillRequests = append(f.backfillRequests, request)
 	from := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
+	if request.All {
+		from = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
 	return subscription.Row{ID: id, BackfillFrom: &from}, nil
 }
 
@@ -245,19 +250,66 @@ func TestBackfillSubscriptionPassesDays(t *testing.T) {
 	fake := &fakeSubscriber{}
 	h := newSubscriptionFixture(t, fake)
 
-	rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", `{"days":30}`)
+	rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", `{"days":90}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 	if body := jsonOf(t, rec); body["backfill_from"] != "2026-10-19" {
 		t.Errorf("backfill_from = %v, want 2026-10-19", body["backfill_from"])
 	}
-	if len(fake.backfillDays) != 1 || fake.backfillDays[0] != 30 {
-		t.Errorf("接缝收到 days = %v, want [30]", fake.backfillDays)
+	if len(fake.backfillRequests) != 1 || fake.backfillRequests[0] != (subscription.BackfillRequest{Days: 90}) {
+		t.Errorf("接缝收到 = %+v, want {Days:90}", fake.backfillRequests)
 	}
 
-	if rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", `{"days":0}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("days=0 的 status = %d, want 400", rec.Code)
+	// 形状错（没有 days 也没有 all、days 不是整数）在这里就挡下，不打到接缝：
+	// 「days 太小」是服务层的规则（它要读回看窗口），服务层用例管那一条。
+	for _, body := range []string{`{}`, `{"days":30.5}`, `{"days":"三十"}`, `{"all":"yes"}`} {
+		if rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s 的 status = %d, want 400", body, rec.Code)
+		}
+	}
+	if len(fake.backfillRequests) != 1 {
+		t.Errorf("坏形状也打到了接缝: %+v", fake.backfillRequests)
+	}
+}
+
+// TestBackfillSubscriptionAcceptsAll 钉住第二种请求形状：{all:true} 是「翻到她最早的作品」，
+// 回执仍是同一个 {backfill_from}（1970-01-01 就是「没有下界」）。
+func TestBackfillSubscriptionAcceptsAll(t *testing.T) {
+	fake := &fakeSubscriber{}
+	h := newSubscriptionFixture(t, fake)
+
+	rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", `{"all":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if body := jsonOf(t, rec); body["backfill_from"] != "1970-01-01" {
+		t.Errorf("backfill_from = %v, want 1970-01-01", body["backfill_from"])
+	}
+	if len(fake.backfillRequests) != 1 || !fake.backfillRequests[0].All {
+		t.Errorf("接缝收到 = %+v, want {All:true}", fake.backfillRequests)
+	}
+}
+
+// TestBackfillSubscriptionRejectsDaysWithinTheLookback 钉住 §8.4 的那条 400：
+// days ≤ 回看窗口是空操作，服务层的 ErrBadInput 翻成 400 validation_error，
+// message 原样带到面板（它要说清「回看窗口已经覆盖」）。
+func TestBackfillSubscriptionRejectsDaysWithinTheLookback(t *testing.T) {
+	fake := &fakeSubscriber{backfillErr: fmt.Errorf(
+		"%w：回看窗口已经覆盖最近 30 天，回灌 30 天是空操作", subscription.ErrBadInput)}
+	h := newSubscriptionFixture(t, fake)
+
+	rec := send(t, h, http.MethodPost, "/api/subscriptions/5/backfill", `{"days":30}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+	errorBody, _ := jsonOf(t, rec)["error"].(map[string]any)
+	if errorBody["code"] != "validation_error" {
+		t.Errorf("code = %v, want validation_error", errorBody["code"])
+	}
+	message, _ := errorBody["message"].(string)
+	if !strings.Contains(message, "回看窗口") {
+		t.Errorf("message = %q, want 说清为什么不行", message)
 	}
 }
 

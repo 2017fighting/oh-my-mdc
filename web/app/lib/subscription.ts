@@ -21,6 +21,22 @@ export function subscriptionAddBody(raw: string): SubscriptionAddBody | null {
   return { actress_id: input };
 }
 
+/**
+ * subscriptionBackfillDays 把「自由天数」那一格翻成能发的天数，不合法回 null。
+ *
+ * 两条判据：正整数，且**越过回看窗口**。后者不是洁癖——水位线 − days 落在回看窗口里
+ * 就是空操作（下一轮本来就会看那么远），服务端会 400；面板先自己守住，那颗按钮因此
+ * 只在真有作用时亮着（规格 §8.4）。
+ */
+export function subscriptionBackfillDays(raw: string, lookbackDays: number): number | null {
+  const trimmed = raw.trim();
+  // 只认十进制数字：`1e3`、`1.5`、`-30` 都不是「天数」的写法。
+  if (!/^[0-9]+$/.test(trimmed)) return null;
+  const days = Number(trimmed);
+  if (!Number.isSafeInteger(days) || days <= lookbackDays) return null;
+  return days;
+}
+
 /** subscriptionWatermark 说「上次见过哪一天」；不知道就说不知道，不编今天。 */
 export function subscriptionWatermark(date: string): string {
   return date === "" ? "还没跑过" : date;

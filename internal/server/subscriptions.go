@@ -20,7 +20,8 @@ import (
 //   - POST /api/subscriptions：{actress_id} 或 {javdb_url}，解析 id → upsert actor → 建订阅；
 //     同一位女优重复添加是幂等放行（outcome=duplicate）也是 200；
 //   - POST /api/subscriptions/{id}/enable|disable：启停（停用只停追新）；
-//   - POST /api/subscriptions/{id}/backfill {days}：把取数下界往回拨，回执给 backfill_from。
+//   - POST /api/subscriptions/{id}/backfill {days} | {all:true}：把取数下界往回拨
+//     （连起追日一起挪），回执给 backfill_from。
 //
 // 错误信封沿用 §8.4：形状 400 validation_error、门禁 409 gate_closed、id 读不到
 // 502 upstream_error、行号不存在 404 not_found、装配缺失或库抖 503 db_unavailable。
@@ -36,7 +37,7 @@ type Subscriber interface {
 	List(ctx context.Context) ([]subscription.Row, error)
 	Add(ctx context.Context, request subscription.Request) (subscription.Row, string, error)
 	SetEnabled(ctx context.Context, id int64, enabled bool) (subscription.Row, error)
-	Backfill(ctx context.Context, id int64, days int) (subscription.Row, error)
+	Backfill(ctx context.Context, id int64, request subscription.BackfillRequest) (subscription.Row, error)
 }
 
 // subscriptionActorBody 是面板要的演员快照（名字来自上游，性别/头像等刮削补）。
@@ -78,8 +79,13 @@ type subscriptionCreateBody struct {
 	Actress subscriptionBody `json:"actress"`
 }
 
+// subscriptionBackfillRequest 是回灌的两种请求体（§8.4）：{days} 或 {all: true}。
+//
+// Days 是 *int：缺了（nil）与给了 0 是两件事——前者是「既没给 days 也没给 all」，
+// 后者是天数不合法；两者的 400 文案不同，而空值本身必须能分辨出来。
 type subscriptionBackfillRequest struct {
-	Days int `json:"days"`
+	Days *int `json:"days"`
+	All  bool `json:"all"`
 }
 
 type subscriptionBackfillBody struct {
@@ -174,17 +180,21 @@ func (s *server) subscriptionBackfill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "validation_error", "读请求体失败: "+err.Error())
 		return
 	}
-	request := subscriptionBackfillRequest{}
-	if err := json.Unmarshal(body, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "validation_error", "请求体不是 JSON 对象: "+err.Error())
+	decoded := subscriptionBackfillRequest{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		writeError(w, http.StatusBadRequest, "validation_error", "请求体不是 JSON 对象（days 要是整数）: "+err.Error())
 		return
 	}
-	if request.Days < 1 {
-		writeError(w, http.StatusBadRequest, "validation_error", "缺 days：回灌多少天要是一个正整数")
+	if !decoded.All && decoded.Days == nil {
+		writeError(w, http.StatusBadRequest, "validation_error", "要给 days（往回拨多少天）或 all:true（翻到她最早的作品）")
 		return
+	}
+	request := subscription.BackfillRequest{All: decoded.All}
+	if decoded.Days != nil {
+		request.Days = *decoded.Days
 	}
 
-	row, err := s.subscriptions.Backfill(r.Context(), id, request.Days)
+	row, err := s.subscriptions.Backfill(r.Context(), id, request)
 	if err != nil {
 		s.writeSubscriptionError(w, err)
 		return

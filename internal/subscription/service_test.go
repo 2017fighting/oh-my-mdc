@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,10 +148,14 @@ func TestAddByActressIDCreatesSubscriptionAndActor(t *testing.T) {
 		t.Errorf("lookback_days = %d, want 30（表默认值）", row.LookbackDays)
 	}
 	if row.WatermarkDate == nil {
-		t.Fatal("watermark_date = NULL, want 建订阅当天（不回灌历史）")
+		t.Fatal("watermark_date = NULL, want 建订阅当天（从今天往后追）")
 	}
 	if got, want := dateOf(*row.WatermarkDate), f.dbDate(t, 0); got != want {
 		t.Errorf("watermark_date = %s, want %s（建订阅当天）", got, want)
+	}
+	// 起追日同样是建订阅当天：她今天之前的作品永不自动捡起（GLOSSARY「起追日」）。
+	if got, want := dateOf(row.FloorDate), f.dbDate(t, 0); got != want {
+		t.Errorf("floor_date = %s, want %s（起追日 = 建订阅当天）", got, want)
 	}
 
 	name, gender, avatar := f.actor(t, "EvkJ")
@@ -337,7 +342,7 @@ func TestSetEnabledOnlyStopsChasingNewOnes(t *testing.T) {
 }
 
 // TestBackfillMovesTheLowerBoundBackwards 钉住 §8.4 的回执：
-// backfill_from = watermark_date − days（水位线本身不动）。
+// backfill_from = watermark_date − days（水位线本身不动），起追日一并往前挪。
 func TestBackfillMovesTheLowerBoundBackwards(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -346,25 +351,88 @@ func TestBackfillMovesTheLowerBoundBackwards(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	row, err := f.service.Backfill(ctx, created.ID, 30)
+	row, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: 90})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
 	if row.BackfillFrom == nil {
-		t.Fatal("backfill_from = NULL, want 水位线 − 30 天")
+		t.Fatal("backfill_from = NULL, want 水位线 − 90 天")
 	}
-	if got, want := dateOf(*row.BackfillFrom), f.dbDate(t, 30); got != want {
+	if got, want := dateOf(*row.BackfillFrom), f.dbDate(t, 90); got != want {
 		t.Errorf("backfill_from = %s, want %s", got, want)
+	}
+	// 起追日跟着走：它才是「这条订阅从此敢看多早」的那一列，回灌是唯一能挪它的手段。
+	if got, want := dateOf(row.FloorDate), f.dbDate(t, 90); got != want {
+		t.Errorf("floor_date = %s, want %s（回灌把起追日往前挪）", got, want)
 	}
 	if row.WatermarkDate == nil || dateOf(*row.WatermarkDate) != f.dbDate(t, 0) {
 		t.Errorf("回灌动了水位线: %v", row.WatermarkDate)
 	}
 
-	if _, err := f.service.Backfill(ctx, created.ID, 0); !errors.Is(err, subscription.ErrBadInput) {
+	if _, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: 0}); !errors.Is(err, subscription.ErrBadInput) {
 		t.Errorf("days=0 的 err = %v, want ErrBadInput", err)
 	}
-	if _, err := f.service.Backfill(ctx, 999, 30); !errors.Is(err, subscription.ErrNotFound) {
+	if _, err := f.service.Backfill(ctx, 999, subscription.BackfillRequest{Days: 90}); !errors.Is(err, subscription.ErrNotFound) {
 		t.Errorf("未知 id 的 err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestBackfillRejectsDaysWithinTheLookback 是 §8.4 那条 400：days ≤ 回看窗口是**空操作**
+// ——水位线 − days 落在回看窗口里面，下一轮本来就会看那么远。与其发一个什么都不做的
+// 按钮，不如当场说清「回看窗口已经覆盖」。
+func TestBackfillRejectsDaysWithinTheLookback(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, _, err := f.service.Add(ctx, subscription.Request{ActressID: "EvkJ"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	for _, days := range []int{1, created.LookbackDays} {
+		_, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: days})
+		if !errors.Is(err, subscription.ErrBadInput) {
+			t.Fatalf("days=%d 的 err = %v, want ErrBadInput", days, err)
+		}
+		// 这句话要能告诉用户「为什么不行」：回看窗口已经覆盖到那里了。
+		if !strings.Contains(err.Error(), "回看窗口") {
+			t.Errorf("days=%d 的 message = %q, want 说到回看窗口", days, err)
+		}
+	}
+
+	// 被拒就是零写入：起追日与游标都原样。
+	row, err := f.service.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(row) != 1 || row[0].BackfillFrom != nil || dateOf(row[0].FloorDate) != f.dbDate(t, 0) {
+		t.Fatalf("被拒的回灌写了东西: %+v", row)
+	}
+
+	// 越过回看窗口一天就成立。
+	if _, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{Days: created.LookbackDays + 1}); err != nil {
+		t.Errorf("days=lookback+1 的 err = %v, want nil（这才是能推进的那一档）", err)
+	}
+}
+
+// TestBackfillAllReaches1970 是「全部」那颗按钮：起追日与游标一并挪到 1970-01-01，
+// 也就是「没有下界」。
+func TestBackfillAllReaches1970(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, _, err := f.service.Add(ctx, subscription.Request{ActressID: "EvkJ"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	row, err := f.service.Backfill(ctx, created.ID, subscription.BackfillRequest{All: true})
+	if err != nil {
+		t.Fatalf("Backfill(all): %v", err)
+	}
+	if row.BackfillFrom == nil || dateOf(*row.BackfillFrom) != "1970-01-01" {
+		t.Errorf("backfill_from = %v, want 1970-01-01", row.BackfillFrom)
+	}
+	if got := dateOf(row.FloorDate); got != "1970-01-01" {
+		t.Errorf("floor_date = %s, want 1970-01-01（全部＝没有下界）", got)
 	}
 }
 

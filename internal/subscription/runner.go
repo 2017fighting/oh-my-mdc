@@ -363,13 +363,19 @@ func (r *Runner) Interval(ctx context.Context) time.Duration {
 	return snapshot.Interval("subscription_interval", DefaultInterval)
 }
 
-// lowerBound 是取数下界：LEAST(watermark_date − lookback_days, COALESCE(backfill_from, +∞))。
+// lowerBound 是取数下界：
 //
-// 两条规则合在这里：
+//	GREATEST(floor_date, LEAST(watermark_date - lookback_days, COALESCE(backfill_from, +∞)))
+//
+// 三层各有各的活（GLOSSARY「起追日 / 回看窗口 / 回灌」）：
+//
+//   - 起追日（floor_date）是永久下界：建订阅当天定下，只有回灌能把它往前挪。它让
+//     「新订阅不追历史」成为机制，而不是一句好听话——只靠 watermark − lookback，
+//     回看窗口每轮都会往回带 30 天，昨天出的作品今天就被捡进来；
 //   - 回看窗口（lookback_days，默认 30）让「出水时还没磁力」的作品下一轮仍被看见；
 //   - 回灌（backfill_from）把下界一次性往回拨，窗口没扫完之前不会被水位线推回去。
 //
-// 取两者更早的那个：回灌**放宽**窗口，从不收窄。
+// 内层取更早的那个：回灌**放宽**窗口，从不收窄。外层 GREATEST 再把它抬回起追日之上。
 func lowerBound(sub Row, now time.Time) time.Time {
 	lookback := sub.LookbackDays
 	if lookback <= 0 {
@@ -377,12 +383,15 @@ func lowerBound(sub Row, now time.Time) time.Time {
 	}
 	lower := watermarkDate(sub, now).AddDate(0, 0, -lookback)
 	if sub.BackfillFrom != nil && sub.BackfillFrom.Before(lower) {
-		return *sub.BackfillFrom
+		lower = *sub.BackfillFrom
+	}
+	if sub.FloorDate.After(lower) {
+		return sub.FloorDate
 	}
 	return lower
 }
 
-// watermarkDate 读水位线；NULL 按「今天」兜底（新订阅的语义：不回灌历史）。
+// watermarkDate 读水位线；NULL 按「今天」兜底（新订阅的语义：从今天往后追，起追日兜住下界）。
 func watermarkDate(sub Row, now time.Time) time.Time {
 	if sub.WatermarkDate != nil {
 		return *sub.WatermarkDate

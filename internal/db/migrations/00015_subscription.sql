@@ -4,9 +4,10 @@
 -- （定源 → 先落库 → 加种），所以本迁移只落订阅自己的形状：
 --
 --   - subscription：身份是 actor.javdb_actor_id（不是名字——名字只是快照，改名不该断
---     订阅），带水位线、回看窗口、回灌下界与启停。行**永不删除**：面板只有停用/恢复，
---     task.subscription_id 的外键与历史因此永远可解。kind 是上位词留下的扩展位
---     （GLOSSARY「订阅」/ADR-0015：将来的番号订阅、全站标签订阅加在这里，不另起表）。
+--     订阅），带水位线、起追日、回看窗口、回灌下界与启停。行**永不删除**：面板只有
+--     停用/恢复，task.subscription_id 的外键与历史因此永远可解。kind 是上位词留下的
+--     扩展位（GLOSSARY「订阅」/ADR-0015：将来的番号订阅、全站标签订阅加在这里，不另
+--     起表）。
 --   - task.subscription_id：与 list_id 并存的「首次发现来源」另一半。订阅建的任务
 --     list_id 为 NULL（没有清单项可删，故 list_removal 天然不触发），订阅身份记在这里。
 --     写入后不覆盖：来源是「首次发现」，不是「最近一次发现」。
@@ -24,11 +25,16 @@
 -- gender/avatar_url 先 NULL 等刮削补（规格 §4.5「actor 词义扩宽」）。
 --
 -- watermark_date 可空：NULL 只应出现在手工改库的场景，读方按「建订阅当天」兜底。
+--
+-- floor_date 是**起追日**（GLOSSARY「起追日」）：这条订阅永不看她这一天之前的作品。
+-- 建订阅当天定下，此后只能被回灌**往前**挪（永不往后），它是「新订阅不追历史」的机制
+-- 本身——只靠 watermark − lookback 这种下界，回看窗口每轮都会往回带 30 天。
 CREATE TABLE subscription (
     id               bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     kind             text        NOT NULL DEFAULT 'actress' CHECK (kind IN ('actress')),
     actress_actor_id text        NOT NULL REFERENCES actor (javdb_actor_id),
     watermark_date   date,
+    floor_date       date        NOT NULL DEFAULT CURRENT_DATE,
     lookback_days    integer     NOT NULL DEFAULT 30 CHECK (lookback_days > 0),
     backfill_from    date,
     enabled          boolean     NOT NULL DEFAULT true,
