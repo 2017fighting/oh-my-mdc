@@ -96,6 +96,25 @@ export type JavDBList = {
   movies_count: number;
 };
 
+/** App 收藏里的一位演员（规格 §8.4 的「从 App 收藏导入」，#50）。 */
+export type CollectedActress = {
+  /** 上游的演员 id：订阅身份就是这个（不是名字，名字只是快照）。 */
+  id: string;
+  name: string;
+  videos_count: number;
+  /** 上游的性别码：0 = 女优，1 = 男优（实测，原样透出；详情端点没有这个字段）。 */
+  gender: number;
+  /** 订阅表里有没有她——服务端算的，导入面板据此把已订的置灰。 */
+  subscribed: boolean;
+};
+
+export type CollectedActresses = {
+  ok: boolean;
+  actresses: CollectedActress[];
+  /** 收藏超过页数上限（20 页 × 10 位）时为 true：面板据此说「只列到前 200 位」。 */
+  truncated: boolean;
+};
+
 export type Overview = {
   ok: boolean;
   initialized: boolean;
@@ -524,6 +543,12 @@ export const api = {
 
   /** 订阅区列表：只列已订阅的女优（上游没有搜名字的端点，所以没有搜索框）。 */
   subscriptions: () => request<SubscriptionList>("/api/subscriptions"),
+
+  /**
+   * App 收藏的演员名单（#50）：**需 token**，没保存就 400 并写明原因。
+   * 已订阅的那几位带 subscribed=true；没有搜索端点（上游不提供，§13）。
+   */
+  collectedActresses: () => request<CollectedActresses>("/api/javdb/collected-actors"),
 
   /** 添加订阅：贴女优 id 或女优页链接，二选一（服务端解析 id 并 upsert actor）。 */
   addSubscription: (input: { actress_id: string } | { javdb_url: string }) =>

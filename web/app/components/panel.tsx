@@ -1,7 +1,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router";
-import { AlertTriangle, ChevronRight, CircleDashed, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronRight, CircleDashed, Download, Loader2, Plus, RefreshCw, RotateCcw, Search, X } from "lucide-react";
 import { cn } from "cn";
 
 import { Badge } from "~/components/ui/badge";
@@ -32,6 +32,13 @@ import {
   subscriptionSubtitle,
 } from "~/lib/subscription";
 import {
+  collectedImportItems,
+  importIDs,
+  importReceipts,
+  importResultLabel,
+  type ImportOutcome,
+} from "~/lib/collected";
+import {
   api,
   notifyEventLabels,
   notifyEventOf,
@@ -39,6 +46,7 @@ import {
   type AttentionItem,
   type BackfillResult,
   type BackfillScan,
+  type CollectedActresses,
   type IncompleteItem,
   type ManualRegistration,
   type Overview,
@@ -105,6 +113,7 @@ export function Panel({
   sideEffects,
   backfill,
   subscriptions,
+  javdbConfigured,
   query,
   pageSize,
   loadedAt,
@@ -125,6 +134,11 @@ export function Panel({
   backfill: BackfillScan | null;
   /** 订阅区（女优订阅，§6.4）；null = 读不到，整块不渲染。 */
   subscriptions: SubscriptionList | null;
+  /**
+   * JavDB 那一节配好了没有（token 已保存）。「从 App 收藏导入」要凭据才读得到上游
+   * （收藏名单匿名不可用，§13），没配时那入口整颗禁掉并写出原因——不是点了才静默失败。
+   */
+  javdbConfigured: boolean;
   query: PanelQuery;
   pageSize: number;
   /** 上一次读到数据的时刻（客户端时钟）：值班台必须知道自己有多旧。 */
@@ -471,6 +485,7 @@ export function Panel({
 
         <SubscriptionPanel
           subscriptions={subscriptions}
+          javdbConfigured={javdbConfigured}
           onReceipt={receiptsState.push}
           onRefresh={onRefresh}
         />
@@ -1005,10 +1020,12 @@ function BackfillDirs({
  */
 function SubscriptionPanel({
   subscriptions,
+  javdbConfigured,
   onReceipt,
   onRefresh,
 }: {
   subscriptions: SubscriptionList | null;
+  javdbConfigured: boolean;
   onReceipt: (draft: ReceiptDraft) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -1025,8 +1042,8 @@ function SubscriptionPanel({
             订阅
           </h2>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            盯住女优新作的订阅：贴她的 JavDB id 或女优页链接即可（上游没有按名字搜的端点）。
-            新订阅从建订阅当天开始追，更早的历史要按「回灌」才翻。
+            盯住女优新作的订阅：贴她的 JavDB id 或女优页链接，或者从 App 收藏里勾
+            （上游没有按名字搜的端点）。新订阅从建订阅当天开始追，更早的历史要按「回灌」才翻。
           </p>
         </div>
         <CardAction className="max-sm:col-start-1 max-sm:row-start-2">
@@ -1035,6 +1052,11 @@ function SubscriptionPanel({
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <SubscribeForm onReceipt={onReceipt} onRefresh={onRefresh} />
+        <CollectedImport
+          javdbConfigured={javdbConfigured}
+          onReceipt={onReceipt}
+          onRefresh={onRefresh}
+        />
         {rows.length === 0 ? (
           <p className="dense text-muted-foreground">
             还没订阅任何女优。贴一个 id 或女优页链接，她的新作就会走与清单轮询同一条流水线。
@@ -1291,6 +1313,229 @@ function SubscribeForm({
         </div>
       ) : null}
     </form>
+  );
+}
+
+/**
+ * CollectedImport 是「从 App 收藏导入」（#50，规格 §6.4）。
+ *
+ * 一条从 App 收藏里勾选建订阅的入口，补上「贴 id / 女优页链接」之外的第二种加法——
+ * 手机 App 里早就收藏了一堆女优，让人一个个背 id 回来贴是没道理的。
+ *
+ * 三件事是刻意的：
+ *
+ *   1. **没有搜索框。** 上游不提供按名字搜女优的端点（§13 实测：`/api/v1/actors` 是分页
+ *      名单、q/name 全被静默忽略），所以这一块只有「读名单 → 勾 → 导入」，没有输入框。
+ *   2. **逐条回执。** 勾了 5 位就发 5 次 `POST /api/subscriptions`（#47 那个端点），每条
+ *      自己的结局落在自己那行上，最后合成一句话。串行发：一位女优一次上游读取，并行只会
+ *      把上游的自帽撞出来，而这里等的是人的一次点击，不是页面的首屏。
+ *   3. **读不到就说读不到。** 没配 token 时入口整颗禁着并写出原因（收藏名单要凭据），
+ *      上游抖了就红条原话给出来——静默空名单会让人以为「我 App 里一位都没收藏」。
+ */
+function CollectedImport({
+  javdbConfigured,
+  onReceipt,
+  onRefresh,
+}: {
+  javdbConfigured: boolean;
+  onReceipt: (draft: ReceiptDraft) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [list, setList] = React.useState<CollectedActresses | null>(null);
+  const [selected, setSelected] = React.useState<ReadonlySet<string>>(new Set());
+  const [results, setResults] = React.useState<Record<string, ImportOutcome>>({});
+  const [loading, setLoading] = React.useState(false);
+  const [importing, setImporting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const items = React.useMemo(() => collectedImportItems(list?.actresses ?? []), [list]);
+  const ids = importIDs(items, selected);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const loaded = await api.collectedActresses();
+      setList(loaded);
+      setSelected(new Set());
+      setResults({});
+    } catch (cause: unknown) {
+      // 错误文案来自端点的 zh-CN 信封（没保存 token、token 失效、上游抖），直译即可。
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setList(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleOpen = async () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    // 每次展开都重读：收藏是在手机上改的，缓存一份名单只会给出过期的勾选。
+    await load();
+  };
+
+  const toggle = (id: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const run = async () => {
+    if (importing || ids.length === 0) return;
+    setImporting(true);
+    setError(null);
+
+    try {
+      const outcomes: ImportOutcome[] = [];
+      for (const id of ids) {
+        const name = items.find((item) => item.actress.id === id)?.actress.name ?? id;
+        let outcome: ImportOutcome;
+        try {
+          const result = await api.addSubscription({ actress_id: id });
+          // 端点的两个结局同名搬过来：duplicate 是幂等放行（已订过，水位线原样）。
+          outcome = { id, name, outcome: result.outcome === "duplicate" ? "duplicate" : "created" };
+        } catch (cause: unknown) {
+          outcome = { id, name, outcome: "failed", message: cause instanceof Error ? cause.message : String(cause) };
+        }
+        outcomes.push(outcome);
+        // 逐条落：第 1 位的结局不用等第 5 位。
+        setResults((current) => ({ ...current, [id]: outcome }));
+      }
+
+      const receipt = importReceipts(outcomes);
+      onReceipt({ title: `${outcomes.length} 位女优`, tone: receipt.tone, verb: "导入", text: receipt.text });
+
+      // 成了的那几位已经在订阅表里：就地置灰，不让同一份名单上还留着可勾的旧状态。
+      const done = new Set(outcomes.filter((outcome) => outcome.outcome !== "failed").map((outcome) => outcome.id));
+      setList((current) =>
+        current
+          ? {
+              ...current,
+              actresses: current.actresses.map((actress) =>
+                done.has(actress.id) ? { ...actress, subscribed: true } : actress,
+              ),
+            }
+          : current,
+      );
+      setSelected(new Set());
+      await onRefresh();
+    } finally {
+      // 忙位在 finally 里收：中途一次网络异常不该把「导入」按成永久禁用。
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border/60 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">从 App 收藏导入</p>
+          <p className="dense text-muted-foreground">
+            {javdbConfigured
+              ? "把你 App 里收藏的女优勾过来建订阅；已订阅的置灰。"
+              : "先在集成设置里保存 JavDB token——收藏名单要凭据才读得到。"}
+          </p>
+        </div>
+        <RowAction
+          onClick={() => void toggleOpen()}
+          disabled={!javdbConfigured || loading || importing}
+          aria-label={open ? "收起收藏名单" : "从 App 收藏导入"}
+          aria-expanded={open}
+          title={javdbConfigured ? undefined : "收藏名单匿名不可用，先保存 JavDB token"}
+        >
+          {loading ? (
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <Download className="size-3.5" aria-hidden />
+          )}
+          {open ? "收起" : "读收藏"}
+        </RowAction>
+      </div>
+
+      {error ? (
+        <Notice tone="bad" onClose={() => setError(null)}>
+          {error}
+        </Notice>
+      ) : null}
+
+      {open && list ? (
+        <>
+          {list.actresses.length === 0 ? (
+            <p className="dense text-muted-foreground">
+              App 里还没收藏任何演员。收藏之后回到这里点「读收藏」。
+            </p>
+          ) : (
+            <div className="divide-y">
+              {items.map((item) => {
+                const result = results[item.actress.id];
+                return (
+                  <label
+                    key={item.actress.id}
+                    data-collected={item.actress.id}
+                    className={cn(
+                      "flex items-start gap-2 py-2 first:pt-0 last:pb-0",
+                      item.selectable ? "cursor-pointer" : "cursor-default opacity-70",
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-4 shrink-0 accent-primary"
+                      checked={item.selectable ? selected.has(item.actress.id) : false}
+                      disabled={!item.selectable || importing}
+                      onChange={() => toggle(item.actress.id)}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-baseline gap-x-2 text-sm font-medium">
+                        {item.actress.name || item.actress.id}
+                        <span className="text-xs font-normal tabular-nums text-muted-foreground">
+                          {item.actress.id} · 作品 {item.actress.videos_count} 部
+                        </span>
+                        {item.reason ? <span className="dense text-muted-foreground">{item.reason}</span> : null}
+                      </span>
+                      {result ? (
+                        <span
+                          className={cn(
+                            "dense",
+                            result.outcome === "failed" ? "text-status-danger-text" : "text-status-done-text",
+                          )}
+                        >
+                          {importResultLabel(result)}
+                        </span>
+                      ) : null}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="dense text-muted-foreground">
+              {list.truncated
+                ? "收藏超过 200 位，这里只列到前 200 位"
+                : `收藏里 ${items.length} 位（可导入 ${items.filter((item) => item.selectable).length} 位）`}
+            </span>
+            <RowAction
+              variant="default"
+              onClick={() => void run()}
+              disabled={ids.length === 0 || importing}
+              aria-label={`导入选中的 ${ids.length} 位女优`}
+            >
+              {importing ? <Loader2 className="size-3 animate-spin" aria-hidden /> : null}
+              导入 {ids.length} 位
+            </RowAction>
+          </div>
+        </>
+      ) : null}
+    </div>
   );
 }
 
@@ -1695,7 +1940,7 @@ type ReceiptDraft = RetryNotice & {
    * 回执说的那个动作本身：任务侧是「重试」，副作用侧是「重发」，订阅区是
    * 「订阅 / 回灌 / 停用 / 恢复」。播报位念的是「已<verb> <title> · <text>」。
    */
-  verb?: "重试" | "重发" | "订阅" | "回灌" | "停用" | "恢复";
+  verb?: "重试" | "重发" | "订阅" | "导入" | "回灌" | "停用" | "恢复";
 };
 
 /** Receipt 是已经发出的一条回执。 */

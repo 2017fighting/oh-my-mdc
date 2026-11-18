@@ -389,6 +389,9 @@ export default function Home() {
               sideEffects={sideEffects}
               backfill={backfill}
               subscriptions={subscriptions}
+              // 「从 App 收藏导入」要 JavDB 凭据（收藏名单匿名不可用，§13）：没保存就把那入口
+              // 整颗禁掉并写出原因，而不是让人点了才发现失败。
+              javdbConfigured={snapshot?.sections?.javdb?.configured ?? false}
               query={query}
               pageSize={pageSize}
               loadedAt={loadedAt}

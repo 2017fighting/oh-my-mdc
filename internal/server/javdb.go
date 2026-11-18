@@ -77,6 +77,85 @@ func (s *server) javdbLists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+// javdbCollectedActressBody 是收藏名单里的一行（规格 §8.4）。
+//
+// gender 是上游的性别码原样透出（0 = 女优，1 = 男优）：这个数只在收藏名单里给得出，
+// 翻成自造枚举反而丢掉「上游到底怎么标的」这条事实。
+// subscribed 是**我们算的**：订阅表里有没有这个人，与上游无关。
+type javdbCollectedActressBody struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	VideosCount int    `json:"videos_count"`
+	Gender      int    `json:"gender"`
+	Subscribed  bool   `json:"subscribed"`
+}
+
+// javdbCollectedActorsBody 是 GET /api/javdb/collected-actors 的回执。
+//
+// Truncated 是 §8.4 那一行形状之外唯一多出来的一笔：收藏超过页数上限（20 页 × 10 位）时
+// 它会亮，面板据此说「只列到前 200 位」——一份少给了几十位却不说的名单，会让人以为
+// 「我 App 里真的没收藏过她」。
+type javdbCollectedActorsBody struct {
+	OK        bool                        `json:"ok"`
+	Actresses []javdbCollectedActressBody `json:"actresses"`
+	Truncated bool                        `json:"truncated"`
+}
+
+// javdbCollectedActors 读用户在 App 里收藏的演员名单（#50「从 App 收藏导入」）。
+//
+// 两个数据源拼一次：名单问上游（需 token，没保存就 400 并说明原因——整节没存过时是
+// 设置域既有的 validation_error，存过但 token 为空时是 integration 的 business，都不静默
+// 回空），已订阅那几个布尔问订阅表。因此两个接缝都要在，缺一个就 503：
+// 少了订阅域会给出 subscribed 全 false 的名单，用户于是把已订的又导一遍。
+func (s *server) javdbCollectedActors(w http.ResponseWriter, r *http.Request) {
+	if s.subscriptions == nil {
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "订阅未装配（数据库不可用）")
+		return
+	}
+	integration, store, ok := s.javdbReady(w)
+	if !ok {
+		return
+	}
+
+	input, err := store.Input(r.Context(), "javdb")
+	if err != nil {
+		s.writeSettingsError(w, err)
+		return
+	}
+
+	collected, err := integration.CollectedActresses(r.Context(), input.Text("token"))
+	if err != nil {
+		s.writeJavDBError(w, err)
+		return
+	}
+
+	rows, err := s.subscriptions.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", err.Error())
+		return
+	}
+	subscribed := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		subscribed[row.Actor.ID] = true
+	}
+
+	body := javdbCollectedActorsBody{
+		OK:        true,
+		Actresses: make([]javdbCollectedActressBody, 0, len(collected.Actresses)),
+		Truncated: collected.Truncated,
+	}
+	for _, actress := range collected.Actresses {
+		body.Actresses = append(body.Actresses, javdbCollectedActressBody{
+			ID:          actress.ID,
+			Name:        actress.Name,
+			VideosCount: actress.VideosCount,
+			Gender:      actress.Gender,
+			Subscribed:  subscribed[actress.ID],
+		})
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
 // javdbCreateList 代建一张清单（向导「一键创建」），把 data.id 交回登记。
 //
 // 同名拒/名字过短等业务错原样透出（规格 P2-2：用户要能看见「同名清单」）。
