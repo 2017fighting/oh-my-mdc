@@ -63,6 +63,7 @@ type fixture struct {
 	database *db.DB
 	service  *subscription.Service
 	upstream *fakeActresses
+	pending  *subscription.Pending
 }
 
 func readySettings() *fakeSettings {
@@ -84,13 +85,15 @@ func newFixture(t *testing.T) *fixture {
 
 	database := dbtest.Migrated(t)
 	upstream := &fakeActresses{byID: map[string]string{"EvkJ": "河北彩花"}}
+	pending := subscription.NewPending()
 	service := subscription.NewService(subscription.ServiceOptions{
 		Store:    subscription.NewStore(database.Pool()),
 		Settings: readySettings(),
 		Source:   upstream,
+		Pending:  pending,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	return &fixture{database: database, service: service, upstream: upstream}
+	return &fixture{database: database, service: service, upstream: upstream, pending: pending}
 }
 
 func (f *fixture) actor(t *testing.T, id string) (name string, gender *string, avatar *string) {
@@ -481,6 +484,68 @@ func TestListReportsTasksBroughtByEachSubscription(t *testing.T) {
 	}
 	if row.LookbackDays != 30 || !row.Enabled {
 		t.Errorf("lookback/enabled = %d/%v", row.LookbackDays, row.Enabled)
+	}
+}
+
+// TestListCarriesTheDeferredCountOfTheLastRound 是面板「还有 N 部待入队」（§6.4/§9）：
+// 它读的是订阅循环**上一轮末尾**置下的现数（不落库），与 pending_count（还有版本在等加种）
+// 是两件事——一个数「还没入队的作品」，一个数「已入队还没加进 qB 的版本」。
+func TestListCarriesTheDeferredCountOfTheLastRound(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	created, _, err := f.service.Add(ctx, subscription.Request{ActressID: "EvkJ"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// 没有跑过一轮时是 0：不是「不知道」，也不编一个数出来。
+	rows, err := f.service.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DeferredCount != 0 {
+		t.Fatalf("List = %+v, want 一行 deferred_count=0", rows)
+	}
+
+	// 循环末尾置数之后，面板那一行读出同一份现数（同一个 Pending 账）。
+	f.pending.Set(map[int64]int{created.ID: 3})
+	rows, err = f.service.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if rows[0].DeferredCount != 3 {
+		t.Errorf("deferred_count = %d, want 3（还有 3 部待入队）", rows[0].DeferredCount)
+	}
+	if rows[0].PendingCount != 0 {
+		t.Errorf("pending_count = %d, want 0（那个数的是等加种的版本，不是待入队的作品）",
+			rows[0].PendingCount)
+	}
+}
+
+// TestPendingIsNilSafe 钉住「没装配现数账」的那条路：接口照样能用，一律读 0。
+func TestPendingIsNilSafe(t *testing.T) {
+	var pending *subscription.Pending
+	pending.Set(map[int64]int{1: 2})
+	if got := pending.Total(); got != 0 {
+		t.Errorf("nil Total = %d, want 0", got)
+	}
+	if got := pending.Of(1); got != 0 {
+		t.Errorf("nil Of = %d, want 0", got)
+	}
+
+	// Set 是整体替换：上一轮的余量不许留到这一轮的账上。
+	real := subscription.NewPending()
+	real.Set(map[int64]int{1: 3, 2: 2})
+	if real.Total() != 5 || real.Of(2) != 2 {
+		t.Errorf("Total/Of = %d/%d, want 5/2", real.Total(), real.Of(2))
+	}
+	real.Set(map[int64]int{1: 1})
+	if got := real.Total(); got != 1 {
+		t.Errorf("Total = %d, want 1（整体替换，不累加）", got)
+	}
+	if got := real.Of(2); got != 0 {
+		t.Errorf("Of(2) = %d, want 0（上一轮的余量已经走完）", got)
 	}
 }
 

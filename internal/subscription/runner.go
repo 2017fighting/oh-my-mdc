@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,25 @@ const GateCheckInterval = 30 * time.Second
 // DefaultLookbackDays 是回看窗口的兜底（与 subscription.lookback_days 的表默认值一致）。
 const DefaultLookbackDays = 30
 
+// DefaultMaxAdds 是每轮限量的兜底（与 app_config.subscription_max_adds 的表默认值一致）。
+const DefaultMaxAdds = 10
+
+// 每轮限量的语义（§6.4「节流与去重」，本票落定）：
+//
+//   - **范围：一轮的总预算**，不是每条订阅各一份。规格的字面是「每轮最多建 N 个任务」，
+//     而这一票要挡的是「一个 15 分钟周期把 qBittorrent、M-Team 搜索配额与上游接口一起打
+//     满」——那个冲击不随订阅条数翻倍，按条给预算等于没限量。
+//   - **口径：数建出来的任务**（新落的版本行），不是「这一轮递进 ingest 的作品」。窗口里
+//     本来就看得到上一轮建过的作品（回看窗口 30 天），它们零写入、零上游调用；要是它们
+//     也吃预算，历史作品会把预算吃光，新作品永远轮不到。更要紧的是「磁力为空不下行、
+//     下轮重查」的那些（§6.1）：它们每轮都会再查一遍，如果也吃预算，排在最老那头的
+//     「没有磁力」的作品会把每一轮的预算吃干净，窗口永远排不空——限量把窗口锁死了。
+//   - **顺序：发行日升序**（同一天按 movie_id），见 sortQueue。
+//   - **余量不落状态**：被留在门外的作品什么都不写，下一轮的窗口原样把它们再取一遍 ——
+//     这就是「余量留到下一轮」的实现（窗口每轮重算，没必要多一张游标表）。配套的硬约束：
+//     一条订阅的窗口里还有余量时**不许清 backfill_from**（见 run 里的 record 调用），
+//     否则下界会跳回水位线 − 回看窗口，被留在门外的老作品当场掉出窗口、永远进不来。
+
 // maxWorkPages 是一次取数的翻页上限：上游「空页即止」，但一个异常的上游
 // （永远返回同一页）不该把一轮拖成无尽循环。
 const maxWorkPages = 200
@@ -43,6 +63,13 @@ const maxWorkPages = 200
 // 只读一页：翻页与「见过下界即停」是订阅循环自己的判断（水位线是它的账）。
 type WorksSource interface {
 	ActressWorks(ctx context.Context, token, id string, page int) ([]appapi.ActressWork, error)
+}
+
+// PendingGauge 是 mdc_subscription_pending 的接缝（真实实现是 metrics.Registry）。
+//
+// 一行方法：一轮末尾写一个数（不是计数器，也不是增量）。订阅循环与指标之间只该有这一个数。
+type PendingGauge interface {
+	SetSubscriptionPending(total int)
 }
 
 // RunnerOptions 装配订阅循环。
@@ -64,6 +91,10 @@ type RunnerOptions struct {
 	Pool *pgxpool.Pool
 	// Loops 记循环健康位；nil 时只跑不记。
 	Loops *loops.Registry
+	// Pending 是「被每轮限量留在门外」的现数（面板「还有 N 部待入队」）；nil 时不算。
+	Pending *Pending
+	// Gauge 记 mdc_subscription_pending（§9）；nil 时不记。
+	Gauge PendingGauge
 	// Logger 空则用 slog.Default()。
 	Logger *slog.Logger
 	// Owner 是 claim 的持有者标识；空则用 hostname-pid。
@@ -80,6 +111,8 @@ type Runner struct {
 	source   WorksSource
 	pool     *pgxpool.Pool
 	loops    *loops.Registry
+	pending  *Pending
+	gauge    PendingGauge
 	logger   *slog.Logger
 	now      func() time.Time
 }
@@ -112,6 +145,8 @@ func NewRunner(opts RunnerOptions) *Runner {
 		source:   opts.Source,
 		pool:     opts.Pool,
 		loops:    opts.Loops,
+		pending:  opts.Pending,
+		gauge:    opts.Gauge,
 		logger:   logger,
 		now:      now,
 	}
@@ -129,6 +164,9 @@ type Result struct {
 	Subscriptions int
 	// Seen 是回看窗口里看到的作品数（含没有磁力的那些——它们也推进水位线）。
 	Seen int
+	// Deferred 是本轮「已经发现、被每轮限量留在门外」的作品数（§6.4/§9）。
+	// 它们什么状态都没落，下一轮的窗口原样再取一遍。
+	Deferred int
 	// Queried 是真正查了磁力候选的作品数。
 	Queried int
 	// Candidates 是新建的版本行数；Duplicates 是已存在（零写入）的候选数。
@@ -186,7 +224,8 @@ func (r *Runner) RunOnce(ctx context.Context) (Result, error) {
 		}
 		r.logger.Debug("订阅循环结束",
 			"subscriptions", result.Subscriptions, "seen", result.Seen,
-			"candidates", result.Candidates, "added", result.Added, "err", err)
+			"candidates", result.Candidates, "deferred", result.Deferred,
+			"added", result.Added, "err", err)
 	} else if r.loops != nil {
 		// 门禁拦下的轮次不算迭代，也不能一直挂着「正在跑」。
 		r.loops.Stop(loops.Subscription)
@@ -220,11 +259,16 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 
 	// 一轮的共用上下文：磁力凭据、加种配置、M-Team 的启停判据都是每轮取一次的东西。
 	round := r.ingest.Round(snapshot, javdbInput.Text("token"), qbittorrent.ConfigFrom(qbtInput))
+	// 每轮限量（§6.4）：这个数是**一轮所有订阅共享**的预算，口径与顺序见 DefaultMaxAdds 上方的注释。
+	budget := snapshot.AppInt("subscription_max_adds", DefaultMaxAdds)
 
 	var result Result
 	var errs []error
 	now := r.now()
 
+	// 先把每条订阅的窗口取完再统一入队：限量是一轮的总预算，排队要看得到所有订阅的作品。
+	scans := make([]windowScan, 0, len(rows))
+	var queue []windowWork
 	for _, sub := range rows {
 		if !sub.Enabled {
 			// 停用只停追新：任务照走完，水位线与回灌下界一概不动（§6.4 生命周期）。
@@ -238,45 +282,100 @@ func (r *Runner) run(ctx context.Context) (Result, error) {
 			errs = append(errs, fmt.Errorf("subscription: 取女优 %s 的作品: %w", sub.Actor.ID, err))
 		}
 
+		result.Seen += len(works)
+		scans = append(scans, windowScan{row: sub, works: works, complete: complete})
 		for _, work := range works {
-			result.Seen++
-			ingested, err := round.Ingest(ctx, ingest.Work{
-				MovieID:        work.MovieID,
-				Number:         work.Number,
-				SubscriptionID: sub.ID,
-			})
-			// 出错时 Ingested 仍然说清走到了哪一步：已经查过的照旧计数。
-			if ingested.Queried {
-				result.Queried++
-			}
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			if ingested.Duplicate {
-				result.Duplicates++
-				continue
-			}
-			if ingested.Inserted {
-				result.Candidates++
-			}
-			if ingested.Fallback {
-				result.Fallbacks++
-			}
+			queue = append(queue, windowWork{row: sub, work: work})
+		}
+	}
+	sortQueue(queue)
+
+	deferred := make(map[int64]int)
+	for _, item := range queue {
+		if result.Candidates >= budget {
+			// 预算用完了：剩下的原样留在窗口里，下一轮接着来（§6.4「余量留到下一轮」）。
+			deferred[item.row.ID]++
+			result.Deferred++
+			continue
 		}
 
-		// 水位线只由「见过」推进；回灌下界只在窗口扫完时清。
-		if err := r.record(ctx, sub, works, complete, now); err != nil {
+		ingested, err := round.Ingest(ctx, ingest.Work{
+			MovieID:        item.work.MovieID,
+			Number:         item.work.Number,
+			SubscriptionID: item.row.ID,
+		})
+		// 出错时 Ingested 仍然说清走到了哪一步：已经查过的照旧计数。
+		if ingested.Queried {
+			result.Queried++
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if ingested.Duplicate {
+			result.Duplicates++
+			continue
+		}
+		if ingested.Inserted {
+			result.Candidates++
+		}
+		if ingested.Fallback {
+			result.Fallbacks++
+		}
+	}
+
+	for _, scan := range scans {
+		// 水位线只由「见过」推进；回灌下界只在**窗口真的走完**时清：
+		// 扫完（complete）且这一条订阅没有被限量留在门外的余量（§6.4）。
+		if err := r.record(ctx, scan.row, scan.works, scan.complete && deferred[scan.row.ID] == 0, now); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
 	// 先落库再加种：到这里本轮所有候选都已落库，接下来统一加种（含上轮遗留的 pending）。
+	// 限量只挡「订阅再往下产、入队」，不挡已建任务的推进（§6.4 验收）。
 	added, addErrs := round.AddPending(ctx)
 	result.Added = added
 	errs = append(errs, addErrs...)
 
+	// 每轮末尾置数（§9）：面板「还有 N 部待入队」与 mdc_subscription_pending 是同一份现数。
+	// 门禁没开、抢锁抢输的轮次不置数（它们不是一轮）。
+	r.pending.Set(deferred)
+	if r.gauge != nil {
+		r.gauge.SetSubscriptionPending(result.Deferred)
+	}
+
 	return result, errors.Join(errs...)
+}
+
+// windowScan 是一条订阅这一轮的取数结果：窗口里的作品 + 窗口扫完了没有。
+type windowScan struct {
+	row      Row
+	works    []appapi.ActressWork
+	complete bool
+}
+
+// windowWork 是一件排队的待办作品：作品 + 它属于哪条订阅（入队时要记下来源）。
+type windowWork struct {
+	row  Row
+	work appapi.ActressWork
+}
+
+// sortQueue 把一轮的待办作品排成入队顺序：**发行日升序**，同一天按 movie_id。
+//
+// 最老的先走，因为下界只会往前挪：水位线只增不减、回灌窗口也在往前扫，所以离下界最近
+// 的就是那些最先掉出窗口的作品。反过来让最新的先走，被限量留在门外的老作品会在余量轮
+// 轮到它之前就滑出窗口——那等于限量把一个本可以拿到的作品默默丢掉了。
+//
+// 同一天的两部按 movie_id：跨订阅时页序与订阅遍历顺序都不该影响谁先走（可重现）。
+func sortQueue(queue []windowWork) {
+	sort.SliceStable(queue, func(i, j int) bool {
+		left, right := queue[i].work, queue[j].work
+		if !left.ReleaseDate.Equal(right.ReleaseDate) {
+			return left.ReleaseDate.Before(right.ReleaseDate)
+		}
+		return left.MovieID < right.MovieID
+	})
 }
 
 // window 取一条订阅在回看窗口里的作品。
@@ -329,7 +428,11 @@ func (r *Runner) window(ctx context.Context, sub Row, token string, now time.Tim
 	return works, false, nil
 }
 
-// record 把这一轮的结果写回订阅：水位线推成「见过的最晚发行日」，扫完清回灌下界。
+// record 把这一轮的结果写回订阅：水位线推成「见过的最晚发行日」，窗口走完才清回灌下界。
+//
+// 「走完」有两个条件（§6.4「节流与去重」）：complete（窗口扫到底，上游没断）**且**
+// 这一条订阅没有被每轮限量留在门外的余量。少一个条件就清下界，下界会跳回
+// 水位线 − 回看窗口，被留在门外的老作品当场掉出窗口、永远进不来（限量就成了丢件）。
 //
 // 一件都没见着不算「没见过就推」——只有窗口真的扫完时才写一次（那时下界已经是
 // 空跑的证明，清掉它）；没扫完就什么都不写，下一轮从同一个地方接着扫。

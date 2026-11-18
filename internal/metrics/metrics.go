@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/2017fighting/oh-my-mdc/internal/loops"
@@ -139,6 +140,10 @@ type Registry struct {
 	startedAt time.Time
 	logger    *slog.Logger
 
+	// pending 是「回看窗口内已发现、被每轮限量留在门外」的待入队数（§6.4/§9），
+	// 由订阅循环每轮末尾置数。它天然是进程内状态：重启归零，下一轮几秒内就会算出真值。
+	pending atomic.Int64
+
 	mu       sync.RWMutex
 	upstream map[counterKey]uint64
 }
@@ -167,6 +172,21 @@ func (r *Registry) RecordUpstream(upstream string, result Result) {
 	r.mu.Lock()
 	r.upstream[counterKey{upstream: upstream, result: result}]++
 	r.mu.Unlock()
+}
+
+// SetSubscriptionPending 记「被每轮限量留在门外」的待入队数（规格 §9）。
+//
+// 订阅循环每轮末尾置数，是**覆盖**不是累加：0 是正常读数（窗口排空了），不是「不知道」。
+// 门禁没开、抢锁抢输的轮次不置数——它们不是一轮，置 0 会把上一轮的真数抹掉。
+// 负数没有含义，一律当 0（宁可少报，也不往指标里写一个不存在的数）。
+func (r *Registry) SetSubscriptionPending(total int) {
+	if r == nil {
+		return
+	}
+	if total < 0 {
+		total = 0
+	}
+	r.pending.Store(int64(total))
 }
 
 // Count 读一条上游计数（面板与测试用；指标本身走文本输出）。
@@ -207,6 +227,7 @@ func (r *Registry) Write(ctx context.Context, w io.Writer) {
 	writeUpstreams(w, r)
 	writeStuck(ctx, w, r.stuck, r.logger)
 	writeIncomplete(ctx, w, r.incomplete, r.logger)
+	writeSubscriptionPending(w, r)
 }
 
 // writeLoops 写两条循环指标：最近一次成功的时间与迭代计数。
@@ -314,6 +335,15 @@ func writeIncomplete(ctx context.Context, w io.Writer, incomplete IncompleteSour
 	fmt.Fprintln(w, "# HELP mdc_task_incomplete 待补齐（关键面缺口且上游重试耗尽）的任务数；抓取时数库里的行。")
 	fmt.Fprintln(w, "# TYPE mdc_task_incomplete gauge")
 	fmt.Fprintf(w, "mdc_task_incomplete %d\n", count)
+}
+
+// writeSubscriptionPending 写订阅循环留在门外的待入队数（#49）。
+//
+// 它不读库：数在订阅循环手里，每轮末尾置进来。因此这一族恒出数（刚启动是 0）。
+func writeSubscriptionPending(w io.Writer, r *Registry) {
+	fmt.Fprintln(w, "# HELP mdc_subscription_pending 回看窗口内已发现、被每轮限量留在门外的待入队数；订阅循环每轮末尾置数。")
+	fmt.Fprintln(w, "# TYPE mdc_subscription_pending gauge")
+	fmt.Fprintf(w, "mdc_subscription_pending %d\n", r.pending.Load())
 }
 
 func knownUpstream(upstream string) bool {

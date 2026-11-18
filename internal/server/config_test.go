@@ -195,6 +195,10 @@ func TestConfigStartsUninitializedWithEverySectionPresent(t *testing.T) {
 	if app["max_attempts"] != float64(3) {
 		t.Errorf("app.max_attempts = %v, want 3", app["max_attempts"])
 	}
+	// 每轮限量（#49）：列是 #47 的迁移建的，读它的是订阅循环，向导最后一步要能改它。
+	if app["subscription_max_adds"] != float64(10) {
+		t.Errorf("app.subscription_max_adds = %v, want 10（迁移里的默认值）", app["subscription_max_adds"])
+	}
 	if app["paused"] != false {
 		t.Errorf("app.paused = %v, want false", app["paused"])
 	}
@@ -384,6 +388,8 @@ func TestPatchValidationErrors(t *testing.T) {
 		{"缺必填", "qbittorrent", `"category": "mdc"`},
 		{"URL 形状", "jellyfin", `"url": "jellyfin.media.svc:8096", "api_key": "k"`},
 		{"整数范围", "app", `"max_attempts": 0`},
+		{"每轮限量下界", "app", `"subscription_max_adds": 0`},
+		{"每轮限量上界", "app", `"subscription_max_adds": 501`},
 		{"时长范围", "app", `"poll_interval": "1s"`},
 		{"时长写法", "app", `"reconcile_interval": " souvent"`},
 	}
@@ -603,13 +609,17 @@ func TestTestEndpointNeedsAConfiguredIntegration(t *testing.T) {
 func TestAppSectionIsSingleRowAndNotDeletable(t *testing.T) {
 	h := newSettingsHandler(t)
 
-	saved := save(t, h, "app", `"poll_interval": "20m", "max_attempts": 5, "paused": true`)
+	saved := save(t, h, "app", `"poll_interval": "20m", "max_attempts": 5, "subscription_max_adds": 500, "paused": true`)
 	data := dataOf(t, saved)
 	if data["poll_interval"] != "20m0s" {
 		t.Errorf("poll_interval = %v, want 20m0s", data["poll_interval"])
 	}
 	if data["max_attempts"] != float64(5) {
 		t.Errorf("max_attempts = %v, want 5", data["max_attempts"])
+	}
+	// 上界 500 是可存的（范围 1..500，超出才 400）。
+	if data["subscription_max_adds"] != float64(500) {
+		t.Errorf("subscription_max_adds = %v, want 500（上界在内）", data["subscription_max_adds"])
 	}
 
 	overview := jsonOf(t, send(t, h, http.MethodGet, "/api/overview", ""))

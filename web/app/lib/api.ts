@@ -138,6 +138,14 @@ export type Subscription = {
   tasks_count: number;
   /** 这批里还有版本在等加种（add_pending）的条数。 */
   pending_count: number;
+  /**
+   * 「还有 N 部待入队」：回看窗口里已发现、被每轮限量留在门外的作品数（§6.4）。
+   *
+   * 与 `pending_count` 不是一回事：那个数已入队的版本，这个数还没入队的作品。
+   * 它由订阅循环每轮末尾置数（不落库），所以重启后第一个轮次之前读到的 0 是
+   * 「还没跑过」——两种情况面板都不显示这一句。
+   */
+  deferred_count: number;
 };
 
 export type SubscriptionList = {

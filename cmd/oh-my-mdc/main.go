@@ -204,11 +204,15 @@ func run(logger *slog.Logger) error {
 
 				// 女优订阅（#47，GLOSSARY「女优订阅」）：第二个待办来源。面板的四个动作走
 				// Service，「产出一批待办作品」走第四个循环——两条订阅共用同一段 ingest。
+				// subscriptionPending 是「还有 N 部待入队」的现数（#49）：循环每轮末尾写，
+				// 面板那一行与 mdc_subscription_pending 读同一份，所以两者共用这一个账。
 				subscriptionStore := subscription.NewStore(database.Pool())
+				subscriptionPending := subscription.NewPending()
 				subscriptionService = subscription.NewService(subscription.ServiceOptions{
 					Store:    subscriptionStore,
 					Settings: settingsStore,
 					Source:   javdbIntegration,
+					Pending:  subscriptionPending,
 					Logger:   logger,
 				})
 
@@ -280,6 +284,8 @@ func run(logger *slog.Logger) error {
 					Material: materials,
 					Pool:     database.Pool(),
 					Loops:    loopsRegistry,
+					Pending:  subscriptionPending,
+					Gauge:    metricsRegistry,
 					Logger:   logger,
 				})
 				subscriptionDone := make(chan struct{})

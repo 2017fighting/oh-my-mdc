@@ -173,9 +173,12 @@ var sections = []Section{
 			{Name: "sidefx_interval", Type: TypeDuration, Min: 10, Max: 3600},
 			// subscription_interval 是女优订阅循环的独立节拍（#47 / 规格 §6.2）：一位女优的
 			// 接口挂掉不该拖死清单轮询，所以两条循环各有各的间隔。
-			// app_config.subscription_max_adds 是 #49 的每轮限量，本票只建列不读，故不列在这里
-			// —— 一个改了不生效的旋钮比没有旋钮更糟。
+			// subscription_max_adds 是同一循环的**每轮限量**（#49 / 规格 §6.4「节流与去重」）：
+			// 一轮最多建几部，余量留到下一轮。列是 00015 建的，读它的是订阅循环。
+			// 上界 500 而不是无界：这个数直接乘进上游请求量（一个 15 分钟周期里 qBittorrent、
+			// M-Team 搜索与 JavDB 磁力的总量），不是可以随手拉大的并发旋钮。
 			{Name: "subscription_interval", Type: TypeDuration, Min: 30, Max: 24 * 3600},
+			{Name: "subscription_max_adds", Type: TypeInt, Min: 1, Max: 500},
 			{Name: "max_attempts", Type: TypeInt, Min: 1, Max: 100},
 			{Name: "paused", Type: TypeBool},
 		},
